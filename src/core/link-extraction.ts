@@ -17,7 +17,7 @@ import { ensureWellFormed } from './text-safe.ts';
 import { stripCodeBlocks } from './markdown-code.ts';
 import { parseInlineCitationTimelineEntries } from './timeline-citations.ts';
 import { slugifyPath, slugifySegment } from './sync.ts';
-import { SLUG_WORD_CHARS } from './cjk.ts';
+import { SLUG_WORD_CHARS, SLUG_VARIATION_SELECTORS_RE } from './cjk.ts';
 import { foldNonDecomposingLatin } from './latin-fold.ts';
 // #3190: pack-aware link typing. link-inference imports only manifest-v1
 // (zod) + redos-guard (node:vm) — no cycle back into this module.
@@ -49,6 +49,8 @@ export { parseInlineCitationTimelineEntries, type InlineCitationTimelineCandidat
  * OR updated_at > links_extracted_at`. It is an ISO-8601 string (NOT a number) —
  * the column is TIMESTAMPTZ and the predicate binds it as `::timestamptz`.
  */
+// 2026-09-09: #4985 — normalizeBasename strips Unicode variation selectors (twin
+// of slugifySegment), so emoji+VS16 wikilinks re-resolve to the clean slug.
 // 2026-09-06: #4873 — pass 1b accepts a leading `./` (and, same wave, the
 // `../` / `./../` sibling forms + the folded bare-wikilink grammar), so pages
 // whose links were pruned by the sweep reconcile re-extract on `extract --stale`.
@@ -66,7 +68,7 @@ export { parseInlineCitationTimelineEntries, type InlineCitationTimelineCandidat
 // PRE-wave code after this date reads as fresh and won't re-extract until
 // the page is next edited; no fixed watermark can cover code that keeps
 // running past it.
-export const LINK_EXTRACTOR_VERSION_TS = '2026-09-06T00:00:00Z';
+export const LINK_EXTRACTOR_VERSION_TS = '2026-09-09T00:00:00Z';
 
 // ─── Entity references ──────────────────────────────────────────
 
@@ -1128,7 +1130,8 @@ export function normalizeBasename(s: string): string {
   // the ASCII page slug does not, and the lookup misses in silence:
   // `[[\u0110\u1ee9c Example]]` keyed `\u0111uc-example` and never found `people/duc-example`.
   const folded = foldNonDecomposingLatin(
-    s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').normalize('NFC').toLowerCase(),
+    s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').normalize('NFC')
+      .replace(SLUG_VARIATION_SELECTORS_RE, '').toLowerCase(), // twin of slugifySegment's strip (#4985)
   );
   return folded.replace(BASENAME_KEEP_RE, '').trim().replace(/\s+/g, '-');
 }
