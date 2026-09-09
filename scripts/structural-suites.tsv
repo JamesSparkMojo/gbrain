@@ -98,6 +98,7 @@ test/destructive-guard.test.ts	purgeExpiredSources — clone cleanup containment
 test/detached-stderr.test.ts	jobs.ts detach branch (source pin, #4418)	2	readFileSync
 test/docs-bootstrap-persistence-table.test.ts	#4986 bootstrap.md scopes the Stop-push knobs and lists every push path	2	readFileSync
 test/docs-mcp-deploy.test.ts	DEPLOY.md documents dual-mode /mcp auth (#4893)	1	readFileSync
+test/docs-mcp-deploy.test.ts	DEPLOY.md documents the owner magic-link flow (#5007)	5	readFileSync
 test/docs-mcp-deploy.test.ts	DEPLOY.md documents the tailnet/LAN-only serve --http shape (#4500)	3	readFileSync
 test/docs-timeline-extraction-guide.test.ts	#4987 timeline extraction docs describe the real trigger	2	readFileSync
 test/doctor-atom-provenance-drift.test.ts	computeAtomProvenanceDriftCheck	18	doctor-source-helper

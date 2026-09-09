@@ -43,3 +43,46 @@ describe('DEPLOY.md documents dual-mode /mcp auth (#4893)', () => {
     expect(troubleshooting).toContain('whoami');
   });
 });
+
+describe('DEPLOY.md documents the owner magic-link flow (#5007)', () => {
+  // The admin login page tells owners to ask their agent for a login link; the
+  // mint endpoint already exists, so the only fix is documenting it where the
+  // agent looks (DEPLOY.md + `gbrain auth --help`). Source reads below pin the
+  // help text and anchor the documented route to the real registration.
+  // test-reads-source-ok: AUTH_USAGE is a help-text template literal; pinning its spelling IS the contract
+  const auth = readFileSync(join(ROOT, 'src/commands/auth.ts'), 'utf8');
+  // test-reads-source-ok: anchors the documented route to the existing app.post registration
+  const server = readFileSync(join(ROOT, 'src/commands/serve-http.ts'), 'utf8');
+
+  test('documents the owner request and the existing mint endpoint', () => {
+    expect(deploy).toContain('Give me the GBrain admin login link');
+    expect(deploy).toContain('POST /admin/api/issue-magic-link');
+    expect(server).toContain("app.post('/admin/api/issue-magic-link'");
+  });
+
+  test('auth help points at the owner login flow without inventing a CLI command', () => {
+    expect(auth).toContain('Admin dashboard login (running HTTP server):');
+    expect(auth).toContain('POST /admin/api/issue-magic-link');
+    expect(auth).toContain('See docs/mcp/DEPLOY.md.');
+  });
+
+  test('warns against consuming the single-use nonce during verification', () => {
+    expect(deploy).toContain('Do not GET or fetch the generated login URL');
+    expect(auth).toContain('do not GET the generated link');
+  });
+
+  test('preserves private delivery and protected-bootstrap requirements', () => {
+    expect(deploy).toContain('GBRAIN_ADMIN_BOOTSTRAP_TOKEN');
+    expect(deploy).toContain('only to the requesting owner in');
+    expect(deploy).toContain('Never expose its value in chat, logs, shell arguments,');
+    expect(deploy).toContain('An MCP client bearer token or client secret is not the');
+  });
+
+  test('distinguishes login from client creation and states lifecycle limits', () => {
+    expect(deploy).toContain('does not create, reveal, or rotate');
+    expect(deploy).toContain('expires after five minutes');
+    expect(deploy).toContain('cannot be replayed');
+    expect(deploy).toContain('invalidated by a server restart');
+    expect(deploy).toContain("server's configured `--public-url`");
+  });
+});
