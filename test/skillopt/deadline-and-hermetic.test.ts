@@ -136,6 +136,7 @@ describe('#4741 — hermetic-config docs make no platform-survives-logout claim'
     expect(doc).toMatch(/logs the child out/);
   });
   test('the provider doc comment does not promise it either', () => {
+    // test-reads-source-ok: pins a doc-comment contract (#4741) — comment text has no runtime surface to assert.
     const src = readFileSync(join(root, 'src/core/ai/providers/claude-cli-language-model.ts'), 'utf8');
     expect(src).not.toMatch(/keychain and survives/);
   });
