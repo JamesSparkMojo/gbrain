@@ -132,8 +132,9 @@ Three named modes. Cost depends on BOTH the mode AND your downstream model
 
 The "cost" isn't gbrain itself — it's the downstream agent's input cost
 reading the retrieved chunks back into its context window. gbrain's own
-overhead is rounding-error (semantic cache is free; tokenmax adds ~$1.50
-per 1K queries for the Haiku expansion call).
+overhead is rounding-error (semantic cache is free; gbrain query adds ~$1.50
+per 1K queries for the Haiku expansion call in every mode — --no-expand skips
+it; gbrain search never expands).
 
 Per-query cost @ 10K queries/mo (full search payload, no cache savings):
 
