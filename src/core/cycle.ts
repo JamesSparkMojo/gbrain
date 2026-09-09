@@ -2101,9 +2101,10 @@ export async function runCycle(
         }) as Promise<T>;
       };
   let lockStolenAbort = false;
-  // Raced variant for the 5 long phases (synthesize / extract_atoms / patterns
-  // / synthesize_concepts / consolidate): even where their opts now carry the
-  // signal (#4077 synthesize/patterns, consolidate), a steal must be able to
+  // Raced variant for the long phases (synthesize / extract_atoms / patterns
+  // / synthesize_concepts / recompute_emotional_weight / consolidate): even
+  // where their opts now carry the signal (#4077 synthesize/patterns,
+  // consolidate, #4797 recompute), a steal must be able to
   // stop the WAIT while the phase unwinds cooperatively; extract_atoms and
   // synthesize_concepts still can't carry one (W6). Steal-free cycles behave
   // byte-identically to timePhase.
@@ -2562,10 +2563,16 @@ export async function runCycle(
                 ...(synthesizeWrittenSlugs ?? []),
               ]))
             : undefined;
-        const { result, duration_ms } = await timePhase(() =>
+        // #4797: raced + signal + lock-refresh + progress, like consolidate —
+        // the full-brain write is sliced inside the phase; these hooks fire
+        // between slices so a long first run stays observable and abortable.
+        const { result, duration_ms } = await racedTimePhase(() =>
           runPhaseRecomputeEmotionalWeight(engine, {
             dryRun,
             affectedSlugs: incremental,
+            signal: cycleSignal,
+            yieldDuringPhase: buildYieldDuringPhase(lock, opts.yieldDuringPhase, onStolen),
+            onProgress: () => progress.tick(),
           }),
         );
         result.duration_ms = duration_ms;
