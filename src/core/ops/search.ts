@@ -24,6 +24,7 @@ import type { HybridSearchMeta } from '../types.ts';
 import { bumpLastRetrievedAt } from '../last-retrieved.ts';
 import { applySnippetCap, DEFAULT_AGENT_SNIPPET_CHARS } from '../search/snippet-cap.ts';
 import { resolveExcludePrivatePages } from '../search/private-visibility.ts';
+import { safeChunksFilter } from '../search/safe-chunks.ts';
 import { QUERY_DESCRIPTION, SEARCH_DESCRIPTION } from '../operations-descriptions.ts';
 import { OperationError } from './contract.ts';
 import type { Operation, OperationContext } from './contract.ts';
@@ -56,6 +57,36 @@ async function resolveEffectiveLimit(ctx: OperationContext, p: Record<string, un
 
 // --- Search ---
 
+type SourceScope = { sourceId?: string; sourceIds?: string[] };
+
+/**
+ * #5004: does the caller's read scope still hold markdown pages below the
+ * safe-chunk index version? Every remote chunk read withholds them (the
+ * `requireSafeChunks` predicate in each engine leg) until
+ * `gbrain reindex --markdown` seals them, so an empty remote result on such
+ * a brain is a policy gap, not a clean miss. Same scope precedence as
+ * sourceScopeOpts (federated array > scalar > brain-wide); indexed LIMIT 1
+ * probe (pages_chunker_version_idx), portable SQL on both engines, fail-open.
+ */
+async function hasUnsealedPagesInScope(ctx: OperationContext, scope: SourceScope): Promise<boolean> {
+  const [sourceClause, params] = scope.sourceIds?.length
+    ? ['AND p.source_id = ANY($1::text[])', [scope.sourceIds]]
+    : scope.sourceId
+      ? ['AND p.source_id = $1', [scope.sourceId]]
+      : ['', []];
+  try {
+    const rows = await ctx.engine.executeRaw(
+      `SELECT 1 FROM pages p JOIN sources s ON s.id = p.source_id
+       WHERE p.page_kind = 'markdown' AND p.deleted_at IS NULL AND NOT s.archived
+         AND NOT (${safeChunksFilter('p')}) ${sourceClause} LIMIT 1`,
+      params,
+    );
+    return rows.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * WP2/D3 + E1: the `retrieval` response-meta payload for the search/query
  * ops. Carries the already-computed HybridSearchMeta signal (vector arm,
@@ -63,18 +94,30 @@ async function resolveEffectiveLimit(ctx: OperationContext, p: Record<string, un
  * the concept-shaped hint, so an MCP caller can distinguish "clean miss"
  * from "the pipeline degraded" without a second call. The `hint` is
  * non-contractual prose (agents read it; nothing should parse it).
+ *
+ * #5004: this is the ONE producer of the channel (keyword-only path included,
+ * which never runs hybridSearch), so the safe-chunk fence is disclosed here:
+ * an empty result for a remote caller whose scope still holds unsealed pages
+ * gets `safe_index_pending` appended. The withholding itself is unchanged.
  */
-function buildRetrievalResponseMeta(
+async function buildRetrievalResponseMeta(
+  ctx: OperationContext,
+  scope: SourceScope,
   queryText: string,
   results: unknown[],
   meta: HybridSearchMeta | null,
   opts: { conceptHint?: boolean } = {},
-): Record<string, unknown> {
-  const m = meta as (HybridSearchMeta & { degraded?: unknown; retrieved_count?: number }) | null;
+): Promise<Record<string, unknown>> {
+  const m = meta as (HybridSearchMeta & { degraded?: unknown[]; retrieved_count?: number }) | null;
   const hint = opts.conceptHint && looksConceptShaped(queryText)
     ? "concept-shaped question — the 'query' tool adds multi-query expansion and recovers " +
       'synonym-phrased matches this keyword-leaning search can miss.'
     : undefined;
+  const safeIndexPending = results.length === 0 && ctx.remote !== false
+    && await hasUnsealedPagesInScope(ctx, scope);
+  const degraded = safeIndexPending
+    ? [...(m?.degraded ?? []), { stage: 'safe_index_pending' }]
+    : m?.degraded;
   return {
     returned_count: results.length,
     retrieved_count: m?.retrieved_count ?? results.length,
@@ -83,8 +126,8 @@ function buildRetrievalResponseMeta(
       expansion_applied: m.expansion_applied,
       ...(m.cache ? { cache: m.cache.status } : {}),
       ...(m.token_budget ? { token_budget: m.token_budget } : {}),
-      ...(m.degraded !== undefined ? { degraded: m.degraded } : {}),
     } : {}),
+    ...(degraded !== undefined ? { degraded } : {}),
     ...(hint ? { hint } : {}),
   };
 }
@@ -241,7 +284,7 @@ const search: Operation = {
       await stampUnverifiedExtractions(ctx.engine, results, { ...scope, excludePrivate });
       bumpLastRetrievedAt(ctx.engine, results.map((r) => r.page_id));
       maybeCaptureSearch(ctx, queryText, results, Date.now() - startedAt, false);
-      ctx.emitResponseMeta?.('retrieval', buildRetrievalResponseMeta(queryText, results, null, { conceptHint: true }));
+      ctx.emitResponseMeta?.('retrieval', await buildRetrievalResponseMeta(ctx, scope, queryText, results, null, { conceptHint: true }));
       // #3800: cap AFTER capture/meta so eval + cache see the real payload.
       return applySnippetCap(results, snippetCap);
     }
@@ -268,7 +311,7 @@ const search: Operation = {
     const latency_ms = Date.now() - startedAt;
     bumpLastRetrievedAt(ctx.engine, results.map((r) => r.page_id));
     maybeCaptureSearch(ctx, queryText, results, latency_ms, true, capturedMeta);
-    ctx.emitResponseMeta?.('retrieval', buildRetrievalResponseMeta(queryText, results, capturedMeta, { conceptHint: true }));
+    ctx.emitResponseMeta?.('retrieval', await buildRetrievalResponseMeta(ctx, scope, queryText, results, capturedMeta, { conceptHint: true }));
     // #3800: cap AFTER capture/meta so eval + cache see the real payload.
     return applySnippetCap(results, snippetCap);
   },
@@ -694,7 +737,7 @@ const query: Operation = {
     // WP2/D3: query never nudges toward itself — no concept hint here.
     // #1663: the CRAG grade rides the same retrieval meta channel.
     ctx.emitResponseMeta?.('retrieval', {
-      ...buildRetrievalResponseMeta(queryText, results, capturedMeta),
+      ...(await buildRetrievalResponseMeta(ctx, querySourceScope, queryText, results, capturedMeta)),
       crag,
     });
     // #3800: cap AFTER capture/meta/CRAG so every internal consumer graded

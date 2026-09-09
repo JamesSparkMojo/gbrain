@@ -1879,6 +1879,11 @@ export interface EvalCaptureFailure {
  *                        otherwise a transitional relaxed-carried row would
  *                        shadow the recovered pipeline for the full TTL
  *                        under the same knobs hash (2026-09 red-team).
+ *   safe_index_pending — a remote/untrusted read returned nothing while its
+ *                        scope still holds markdown pages below the safe-chunk
+ *                        index version (withheld from remote chunk retrieval
+ *                        until `gbrain reindex --markdown` seals them); stamped
+ *                        by the search/query ops' retrieval meta (#5004)
  */
 export const DEGRADED_STAGES = [
   'embed_unavailable',
@@ -1894,6 +1899,7 @@ export const DEGRADED_STAGES = [
   'reranker_skipped',
   'rerank_passthrough',
   'keyword_relaxed_carried',
+  'safe_index_pending',
 ] as const;
 export type DegradedStage = (typeof DEGRADED_STAGES)[number];
 
