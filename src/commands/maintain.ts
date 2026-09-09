@@ -95,7 +95,6 @@ async function runStaleExtraction(
   const result = await extractStaleFromDB(engine, {
     dryRun: false,
     jsonMode: false,
-    includeFrontmatter: false,
     catchUp: false,
   });
 

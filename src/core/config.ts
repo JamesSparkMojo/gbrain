@@ -246,14 +246,13 @@ export interface GBrainConfig {
       max_usd_per_day?: number;
     };
     /**
-     * v0.42 — keep frontmatter links fresh on the incremental cycle. The cycle's
-     * extract phase re-extracts only the slugs a sync changed, but `extractForSlugs`
-     * extracts BODY links only — frontmatter (`sources:`/`related:` etc.) link edges
-     * silently drift stale when a page's YAML is edited externally and synced in.
-     * Set true to also extract frontmatter links per changed page each cycle, keeping
-     * externally-edited YAML edges fresh without a full rescan. Default false
-     * (preserves current behavior). Read via the file/env/DB plane in the cycle's
-     * extract dispatch. Disable/enable with
+     * v0.42 — extract frontmatter (`sources:`/`related:` etc.) link edges too, not
+     * just body links, on every extraction path: the incremental cycle, sync's
+     * inline extract, the GitHub/Google source inline extracts, the extract_stale
+     * minion, `gbrain maintain`, and a flagless stale extract sweep
+     * (src/core/extract-frontmatter.ts resolves it once for all of them).
+     * Keeps externally-edited YAML edges fresh without a full rescan. Default
+     * false (body links only). Read via the file/DB plane, file wins. Enable with
      * `gbrain config set autopilot.incremental_extract_include_frontmatter <bool>`.
      */
     incremental_extract_include_frontmatter?: boolean;

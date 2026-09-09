@@ -2434,7 +2434,6 @@ export async function registerBuiltinHandlers(
       const r = await extractStaleFromDB(engine, {
         dryRun: !!job.data.dryRun,
         jsonMode: false,
-        includeFrontmatter: false,
         sourceIdFilter,
         catchUp: false,
       });

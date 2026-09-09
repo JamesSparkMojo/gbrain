@@ -54,6 +54,7 @@ import {
 } from '../core/link-extraction.ts';
 // #3190: pack-aware link typing on every extract surface (db/stale/fs).
 import { loadActivePackForLocalEngine } from '../core/schema-pack/best-effort.ts';
+import { resolveIncludeFrontmatter } from '../core/extract-frontmatter.ts';
 import { inferLinkTypeFromPack } from '../core/schema-pack/link-inference.ts';
 export { extractTimelineFromContent, type ExtractedTimelineEntry } from '../core/timeline-extract.ts';
 import { extractTimelineFromContent, type ExtractedTimelineEntry } from '../core/timeline-extract.ts';
@@ -955,7 +956,9 @@ export async function runExtract(engine: BrainEngine, args: string[]) {
     await extractStaleFromDB(engine, {
       dryRun: args.includes('--dry-run'),
       jsonMode: args.includes('--json'),
-      includeFrontmatter: args.includes('--include-frontmatter'),
+      // Flag present → true; absent → the configured knob, so the stale sweep
+      // sync hints at never stamps pages fresh without their frontmatter edges.
+      includeFrontmatter: args.includes('--include-frontmatter') || undefined,
       sourceIdFilter: staleSourceId,
       catchUp: args.includes('--catch-up'),
     });
@@ -1666,7 +1669,7 @@ export async function extractLinksForSlugs(
   engine: BrainEngine,
   repoPath: string,
   slugs: string[],
-  opts?: { sourceId?: string },
+  opts?: { sourceId?: string; includeFrontmatter?: boolean },
 ): Promise<ExtractForSlugsResult> {
   const allFiles = walkMarkdownFiles(repoPath);
   // Resolve each requested slug to its REAL path (see buildSlugPathIndex).
@@ -1687,6 +1690,11 @@ export async function extractLinksForSlugs(
   const globalBasename = await isGlobalBasenameEnabled(engine);
   // #3190: pack-aware typing on the sync inline hook too.
   const pack = (await loadActivePackForLocalEngine(engine))?.manifest ?? null;
+  // #4999: resolved HERE, like isGlobalBasenameEnabled above, so every caller
+  // (sync, GitHub/Google source inline extracts) honours the configured
+  // frontmatter knob without per-caller threading — an unattended sync used to
+  // skip `related:` edges and then stamp the page fresh, defeating the knob.
+  const includeFrontmatter = opts?.includeFrontmatter ?? await resolveIncludeFrontmatter(engine);
   let created = 0;
   // Only a slug whose file was found AND read counts as processed. The
   // caller stamps the watermark for these and no others, so a silent skip
@@ -1699,7 +1707,7 @@ export async function extractLinksForSlugs(
     try {
       const content = readFileSync(filePath, 'utf-8');
       processed.push(slug);
-      for (const link of await extractLinksFromFile(content, relPath, allSlugs, { globalBasename, pack })) {
+      for (const link of await extractLinksFromFile(content, relPath, allSlugs, { globalBasename, includeFrontmatter, pack })) {
         try { await engine.addLink(link.from_slug, link.to_slug, link.context, link.link_type, link.link_source, undefined, undefined, linkOpts); created++; } catch { /* skip */ } // gbrain-allow-direct-insert: gbrain extract single-row fallback when batch path declines a row
       }
     } catch { /* skip: unreadable — not processed, stays stale */ }
@@ -2122,7 +2130,8 @@ export async function extractStaleFromDB(
     jsonMode: boolean;
     /** Embedded callers (the cycle) own the report: emit nothing on stdout. */
     quiet?: boolean;
-    includeFrontmatter: boolean;
+    /** Unset → the configured knob (resolveIncludeFrontmatter); explicit wins. */
+    includeFrontmatter?: boolean;
     sourceIdFilter?: string;
     catchUp: boolean;
     /**
@@ -2135,7 +2144,8 @@ export async function extractStaleFromDB(
     timeBudgetMs?: number;
   },
 ): Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number }> {
-  const { dryRun, jsonMode, includeFrontmatter, sourceIdFilter, catchUp } = opts;
+  const { dryRun, jsonMode, sourceIdFilter, catchUp } = opts;
+  const includeFrontmatter = opts.includeFrontmatter ?? await resolveIncludeFrontmatter(engine);
   const log = opts.quiet ? (..._args: unknown[]) => {} : console.log;
   const timeBudgetMs = opts.timeBudgetMs ?? STALE_TIME_BUDGET_MS;
   const versionTs = LINK_EXTRACTOR_VERSION_TS;
