@@ -1673,6 +1673,18 @@ export async function buildChecks(
     // Best-effort. A broken sources table should not stop doctor.
   }
 
+  // 3a-ter. fts_reindex_incomplete (#4795). An interrupted
+  // `reindex-search-vector` leaves the trigger language flipped with rows
+  // still un-backfilled; the command's marker row stays set until it
+  // completes. Logic lives in doctor/checks/fts-reindex.ts (module-dir rule).
+  if (engine !== null) try {
+    const { ftsReindexIncompleteCheck } = await import('./doctor/checks/fts-reindex.ts');
+    const ftsCheck = await ftsReindexIncompleteCheck(engine!);
+    if (ftsCheck) checks.push(ftsCheck);
+  } catch {
+    // Best-effort. A missing config table should not stop doctor.
+  }
+
   // 3b-multi-source. Multi-source drift (v0.31.8 — D8 + D17 + OV12 + OV13).
   // Pre-v0.30.3 putPage misrouted multi-source writes to (default, slug).
   // For each non-default source with local_path set, walk the FS and surface

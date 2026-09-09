@@ -73,6 +73,9 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'cycle_freshness',
   'dangling_aliases',
   'effective_date_health',
+  // #4795 — reindex-search-vector marker still set: keyword index split
+  // across two tokenizers until the resumed run finishes.
+  'fts_reindex_incomplete',
   'embed_staleness',
   'embedding_column_registry',
   'embedding_env_override',
