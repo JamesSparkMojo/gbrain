@@ -32,3 +32,14 @@ describe('DEPLOY.md documents the tailnet/LAN-only serve --http shape (#4500)', 
     expect(alternatives).toContain('tailscale funnel');
   });
 });
+
+describe('DEPLOY.md documents dual-mode /mcp auth (#4893)', () => {
+  // The anonymous 401 + resource_metadata challenge is spec discovery, not
+  // proof the configured bearer failed; client status probes that omit the
+  // header report needsAuth while authenticated tool calls succeed.
+  test('troubleshooting covers "needsAuth while tool calls succeed"', () => {
+    const troubleshooting = deploy.slice(deploy.indexOf('## Troubleshooting'));
+    expect(troubleshooting).toContain('needsAuth');
+    expect(troubleshooting).toContain('whoami');
+  });
+});

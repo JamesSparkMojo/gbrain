@@ -227,6 +227,18 @@ resource_metadata="<that URL>"`, so an MCP client pointed at
 `https://your-brain.ngrok.app/mcp` finds the token endpoint from a fresh
 connection without any pasted URLs.
 
+**Dual-mode auth on `/mcp`.** The same route verifies OAuth 2.1 access
+tokens and `gbrain auth create` bearers (OAuth first, then the
+`access_tokens` fallback). The 401 + `resource_metadata` challenge is emitted
+by the MCP SDK middleware for ANY request lacking an `Authorization` header
+(RFC 9728 / MCP auth spec §5.1 discovery) and says nothing about whether a
+configured token works. A client status probe that omits the header will
+therefore report `needsAuth` / `authentication_required` even while the
+configured bearer succeeds. Judge auth from `whoami`
+(`transport: legacy|oauth`) or `gbrain auth test <url> --token <t>`; treat a
+client's needsAuth flag as advisory unless the authenticated call itself
+returns 401 / `invalid_token`.
+
 #### Tailnet / LAN-only (no public tunnel)
 
 Two shapes work without exposing anything to the internet. In both, clients
@@ -434,6 +446,14 @@ Include the Authorization header: `Authorization: Bearer YOUR_TOKEN`
 
 **"invalid_token" error**
 Run `gbrain auth list` to see active tokens.
+
+**Client status shows needsAuth / authentication_required but tool calls succeed**
+The client probed `/mcp` without an `Authorization` header and read the
+spec-mandated discovery 401 as a failed login. Both OAuth tokens and legacy
+bearers are accepted on `/mcp`; confirm with `whoami` (`transport: legacy`)
+or `gbrain auth test <url> --token <t>` and only re-authenticate if THAT
+call returns 401. See
+[Dual-mode auth on /mcp](#3-expose-the-server).
 
 **"service_unavailable" error**
 Database connection failed. Check your Supabase dashboard for outages.
