@@ -214,3 +214,26 @@ describe('strategy precedence', () => {
     expect(await slugsFor('prec-bogus')).toEqual(['docs/x']);
   }, 120_000);
 });
+
+describe('un-syncable sweep is reported (#4786)', () => {
+  test('a run whose only effect is soft-deleting code pages reports deleted=N and status synced, never up_to_date', async () => {
+    await ensureSetup();
+    const { performSync } = await import('../src/commands/sync.ts');
+    const r = mkMixedRepo();
+    await addSource('sweep-count', 'auto', r);
+    await performSync(engine!, { repoPath: r, ...OPTS, sourceId: 'sweep-count' });
+    expect(await slugsFor('sweep-count')).toEqual(['docs/x', 'lib-x-ts']);
+
+    // Edit ONLY the code file, then sync under a narrower strategy: the page
+    // is un-syncable now, so the cleanup loop soft-deletes it. That sweep is
+    // the run's only effect and must be what the result reports.
+    writeFileSync(join(r, 'lib/x.ts'), 'export const x = 2;\n');
+    execSync('git add -A && git commit -qm edit', { cwd: r, stdio: 'pipe' });
+    const res = await performSync(engine!, {
+      repoPath: r, ...OPTS, sourceId: 'sweep-count', strategy: 'markdown',
+    });
+    expect(await slugsFor('sweep-count')).toEqual(['docs/x']);
+    expect(res.deleted).toBe(1);
+    expect(res.status).toBe('synced');
+  }, 120_000);
+});

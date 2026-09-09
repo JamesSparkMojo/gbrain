@@ -2250,6 +2250,9 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   // unsyncable cleanup in source A doesn't accidentally sweep same-slug
   // pages in sources B/C/D.
   const pageOpts = opts.sourceId ? { sourceId: opts.sourceId } : undefined;
+  // #4786: pages this loop retires count as `deleted` in the result (only rows
+  // that actually transitioned), so a sweep-only run never reports up_to_date.
+  let swept = 0;
   for (const path of unsyncableModified) {
     // v0.41.13 #1433: never delete on metafile classification.
     // #2404 hardening: same for 'pruned-dir' — a page under a pruned
@@ -2282,7 +2285,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
           // Scope falls back to DEFAULT_SOURCE_ID to preserve deletePage's
           // old 'default' fallback; softDeletePages requires an explicit
           // sourceId. The purge phase owns the eventual hard delete.
-          await engine.softDeletePages([slug], { sourceId: opts.sourceId ?? DEFAULT_SOURCE_ID });
+          swept += (await engine.softDeletePages([slug], { sourceId: opts.sourceId ?? DEFAULT_SOURCE_ID })).length;
           slog(`  Soft-deleted un-syncable page (recoverable 72h): ${slug}`);
         }
       }
@@ -2334,10 +2337,10 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     // sweep orphaned `<rename:…>` sentinels here too.
     await sweepOrphanedRenameSentinels(engine, opts.sourceId ?? DEFAULT_SOURCE_ID);
     return {
-      status: 'up_to_date',
+      status: swept > 0 ? 'synced' : 'up_to_date',
       fromCommit: lastCommit,
       toCommit: pin,
-      added: 0, modified: 0, deleted: 0, renamed: 0,
+      added: 0, modified: 0, deleted: swept, renamed: 0,
       chunksCreated: 0,
       embedded: 0,
       pagesAffected: [],
@@ -2488,7 +2491,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       chunksCreated,
       added: filtered.added.length,
       modified: filtered.modified.length,
-      deleted: filtered.deleted.length,
+      deleted: filtered.deleted.length + swept,
       renamed: filtered.renamed.length,
       reason: checkpointDead ? 'checkpoint_unavailable' : reason,
       bankedFiles,
@@ -3720,7 +3723,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       toCommit: pin,
       added: filtered.added.length,
       modified: filtered.modified.length,
-      deleted: filtered.deleted.length,
+      deleted: filtered.deleted.length + swept,
       renamed: filtered.renamed.length,
       chunksCreated,
       embedded: 0,
@@ -3972,7 +3975,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     toCommit: pin,
     added: filtered.added.length,
     modified: filtered.modified.length,
-    deleted: filtered.deleted.length,
+    deleted: filtered.deleted.length + swept,
     renamed: filtered.renamed.length,
     chunksCreated,
     embedded,
