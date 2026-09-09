@@ -2012,13 +2012,21 @@ export class PGLiteEngine implements BrainEngine {
     sourceId: string,
   ): Promise<{ migrated: number }> {
     // Parity with PostgresEngine.migrateFactsToCanonical. UPDATE preserves
-    // every column except entity_slug + source_markdown_slug. Active rows
+    // every column except entity_slug + source_markdown_slug + row_num,
+    // which is offset past canonical's current MAX(row_num) (#4558; NULL
+    // stays NULL, expired rows count — see the Postgres twin). Active rows
     // only (expired_at IS NULL) so we don't disturb the supersession audit
     // trail.
     const { rows } = await this.db.query(
       `UPDATE facts
          SET entity_slug = $1,
-             source_markdown_slug = $1
+             source_markdown_slug = $1,
+             row_num = facts.row_num + COALESCE((
+               SELECT MAX(f2.row_num) FROM facts f2
+               WHERE f2.source_id = $2
+                 AND f2.source_markdown_slug = $1
+                 AND f2.row_num IS NOT NULL
+             ), 0)
        WHERE source_id = $2
          AND source_markdown_slug = $3
          AND expired_at IS NULL

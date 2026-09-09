@@ -2412,11 +2412,11 @@ export interface BrainEngine {
   /**
    * v0.35.5 — lossless DB-side migration of fact rows from one slug to
    * another within a single source. UPDATEs `entity_slug` and
-   * `source_markdown_slug` on every active fact row whose
-   * `source_markdown_slug` matches the phantom slug. Every other column
-   * (embedding, valid_from, valid_until, kind, notability, confidence,
-   * source_session, status, etc.) is preserved verbatim — codex #3 fix
-   * for the writeFactsToFence lossy-migration trap.
+   * `source_markdown_slug` on every active fact row keyed on the phantom
+   * slug, and offsets `row_num` past the canonical page's current
+   * MAX(row_num) — all rows incl. expired, since partial idx_facts_fence_key
+   * only excludes NULL — so overlapping fence rows never collide (#4558);
+   * NULL row_num stays NULL. Every other column is preserved verbatim.
    *
    * Idempotent: re-run after success finds no rows to update and returns
    * `{migrated: 0}`. Hard-deletes are out of scope; the caller wipes the
