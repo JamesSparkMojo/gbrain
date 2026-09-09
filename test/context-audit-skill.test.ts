@@ -18,4 +18,14 @@ describe('#4988 context-audit skill states its token-estimate basis', () => {
     expect(skill).toContain('Estimate basis');
     expect(skill).toMatch(/\/context/);
   });
+
+  // #5009: the divisor is the one the issue measured (2.65-3.03 bytes/token on
+  // always-loaded markdown). 3.5 was the top of the range, i.e. still a ~13-24%
+  // undercount; the pre-pass rounds UP so integer math never adds to it.
+  test('divisor is the calibrated bytes/2.8 with ceil arithmetic, not the 3.5 floor', () => {
+    expect(skill).toContain('bytes/2.8');
+    expect(skill).not.toContain('bytes/3.5');
+    expect(skill).not.toContain('* 2 / 7');
+    expect(skill).toContain('* 10 + 27 ) / 28');
+  });
 });
