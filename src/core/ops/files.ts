@@ -99,7 +99,7 @@ const file_upload: Operation = {
     const { createStorage } = await import('../storage.ts');
     const storage = await createStorage(ctx.config.storage as any);
 
-    const { sqlQueryForEngine, executeRawJsonb } = await import('../sql-query.ts');
+    const { sqlQueryForEngine, executeRawJsonb, FILES_METADATA_MERGE_SQL } = await import('../sql-query.ts');
     const sql = sqlQueryForEngine(ctx.engine);
     const existing = await sql`SELECT id FROM files WHERE content_hash = ${hash} AND storage_path = ${storagePath}`;
     if (existing.length > 0) {
@@ -133,7 +133,7 @@ const file_upload: Operation = {
            content_hash = EXCLUDED.content_hash,
            size_bytes = EXCLUDED.size_bytes,
            mime_type = EXCLUDED.mime_type,
-           metadata = files.metadata || EXCLUDED.metadata`,
+           ${FILES_METADATA_MERGE_SQL}`,
         [pageSlug, filename, storagePath, mimeType, stat.size, hash],
         [{ storage: (ctx.config.storage as { backend: string }).backend }],
       );

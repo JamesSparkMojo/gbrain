@@ -3,7 +3,7 @@ import { join, relative, extname, basename, dirname, resolve } from 'path';
 import { createHash } from 'crypto';
 import type { BrainEngine } from '../core/engine.ts';
 import type { StorageBackend, StorageConfig } from '../core/storage.ts';
-import { sqlQueryForEngine, executeRawJsonb } from '../core/sql-query.ts';
+import { sqlQueryForEngine, executeRawJsonb, FILES_METADATA_MERGE_SQL } from '../core/sql-query.ts';
 import { humanSize } from '../core/file-resolver.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
@@ -218,7 +218,7 @@ async function uploadFile(engine: BrainEngine, args: string[]) {
        content_hash = EXCLUDED.content_hash,
        size_bytes = EXCLUDED.size_bytes,
        mime_type = EXCLUDED.mime_type,
-       metadata = files.metadata || EXCLUDED.metadata`,
+       ${FILES_METADATA_MERGE_SQL}`,
     [pageSlug, filename, storagePath, mimeType, stat.size, hash],
     [{ storage: storageConfig.backend }],
   );
@@ -311,7 +311,7 @@ async function uploadRaw(engine: BrainEngine, args: string[]) {
          content_hash = EXCLUDED.content_hash,
          size_bytes = EXCLUDED.size_bytes,
          mime_type = EXCLUDED.mime_type,
-         metadata = files.metadata || EXCLUDED.metadata`,
+         ${FILES_METADATA_MERGE_SQL}`,
       [sourceId, pageSlug, filename, storagePath, mimeType, stat.size, 'sha256:' + hash],
       [{ storage: 'git', type: fileType }],
     );
@@ -379,7 +379,7 @@ async function uploadRaw(engine: BrainEngine, args: string[]) {
        content_hash = EXCLUDED.content_hash,
        size_bytes = EXCLUDED.size_bytes,
        mime_type = EXCLUDED.mime_type,
-       metadata = files.metadata || EXCLUDED.metadata`,
+       ${FILES_METADATA_MERGE_SQL}`,
     [pageSlug, filename, storagePath, mimeType, stat.size, 'sha256:' + hash],
     [{ storage: (config.storage as StorageConfig).backend, type: fileType, upload_method: method }],
   );
@@ -476,7 +476,7 @@ async function syncFiles(engine: BrainEngine, dir?: string) {
          content_hash = EXCLUDED.content_hash,
          size_bytes = EXCLUDED.size_bytes,
          mime_type = EXCLUDED.mime_type,
-         metadata = files.metadata || EXCLUDED.metadata`,
+         ${FILES_METADATA_MERGE_SQL}`,
       [pageSlug, filename, storagePath, mimeType, stat.size, hash],
       [{ storage: storageConfig.backend }],
     );
