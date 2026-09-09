@@ -5475,7 +5475,7 @@ export class PostgresEngine implements BrainEngine {
 
   async getCalleesOf(
     qualifiedName: string,
-    opts?: { sourceId?: string; allSources?: boolean; limit?: number },
+    opts?: { sourceId?: string; allSources?: boolean; limit?: number; bareFallback?: boolean },
   ): Promise<import('./types.ts').CodeEdgeResult[]> {
     return codeEdgesImpl.getCalleesOf(this.codeEdgesDeps, qualifiedName, opts);
   }

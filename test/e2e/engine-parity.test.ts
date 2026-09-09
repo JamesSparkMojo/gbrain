@@ -2458,3 +2458,58 @@ describeBoth('Engine parity — facts TTL read-time validity (WP5)', () => {
     expect(pg.backlog).toBe(4);
   });
 });
+
+// #4670 — getCalleesOf `bareFallback` must behave identically on both engines:
+// exact match first; on a zero-row miss for a delimiter-free input, re-key on
+// content_chunks.symbol_name (bare); never for delimited inputs; source scoping
+// intact on the fallback path.
+describeBoth('Engine parity — getCalleesOf bare-name fallback (#4670)', () => {
+  let pgEngine: BrainEngine;
+  let pgliteEngine: PGLiteEngine;
+
+  beforeAll(async () => {
+    pgEngine = await setupDB();
+    pgliteEngine = new PGLiteEngine();
+    await pgliteEngine.connect({});
+    await pgliteEngine.initSchema();
+    for (const eng of [pgEngine, pgliteEngine]) {
+      const slug = 'parity/order-service-cs';
+      await eng.putPage(slug, {
+        type: 'code', page_kind: 'code', title: 'src/OrderService.cs (c_sharp)',
+        compiled_truth: 'public async Task SubmitAsync() { ValidateRequest(); }', timeline: '',
+      });
+      await eng.upsertChunks(slug, [{
+        chunk_index: 0,
+        chunk_text: 'public async Task SubmitAsync() { ValidateRequest(); }',
+        chunk_source: 'compiled_truth',
+        language: 'c_sharp',
+        symbol_name: 'SubmitAsync',
+        symbol_type: 'method',
+        symbol_name_qualified: 'MyApp.Services.OrderService.SubmitAsync',
+      }]);
+      const chunk = (await eng.getChunks(slug))[0]!;
+      await eng.addCodeEdges([{
+        from_chunk_id: chunk.id, to_chunk_id: null,
+        from_symbol_qualified: 'MyApp.Services.OrderService.SubmitAsync',
+        to_symbol_qualified: 'ValidateRequest', edge_type: 'calls',
+      }]);
+    }
+  }, 90_000);
+
+  afterAll(async () => {
+    await pgliteEngine.disconnect();
+    await teardownDB();
+  }, 30_000);
+
+  test('bare input: exact miss without the opt, one row with it; qualified + delimited unchanged', async () => {
+    for (const eng of [pgEngine, pgliteEngine]) {
+      expect(await eng.getCalleesOf('SubmitAsync', { allSources: true })).toHaveLength(0);
+      const rows = await eng.getCalleesOf('SubmitAsync', { allSources: true, bareFallback: true });
+      expect(rows.map(r => r.to_symbol_qualified)).toEqual(['ValidateRequest']);
+      expect(await eng.getCalleesOf('MyApp.Services.OrderService.SubmitAsync', { allSources: true, bareFallback: true })).toHaveLength(1);
+      expect(await eng.getCalleesOf('Other.SubmitAsync', { allSources: true, bareFallback: true })).toHaveLength(0);
+      expect(await eng.getCalleesOf('Submit_sync', { allSources: true, bareFallback: true })).toHaveLength(0);
+      expect(await eng.getCalleesOf('SubmitAsync', { sourceId: 'not-a-source', bareFallback: true })).toHaveLength(0);
+    }
+  });
+});

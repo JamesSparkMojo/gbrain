@@ -2531,13 +2531,13 @@ export interface BrainEngine {
   ): Promise<CodeEdgeResult[]>;
 
   /**
-   * "What does this symbol call?" Returns edges from chunks whose
-   * from_symbol_qualified = qualifiedName. Same source-scoping semantics
-   * as getCallersOf.
+   * "What does this symbol call?" Edges from chunks whose from_symbol_qualified
+   * = qualifiedName; same source scoping as getCallersOf. opts.bareFallback (#4670):
+   * zero-row miss + delimiter-free input re-keys on content_chunks.symbol_name.
    */
   getCalleesOf(
     qualifiedName: string,
-    opts?: { sourceId?: string; allSources?: boolean; limit?: number },
+    opts?: { sourceId?: string; allSources?: boolean; limit?: number; bareFallback?: boolean },
   ): Promise<CodeEdgeResult[]>;
 
   /**
