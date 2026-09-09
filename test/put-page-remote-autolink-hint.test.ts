@@ -60,6 +60,11 @@ describe('put_page remote auto-link disclosure (#4525)', () => {
     expect(putPage.description).toContain('skipped');
     // #4679: name the async path too (serve maintenance sweep / `gbrain sweep`).
     expect(putPage.description).toContain('sweep');
+    // Wave review: only a stdio serve self-sweeps (startup + idle);
+    // `gbrain serve --http` never arms one. The disclosure must be per-lane.
+    expect(putPage.description).toMatch(/stdio `gbrain serve` sweeps/);
+    expect(putPage.description).toMatch(/`gbrain serve --http` does not self-sweep/);
+    expect(putPage.description).not.toMatch(/sweep \(startup \+ idle\)/);
   });
 
   test('remote write reports skipped: remote WITH an actionable hint', async () => {
@@ -71,6 +76,10 @@ describe('put_page remote auto-link disclosure (#4525)', () => {
     expect(result.auto_links?.hint).toBeDefined();
     expect(result.auto_links?.hint).toContain('NOT reconciled');
     expect(result.auto_links?.hint).toContain('sweep');
+    // Wave review: lane-accurate — HTTP serve callers are told it does NOT self-sweep.
+    expect(result.auto_links?.hint).toMatch(/stdio `gbrain serve` sweeps/);
+    expect(result.auto_links?.hint).toMatch(/`gbrain serve --http` does not self-sweep/);
+    expect(result.auto_links?.hint).not.toMatch(/sweep \(startup \+ idle\)/);
     expect(result.auto_timeline?.skipped).toBe('remote');
     expect(result.auto_timeline?.hint).toBeDefined();
   }, 120000);
@@ -84,6 +93,10 @@ describe('put_page remote auto-link disclosure (#4525)', () => {
     expect(skill).not.toContain('No manual `add_link` calls needed for ordinary page writes');
     expect(skill).toContain('skipped');
     expect(skill).toContain('sweep');
+    // Wave review: the skill must not promise a startup/idle sweep to HTTP
+    // callers — only the stdio serve arms one.
+    expect(skill).toMatch(/`gbrain serve --http` does not self-sweep/);
+    expect(skill).not.toMatch(/\(at startup and on 10-minute idle ticks\)/);
   });
 
   test('local write does not carry the remote skip marker', async () => {
