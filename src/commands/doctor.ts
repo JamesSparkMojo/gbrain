@@ -66,6 +66,7 @@ export {
   whoknowsHealthCheck,
   pgvectorCheck,
   pagesUpsertArbiterCheck,
+  linkSourceCheckConstraintCheck,
   jsonbIntegrityCheck,
   checkVolunteerChannels,
   takesWeightGridCheck,
@@ -163,6 +164,7 @@ import {
   whoknowsHealthCheck,
   pgvectorCheck,
   pagesUpsertArbiterCheck,
+  linkSourceCheckConstraintCheck,
   jsonbIntegrityCheck,
   checkVolunteerChannels,
   takesWeightGridCheck,
@@ -1920,6 +1922,12 @@ export async function buildChecks(
   // page write fails brain-wide and the version counter can't see the drift.
   progress.heartbeat('pages_upsert_arbiter');
   checks.push(await pagesUpsertArbiterCheck(engine));
+
+  // 4a-ter. #4613: links_link_source_check shape — a ledger-current brain
+  // whose CHECK reverted to the pre-v114 allowlist rejects every kebab
+  // provenance write; the version counter can't see it.
+  progress.heartbeat('links_link_source_check');
+  checks.push(await linkSourceCheckConstraintCheck(engine));
 
   // 4b. pglite_scale — engine-fit signal: makes the init-time 1000-file
   // Supabase suggestion re-evaluable for the life of the brain.

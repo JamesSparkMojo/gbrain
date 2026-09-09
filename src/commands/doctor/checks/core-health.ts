@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 import { existsSync, readFileSync, statSync } from 'fs';
 import type { BrainEngine } from '../../../core/engine.ts';
 import { REPAIR_SOURCE_CONFIG_SQL } from '../../../core/source-config-sql.ts';
+import { checkLinkSourceCheck } from '../../../core/link-source-check-repair.ts';
 import { loadConfig } from '../../../core/config.ts';
 import type { ProgressReporter } from '../../../core/progress.ts';
 import type { Check } from '../../doctor.ts';
@@ -186,6 +187,49 @@ export async function pagesUpsertArbiterCheck(engine: BrainEngine): Promise<Chec
     };
   } catch {
     return { name: 'pages_upsert_arbiter', status: 'warn', message: 'Could not check the pages upsert arbiter' };
+  }
+}
+
+/**
+ * Doctor check: links_link_source_check constraint shape (#4613).
+ *
+ * The version ledger can read current (>= v114) while the live CHECK still
+ * carries the pre-v114 closed allowlist — then every kebab provenance write
+ * (atom-provenance, concept-provenance) is rejected and the version counter
+ * can't see it. Keyed off pg_constraint via checkLinkSourceCheck. Severity
+ * follows what writes do: only a wrong definition rejects them (fail); an
+ * absent gate or a NOT VALID one still accepts them (warn).
+ */
+export async function linkSourceCheckConstraintCheck(engine: BrainEngine): Promise<Check> {
+  const name = 'links_link_source_check';
+  try {
+    const s = await checkLinkSourceCheck(engine);
+    if (!s.tablePresent || !s.needsRepair) {
+      return {
+        name,
+        status: 'ok',
+        message: s.tablePresent ? 'links_link_source_check has the v114 kebab-case gate' : 'no links table yet',
+      };
+    }
+    const heal = 'Run `gbrain apply-migrations --yes` to heal it (#4613).';
+    if (s.drift === 'wrong_def') {
+      return {
+        name,
+        status: 'fail',
+        message:
+          `links_link_source_check is not the v114 kebab-case gate (${s.def}) — kebab provenance ` +
+          `link writes (atom-provenance, concept-provenance) are being rejected. ${heal}`,
+      };
+    }
+    return {
+      name,
+      status: 'warn',
+      message: s.drift === 'absent'
+        ? `links_link_source_check is absent — link_source has no format gate (writes succeed unchecked). ${heal}`
+        : `links_link_source_check is NOT VALID — existing rows were never validated. ${heal}`,
+    };
+  } catch {
+    return { name, status: 'warn', message: 'Could not check the links_link_source_check constraint' };
   }
 }
 

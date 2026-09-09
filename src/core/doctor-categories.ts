@@ -222,6 +222,9 @@ export const META_CHECK_NAMES: ReadonlySet<string> = new Set([
   'cycle_phase_scope',
   'default_source_local_path',
   'eval_capture',
+  // #4613 — links_link_source_check CHECK shape: schema coherence healed by
+  // `gbrain apply-migrations` (sibling of pages_upsert_arbiter).
+  'links_link_source_check',
   'minions_migration',
   'multi_source_drift',
   'pack_upgrade_available',

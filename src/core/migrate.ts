@@ -10,6 +10,7 @@ import {
 } from './retry-matcher.ts';
 import { repairTimelineDedupIndex, repairLegacyTimelineSourceRows } from './timeline-dedup-repair.ts';
 import { repairPagesUpsertArbiter } from './pages-upsert-arbiter.ts';
+import { repairLinkSourceCheck } from './link-source-check-repair.ts';
 
 /**
  * When true, per-migration explanatory notices (e.g. the v123/v124 "here is
@@ -6874,6 +6875,24 @@ export async function runMigrations(engine: BrainEngine): Promise<{ applied: num
       );
     }
   } catch { /* best-effort; doctor reports the drift if this couldn't run */ }
+
+  // #4613: same drift class for links_link_source_check. A brain stamped past
+  // v114 whose CHECK still carries the pre-v114 allowlist rejects every kebab
+  // provenance write (atom-provenance, concept-provenance); the version
+  // counter can't see it. Restores v114 atomically; refuses loudly on violators.
+  try {
+    const l = await repairLinkSourceCheck(engine);
+    if (l.repaired) {
+      console.error(`[migrate] restored links_link_source_check to the v114 kebab-case gate (#4613)`);
+    } else if (l.reason === 'violations') {
+      console.error(
+        `[migrate] cannot restore links_link_source_check: ${l.violations} links row(s) have a ` +
+        `non-kebab link_source — fix or delete them, then re-run (#4613). See \`gbrain doctor\`.`,
+      );
+    }
+  } catch (e) {
+    console.error(`[migrate] links_link_source_check self-heal could not run (#4613): ${e instanceof Error ? e.message : String(e)}`);
+  }
 
   if (pending.length === 0) {
     return { applied: 0, current };
