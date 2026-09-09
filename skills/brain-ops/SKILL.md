@@ -123,18 +123,25 @@ Every message, meeting, email, or conversation that references a person or compa
 **User's direct statements are the highest-value data source.** Write them to brain
 pages immediately with attribution `[Source: User, YYYY-MM-DD]`.
 
-### Phase 2.5: Structured Graph Updates (automatic)
+### Phase 2.5: Structured Graph Updates (auto-link)
 
-Every `put_page` call automatically extracts entity references and writes them
-to the graph (`links` table) with inferred relationship types. Stale links
-(refs no longer in the page text) are removed in the same call. This is
-"auto-link" reconciliation.
+"Auto-link" reconciliation extracts entity references from a page and writes
+them to the graph (`links` table) with inferred relationship types; stale
+links (refs no longer in the page text) are removed. WHO runs it depends on
+the write path:
 
-- No manual `add_link` calls needed for ordinary page writes.
+- **Trusted local writes** (`gbrain put`, `gbrain capture`,
+  `gbrain call put_page`) auto-link inline and return
+  `auto_links: { created, removed, errors }`.
+- **MCP callers (stdio AND HTTP)** return `auto_links: { skipped: "remote", hint }`
+  and `auto_timeline: { skipped: "remote" }`. Body wikilinks are saved as text;
+  edges are reconciled asynchronously by the serve's maintenance sweep
+  (at startup and on 10-minute idle ticks), or on demand with
+  `gbrain sweep --once` / `gbrain extract links --source db`. Use `add_link`
+  for relationships you need immediately. Untrusted body text can plant
+  ranking-boosting edges, which is why the inline path is local-only.
 - Inferred link types: `attended` (meeting -> person), `works_at`, `invested_in`,
   `founded`, `advises`, `source` (frontmatter), `mentions` (default).
-- The `put_page` MCP response includes `auto_links: { created, removed, errors }`
-  so the agent can verify outcomes.
 - To disable: `gbrain config set auto_link false`. Default is on.
 - Timeline entries with specific dates still need explicit `gbrain timeline-add`
   (or batch via `gbrain extract timeline --source db`).

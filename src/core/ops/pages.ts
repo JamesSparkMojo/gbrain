@@ -331,7 +331,7 @@ const fetch_page: Operation = {
 
 const put_page: Operation = {
   name: 'put_page',
-  description: 'Write or replace a page (markdown with frontmatter). REPLACES the entire page; this is not a partial edit. Before modifying an existing page, read its canonical content with `get_page include_content:true`, then submit the complete page. Chunks, embeds, reconciles tags, and (when auto_link/auto_timeline are enabled) extracts + reconciles graph links and timeline entries. Remote (MCP) callers: body wikilinks are NOT reconciled into the graph — auto_link/auto_timeline are skipped for untrusted writers (response reports auto_links: {skipped: "remote"}); use local capture/put_page for link extraction. Remote callers also receive write_through.warning when the resolved write source has no repo configured, because the DB row has no durable markdown file. For large content on Windows (pipe-buffer limit ~45KB) or any file-as-input workflow, use `gbrain capture --file PATH --slug SLUG` — capture reads the file as a Buffer with a binary-NUL guard and adds provenance write-through (v0.39.3.0).',
+  description: 'Write or replace a page (markdown with frontmatter). REPLACES the entire page; this is not a partial edit. Before modifying an existing page, read its canonical content with `get_page include_content:true`, then submit the complete page. Chunks, embeds, reconciles tags, and (when auto_link/auto_timeline are enabled) extracts + reconciles graph links and timeline entries. Remote (MCP) callers: body wikilinks are NOT reconciled into the graph — auto_link/auto_timeline are skipped for untrusted writers (response reports auto_links: {skipped: "remote"}); the serve maintenance sweep (startup + idle) or `gbrain sweep --once` reconciles them asynchronously, or use local capture/put_page for inline link extraction. Remote callers also receive write_through.warning when the resolved write source has no repo configured, because the DB row has no durable markdown file. For large content on Windows (pipe-buffer limit ~45KB) or any file-as-input workflow, use `gbrain capture --file PATH --slug SLUG` — capture reads the file as a Buffer with a binary-NUL guard and adds provenance write-through (v0.39.3.0).',
   params: {
     slug: { type: 'string', required: true, description: 'Page slug' },
     content: { type: 'string', required: true, description: 'Complete markdown content with YAML frontmatter. REPLACES the entire page; this is not a partial edit. Read the canonical page first with `get_page include_content:true` before modifying it.' },
@@ -629,7 +629,7 @@ const put_page: Operation = {
       // been reconciled into the graph.
       const hint = 'auto_link/auto_timeline run for trusted local writers only; '
         + 'body wikilinks were saved as text but NOT reconciled into the graph. '
-        + 'Use local `gbrain capture`/`gbrain call put_page` for link extraction.';
+        + 'The serve maintenance sweep (startup + idle) or `gbrain sweep --once` reconciles them asynchronously; use local `gbrain capture`/`gbrain call put_page` for inline link extraction, or add_link for edges needed now.';
       autoLinks = { skipped: 'remote', hint };
       autoTimeline = { skipped: 'remote', hint };
     } else if (result.parsedPage) {

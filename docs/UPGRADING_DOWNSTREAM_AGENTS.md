@@ -37,7 +37,9 @@ not know to backfill the structured timeline.
 3. Apply the diff (paste the new block in the indicated location).
 4. Update the version banner at the top of your fork (`# Based on gbrain v0.12.0`).
 5. Verify: ask the agent to write a test page and confirm the response includes
-   `auto_links: { created, removed, errors }`.
+   `auto_links: { created, removed, errors }`. (Local CLI writes only — MCP
+   writes, stdio included, return `auto_links: { skipped: "remote" }` and are
+   reconciled later by the serve maintenance sweep or `gbrain sweep --once`.)
 
 Total time: ~10 minutes for all four skills.
 

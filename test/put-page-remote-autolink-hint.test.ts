@@ -12,6 +12,8 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { operations } from '../src/core/operations.ts';
@@ -56,6 +58,8 @@ describe('put_page remote auto-link disclosure (#4525)', () => {
   test('tool description names the remote auto-link skip', () => {
     expect(putPage.description).toMatch(/[Rr]emote .*callers/);
     expect(putPage.description).toContain('skipped');
+    // #4679: name the async path too (serve maintenance sweep / `gbrain sweep`).
+    expect(putPage.description).toContain('sweep');
   });
 
   test('remote write reports skipped: remote WITH an actionable hint', async () => {
@@ -66,9 +70,21 @@ describe('put_page remote auto-link disclosure (#4525)', () => {
     expect(result.auto_links?.skipped).toBe('remote');
     expect(result.auto_links?.hint).toBeDefined();
     expect(result.auto_links?.hint).toContain('NOT reconciled');
+    expect(result.auto_links?.hint).toContain('sweep');
     expect(result.auto_timeline?.skipped).toBe('remote');
     expect(result.auto_timeline?.hint).toBeDefined();
   }, 120000);
+
+  // #4679: the brain-ops skill (shipped to the exact agents that write over
+  // stdio) promised inline auto_links {created, removed, errors} on EVERY
+  // put_page — false for every MCP transport since the gate shipped. It must
+  // state the remote skip and the sweep that reconciles those edges later.
+  test('brain-ops skill Phase 2.5 states the MCP skip + sweep instead of promising inline auto-link', () => {
+    const skill = readFileSync(join(import.meta.dir, '..', 'skills', 'brain-ops', 'SKILL.md'), 'utf8');
+    expect(skill).not.toContain('No manual `add_link` calls needed for ordinary page writes');
+    expect(skill).toContain('skipped');
+    expect(skill).toContain('sweep');
+  });
 
   test('local write does not carry the remote skip marker', async () => {
     const result = (await putPage.handler(
