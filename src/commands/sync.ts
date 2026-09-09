@@ -394,6 +394,11 @@ export interface SyncOpts {
    * fallback aren't covered). Unlike `exclude`, this has to reach the
    * collection step itself — a pruned path is never collected in the first
    * place, so there's nothing for a post-collection filter to add back.
+   *
+   * Unioned with the persisted `sync.include_hidden` config key (same dialect
+   * and trailing-`/` normalization as `sync.exclude`), so callers that never
+   * touch the CLI — `sync --all`, autopilot, the dream cycle — inherit the
+   * waiver. Union, not override; unset admits nothing.
    */
   includeHidden?: string[];
   /**
@@ -1747,6 +1752,23 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       .map(p => (p.endsWith('/') ? `${p}**` : p));
     if (storedPatterns.length > 0) {
       opts = { ...opts, exclude: [...new Set([...(opts.exclude ?? []), ...storedPatterns])] };
+    }
+  } catch { /* config unreadable — never break a sync over the scope read */ }
+
+  // #4901: the WAIVER's persisted twin, read exactly like `sync.exclude` above
+  // (same dialect, trailing-slash normalization, union, best-effort, position).
+  // `--include-hidden` is refused under `--all` and unavailable to autopilot /
+  // the dream cycle, so this key is the only way the unattended paths get it.
+  // An unset key admits nothing — the dot-directory default does not move.
+  try {
+    const storedHidden = await engine.getConfig('sync.include_hidden');
+    const hiddenPatterns = (storedHidden ?? '')
+      .split(/[\n,]/)
+      .map(p => p.trim())
+      .filter(Boolean)
+      .map(p => (p.endsWith('/') ? `${p}**` : p));
+    if (hiddenPatterns.length > 0) {
+      opts = { ...opts, includeHidden: [...new Set([...(opts.includeHidden ?? []), ...hiddenPatterns])] };
     }
   } catch { /* config unreadable — never break a sync over the scope read */ }
 
@@ -4470,7 +4492,10 @@ Options:
                        waivable) for paths matching this glob (repeatable).
                        Does not reach a non-git directory's FS-walk import
                        fallback; every git-tracked source (the normal case)
-                       is covered. Cannot combine with --all.
+                       is covered. Cannot combine with --all; persist it as
+                       the sync.include_hidden config key (gbrain config set
+                       sync.include_hidden '<globs>') so --all, autopilot and
+                       the dream cycle honor it.
   --include-gitignored Include otherwise-syncable files matched by .gitignore.
                        Forces a full filesystem walk so periodic syncs see
                        ignored untracked content.
@@ -4700,7 +4725,9 @@ See also:
     console.error(
       `--src-subpath/--exclude/--include-hidden scope a single sync invocation; they cannot be combined with --all. ` +
       `For --all runs, register the subdirectory as the source's local_path instead ` +
-      `(gbrain sources add <id> --path <repo>/<subdir>).`,
+      `(gbrain sources add <id> --path <repo>/<subdir>), persist exclusions with ` +
+      `\`gbrain config set sync.exclude <globs>\`, and persist the dot-directory waiver with ` +
+      `\`gbrain config set sync.include_hidden <globs>\` so --all, autopilot and the dream cycle honor it.`,
     );
     process.exit(1);
   }

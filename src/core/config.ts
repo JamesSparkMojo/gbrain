@@ -1570,6 +1570,9 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // Registering it here is what makes `gbrain config set sync.exclude ...`
   // work — the operator path to the feature (unregistered-key class).
   'sync.exclude',
+  // #4901: the dot-directory WAIVER's persisted twin (unioned with the per-call
+  // include-hidden flag, which bulk sync refuses); registered so `config set` accepts it.
+  'sync.include_hidden',
   // #2179: clamp window for DCR-requested per-client token TTLs. Read by
   // `gbrain serve --http` at startup; unset min defaults to 300s, unset max
   // defaults fail-closed to max(--token-ttl, min).

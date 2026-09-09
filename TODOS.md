@@ -606,9 +606,12 @@ deferred M-effort issues above are NOT repeated here.
   contract constant references get_page/put_page/list_skills/get_skill, which
   don't exist on `--surface verbs`; serve the verb-appropriate contract per
   surface.
-- [ ] **P3 — per-source sync.exclude scoping.** **What:** #4667's persisted
-  exclude scope is global (union-only widening across every source); a
-  per-source key was the author's own follow-up note.
+- [ ] **P3 — per-source sync.exclude / sync.include_hidden scoping.** **What:**
+  #4667's persisted exclude scope and #5003's persisted dot-directory waiver
+  are both brain-global (one list reaches every source on `sync --all`); a
+  per-source key was the author's own follow-up note. Admission
+  (`sync.include_hidden`) is the riskier direction — a `.github/` waiver meant
+  for one repo admits that directory in every source — so scope it first.
 - [ ] **P3 — skills-doc note on capture-time vs retroactive backlink dating.**
   **What:** #4552/#4595 made backlink REPAIR insert undated "Referenced by"
   rows (retroactive dating is forgery), while live capture keeps dated
