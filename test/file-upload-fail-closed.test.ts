@@ -82,6 +82,38 @@ describe('file_upload fail-closed (#4302)', () => {
     expect(existsSync(join(storageDir, 'notes/real/real.txt'))).toBe(true);
   });
 
+  // #4910: the files row must say WHICH lane holds the bytes so readers
+  // (doctor image_assets, files verify) never stat a bucket key as a local
+  // path. Legacy rows with `{}` metadata heal on the next content change
+  // because the upsert merges metadata instead of leaving it untouched.
+  test('upload stamps metadata.storage with the configured backend and heals legacy rows on conflict', async () => {
+    const op = operationsByName['file_upload'];
+    const src = join(fixtureDir, 'lane.txt');
+    writeFileSync(src, 'lane bytes v1');
+    await op.handler(mkCtx(true), { path: src, page_slug: 'notes/lane' });
+    const meta = async (storagePath: string) => {
+      const rows = await engine.executeRaw<{ metadata: unknown }>(
+        `SELECT metadata FROM files WHERE storage_path = $1`, [storagePath],
+      );
+      const m = rows[0]?.metadata;
+      return (typeof m === 'string' ? JSON.parse(m) : m) as Record<string, unknown> | null;
+    };
+    expect((await meta('notes/lane/lane.txt'))?.storage).toBe('local');
+
+    // Legacy row: pre-fix writer left `{}`. A re-upload with changed bytes
+    // takes the ON CONFLICT path and must stamp the lane (jsonb merge).
+    const legacy = join(fixtureDir, 'legacy.txt');
+    writeFileSync(legacy, 'legacy bytes v1');
+    await engine.executeRaw(
+      `INSERT INTO files (page_slug, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
+       VALUES ('notes/legacy', 'legacy.txt', 'notes/legacy/legacy.txt', 'text/plain', 1, 'stale-hash', '{"upload_method":"standard"}'::jsonb)`,
+    );
+    await op.handler(mkCtx(true), { path: legacy, page_slug: 'notes/legacy' });
+    const healed = await meta('notes/legacy/legacy.txt');
+    expect(healed?.storage).toBe('local');
+    expect(healed?.upload_method).toBe('standard');
+  });
+
   test('already_exists only when the backend really holds the object', async () => {
     const op = operationsByName['file_upload'];
     const src = join(fixtureDir, 'dup.txt');
