@@ -52,6 +52,7 @@ import { getCliOptions, cliOptsToProgressOptions } from './cli-options.ts';
 import { tryAcquireDbLock, reapDeadHolderLocks, LockStolenError, type DbLockHandle } from './db-lock.ts';
 import { assertValidSourceId } from './source-id.ts';
 import { PHASE_SCOPE, SOURCE_FRESHNESS_PHASES, type PhaseScope } from './cycle/phase-scope.ts';
+import { assertEmbedNotStalled } from './embed-stall.ts';
 
 export { PHASE_SCOPE, SOURCE_FRESHNESS_PHASES, type PhaseScope } from './cycle/phase-scope.ts';
 
@@ -1623,6 +1624,7 @@ async function runPhaseEmbed(engine: BrainEngine, dryRun: boolean, signal?: Abor
     // #394: quiet — the cycle reports embed counts via its own PhaseResult;
     // raw `[dry-run] Would embed ...` stdout lines would corrupt `dream --json`.
     const result = await runEmbedCore(engine, { stale: true, dryRun, signal, quiet: true });
+    assertEmbedNotStalled(result); // #4599: a watchdog-aborted drain is a failed phase, not 'ok'
     const embeddedCount = dryRun ? result.would_embed : result.embedded;
     return {
       phase: 'embed',
