@@ -194,8 +194,7 @@
   `.context/wave/triage/issue/` + `.context/wave/refute/issue/` (gitignored
   wave working state, not repo content). Deferred: #4381 #4558 #4576 #4578
   #4586 #4588 #4600 #4603 #4605 #4613 #4616 #4622 #4649 #4653 #4670 #4684
-  #4741 #4761 #4766 #4772 #4795 #4797 #4852 #4879 #4910 #4921, plus #4359
-  (S, but it lives in `search/hybrid.ts` and needs an eval-replay receipt).
+  #4741 #4761 #4766 #4772 #4795 #4797 #4852 #4879 #4910 #4921.
   Of the 0.48.1.0 wave's 27 deferrals, ten shipped in 0.48.5.0 (#4744 via
   #4933, #4729 via #4865, #4728, #4696, #4652, #4620, #4606, #4597, #4589,
   #4563), five were re-classified on verification (#4738 and #4732
