@@ -1,4 +1,5 @@
 import type { Recipe } from '../types.ts';
+import { GLM_THINKING_BY_DEFAULT_RE } from './zhipu.ts';
 
 export const ollama: Recipe = {
   id: 'ollama',
@@ -90,8 +91,11 @@ export const ollama: Recipe = {
       // qwen2.5-* tags can never be swallowed by it, and `qwen3-coder` (the
       // instruct-only Qwen3 variant, no thinking mode) is excluded by
       // lookahead. `phi4-mini-reasoning` is a reasoning model and matches
-      // alongside `phi4-reasoning`.
+      // alongside `phi4-reasoning`. GLM-4.5+/5.x (`glm-5.3-flash[:cloud]`,
+      // `glm-4.6`) reuse the zhipu recipe's cutoff (gbrain#4727) — a reporter
+      // hit the 4000 cap on GLM-5.3-flash via Ollama cloud; `glm-4:9b` stays out.
       thinking_by_default: (modelId: string) =>
+        GLM_THINKING_BY_DEFAULT_RE.test(modelId) ||
         /^(?:qwen3[0-9]*(?!-coder)(?:[.\-:]|$)|deepseek-r[0-9]|gpt-oss(?:[.\-:]|$)|magistral(?:[.\-:]|$)|phi[0-9]+(?:-mini)?-reasoning)/i.test(
           modelId,
         ),
