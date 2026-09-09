@@ -606,9 +606,11 @@ export async function rawProvenanceCheck(engine: BrainEngine): Promise<Check> {
  * that grows a layer on every read→write cycle. Any row where
  * `jsonb_typeof(config) <> 'object'` is corrupted — federation and ACL settings
  * on that source are read off a string instead of the settings object. Surface
- * the affected sources with the repair path. The `gbrain sources` config writers
- * now normalize before write, so any config-writing command self-heals the row
- * (the app unwraps up to 10 nested layers); the SQL below repairs one layer
+ * the affected sources with the repair path. The `gbrain sources` writers that
+ * rewrite the `config` COLUMN (federate/unfederate, webhook set/rotate/clear,
+ * tracked-branch) normalize before write and so self-heal the row (the app
+ * unwraps up to 10 nested layers); writers of other columns (set-cr-mode,
+ * rename, set-path) do not touch it (#5002). The SQL below repairs one layer
  * directly for the common case.
  */
 export async function checkSourceConfigShape(engine: BrainEngine): Promise<Check> {
@@ -631,8 +633,12 @@ export async function checkSourceConfigShape(engine: BrainEngine): Promise<Check
         `${rows.length} source(s) have a non-object config — a JSON string/scalar ` +
         `instead of an object (the #2829 re-wrapping bug): ${affected}. ` +
         `Federation and ACL settings on these sources won't be read correctly. ` +
-        `Repair by running any 'gbrain sources' config write (self-heals nested ` +
-        `strings and recoverable arrays), or in SQL: ${REPAIR_SOURCE_CONFIG_SQL}`,
+        `Repair with this SQL: ${REPAIR_SOURCE_CONFIG_SQL} — or re-assert the source's ` +
+        `current federation state with 'gbrain sources federate <id>' / 'unfederate <id>' ` +
+        `(see 'gbrain sources list'; federate on an isolated source also flips it into ` +
+        `default search), which rewrites the config column and self-heals nested strings / ` +
+        `recoverable arrays. Commands that write other columns ('set-cr-mode', 'rename', ` +
+        `'set-path') do not repair it.`,
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
