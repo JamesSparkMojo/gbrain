@@ -23,7 +23,8 @@ The same eight validation classes the `frontmatter-guard` skill and
 
 ## Install
 
-For all registered sources that are git repos:
+For all registered sources inside a git repo (the source's own repo, or a
+subdirectory of a host repo — the same shapes `gbrain sync` accepts):
 
 ```bash
 gbrain frontmatter install-hook
@@ -41,9 +42,12 @@ For force-overwrite of an existing pre-commit hook (writes a `.bak`):
 gbrain frontmatter install-hook --force
 ```
 
-The hook lands at `<source>/.githooks/pre-commit`. If `core.hooksPath` is
-unset, the install also runs `git config core.hooksPath .githooks` so the
-hook is picked up without manual git config.
+The hook lands at `<git root>/.githooks/pre-commit` — the source's own repo,
+or the enclosing host repo when the source is registered as a subdirectory of
+one (see the topology cases below). If `core.hooksPath` is unset, the install
+also runs `git config core.hooksPath .githooks` so the hook is picked up
+without manual git config. Only a source outside any git repo is skipped
+(`skipped, not a git repo`).
 
 ## Bypass
 
@@ -82,6 +86,18 @@ that's not the brain repo itself, you may want a separate hook strategy:
 - **Brain repo is a separate registered source** (e.g. `~/brain` registered
   as a source, host repo is `~/agent-fork`): install in the brain repo only;
   agent-fork code doesn't need this hook.
+- **Brain is a subdirectory of the host repo** (the `<workspace>/brain` layout
+  `gbrain bootstrap` creates and registers with
+  `gbrain sources add <id> --path <workspace>/brain`): the hook installs at the
+  host repo root, scoped to `brain/` — staged files elsewhere in the host repo
+  (README, AGENTS.md, code) are never validated. Several nested sources in one
+  host repo share a single hook (their scopes union; `--uninstall --source
+  <id>` drops only that source's scope); a source registered at the root
+  widens it to the whole repo. Known limitation: a nested page that declares
+  `slug:` explicitly can be reported as `SLUG_MISMATCH`, because
+  `frontmatter validate` derives the expected slug from the git root; pages
+  gbrain writes itself carry no `slug:`, so bootstrap-created brains are
+  unaffected.
 - **Brain repo is auto-generated** (e.g. by a sync daemon writing to a
   bucket): skip the hook entirely; gate at the writer instead via
   `import { writeBrainPage } from 'gbrain/brain-writer'` (planned in a

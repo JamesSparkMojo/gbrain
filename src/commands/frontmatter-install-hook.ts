@@ -1,7 +1,7 @@
 /**
  * gbrain frontmatter install-hook — Install a pre-commit hook in a brain
  * source's git repo that runs `gbrain frontmatter validate` against staged
- * .md/.mdx files. Skips non-git sources with a one-line note.
+ * .md/.mdx files. Skips sources outside any git repo with a one-line note.
  *
  * Usage:
  *   gbrain frontmatter install-hook [--source <id>] [--force] [--uninstall]
@@ -11,25 +11,44 @@
  *   --uninstall    Remove the hook; restore <hook>.bak if present.
  *
  * Hook contract:
- *   - Located at <source>/.githooks/pre-commit. We `git config core.hooksPath
+ *   - Located at <git root>/.githooks/pre-commit. The root is discovered the
+ *     way `gbrain sync` does (#4600): a source registered as a SUBDIRECTORY of
+ *     a host repo (the `<workspace>/brain` layout bootstrap creates) gets ONE
+ *     hook at the host root, pathspec-scoped to that subdirectory; several
+ *     nested sources union their scopes; a source registered at the root
+ *     renders the unscoped whole-repo script. We `git config core.hooksPath
  *     .githooks` if no other hooksPath is set.
  *   - When the gbrain binary is missing, the hook prints a one-line warning
  *     and exits 0 (don't break commits if a developer uninstalls gbrain).
  *   - Bypass via `git commit --no-verify`.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, rmSync, copyFileSync } from 'fs';
-import { join } from 'path';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, rmSync, copyFileSync, realpathSync } from 'fs';
+import { isAbsolute, join, relative } from 'path';
 import { execFileSync } from 'child_process';
 import type { BrainEngine } from '../core/engine.ts';
 import { loadConfig, toEngineConfig } from '../core/config.ts';
 import { createEngine } from '../core/engine-factory.ts';
+import { discoverGitRoot } from '../core/sync-git.ts';
 
 const HOOK_BANNER = '# gbrain frontmatter pre-commit hook (v0.22.4+)';
+/** One line per guarded subdirectory (root-relative, trailing slash). No lines = whole repo. */
+const SCOPE_MARKER = '# gbrain-scope: ';
 
-const HOOK_SCRIPT = `#!/bin/sh
+const shellQuote = (s: string): string => `'${s.replace(/'/g, "'\\''")}'`;
+
+/**
+ * Render the hook script. Empty `scopes` = the whole repo (byte-identical to
+ * the pre-#4600 script); otherwise `git diff --cached` is limited to the
+ * listed pathspecs. Git runs hooks from the worktree root, so the
+ * root-relative paths it lists resolve as-is for `gbrain frontmatter validate`.
+ */
+function renderHookScript(scopes: string[]): string {
+  const marker = scopes.map((s) => `${SCOPE_MARKER}${s}\n`).join('');
+  const pathspec = scopes.length > 0 ? ` -- ${scopes.map(shellQuote).join(' ')}` : '';
+  return `#!/bin/sh
 ${HOOK_BANNER}
-# Validates YAML frontmatter on staged .md / .mdx files. Bypass with
+${marker}# Validates YAML frontmatter on staged .md / .mdx files. Bypass with
 # 'git commit --no-verify'. Uninstall with 'gbrain frontmatter install-hook --uninstall'.
 
 set -e
@@ -39,7 +58,7 @@ if ! command -v gbrain >/dev/null 2>&1; then
   exit 0
 fi
 
-staged=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\\.mdx?$' || true)
+staged=$(git diff --cached --name-only --diff-filter=ACM${pathspec} | grep -E '\\.mdx?$' || true)
 [ -z "$staged" ] && exit 0
 
 failed=0
@@ -57,6 +76,14 @@ if [ $failed -ne 0 ]; then
   exit 1
 fi
 `;
+}
+
+function parseScopes(hook: string): string[] {
+  return hook
+    .split('\n')
+    .filter((l) => l.startsWith(SCOPE_MARKER))
+    .map((l) => l.slice(SCOPE_MARKER.length));
+}
 
 interface SourceRow {
   id: string;
@@ -106,7 +133,10 @@ export async function runFrontmatterInstallHook(args: string[]): Promise<void> {
         skipped++;
         continue;
       }
-      if (!isGitRepo(src.local_path)) {
+      let target: HookTarget;
+      try {
+        target = resolveHookTarget(src.local_path);
+      } catch {
         console.log(`[${src.id}] ${src.local_path} — skipped, not a git repo`);
         skipped++;
         continue;
@@ -122,7 +152,8 @@ export async function runFrontmatterInstallHook(args: string[]): Promise<void> {
       }
       const result = installHook(src.local_path, force);
       if (result === 'installed') {
-        console.log(`[${src.id}] hook installed at .githooks/pre-commit`);
+        const where = join(target.root, '.githooks', 'pre-commit');
+        console.log(`[${src.id}] hook installed at ${where}${target.scope ? ` (scoped to ${target.scope})` : ''}`);
         installed++;
       } else if (result === 'skipped_existing') {
         console.log(`[${src.id}] existing pre-commit hook found; pass --force to overwrite (.bak created)`);
@@ -146,6 +177,8 @@ Usage:
 
 The hook runs \`gbrain frontmatter validate\` against staged .md/.mdx files,
 blocking commits with malformed frontmatter. Bypass with 'git commit --no-verify'.
+A source registered as a subdirectory of a host repo gets the hook at the host
+root, scoped to that subdirectory.
 
 Options:
   --source <id>  Limit to one registered source. Default: all sources.
@@ -170,52 +203,90 @@ async function listSources(engine: BrainEngine, sourceId?: string): Promise<Sour
   }
 }
 
-function isGitRepo(dir: string): boolean {
-  return existsSync(join(dir, '.git'));
+interface HookTarget {
+  /** Realpath of the enclosing git worktree root. */
+  root: string;
+  /** Root-relative subdirectory the hook guards, trailing slash ('' when local_path IS the root). */
+  scope: string;
+}
+
+/**
+ * Discover the git root enclosing `localPath` (the same helper `gbrain sync`
+ * uses, so both commands accept the same shapes) and the root-relative scope.
+ * Both sides are realpath'd: `git rev-parse --show-toplevel` returns the
+ * resolved path, and an unresolved /tmp on macOS (/private/tmp) would
+ * otherwise yield a `..` scope. Throws when `localPath` is outside any repo.
+ */
+function resolveHookTarget(localPath: string): HookTarget {
+  const root = realpathSync(discoverGitRoot(localPath));
+  const rel = relative(root, realpathSync(localPath));
+  if (rel === '..' || rel.startsWith('../') || isAbsolute(rel)) {
+    throw new Error(`Not inside a git repository: ${localPath} resolves outside its git root ${root}`);
+  }
+  return { root, scope: rel ? `${rel}/` : '' };
 }
 
 type InstallResult = 'installed' | 'skipped_existing' | 'unchanged';
 
-export function installHook(repoPath: string, force: boolean): InstallResult {
-  const hooksDir = join(repoPath, '.githooks');
+export function installHook(localPath: string, force: boolean): InstallResult {
+  const { root, scope } = resolveHookTarget(localPath);
+  const hooksDir = join(root, '.githooks');
   const hookPath = join(hooksDir, 'pre-commit');
   mkdirSync(hooksDir, { recursive: true });
 
   if (existsSync(hookPath)) {
     const existing = readFileSync(hookPath, 'utf8');
     if (existing.includes(HOOK_BANNER)) {
-      // Already a gbrain hook — refresh the script content silently.
-      writeFileSync(hookPath, HOOK_SCRIPT);
+      // Already a gbrain hook — refresh it, keeping every scope it guards.
+      // One hook per root: a nested source joins the pathspec union; a
+      // whole-repo hook (root source, or no marker) already covers everything.
+      const prior = parseScopes(existing);
+      const wholeRepo = !scope || prior.length === 0;
+      const next = renderHookScript(wholeRepo ? [] : [...new Set([...prior, scope])].sort());
+      writeFileSync(hookPath, next);
       chmodSync(hookPath, 0o755);
-      return 'unchanged';
+      return next === existing ? 'unchanged' : 'installed';
     }
     if (!force) return 'skipped_existing';
     copyFileSync(hookPath, hookPath + '.bak');
   }
 
-  writeFileSync(hookPath, HOOK_SCRIPT);
+  writeFileSync(hookPath, renderHookScript(scope ? [scope] : []));
   chmodSync(hookPath, 0o755);
 
   // Set core.hooksPath unless the user has set it to something else already.
   try {
-    const current = execFileSync('git', ['-C', repoPath, 'config', '--get', 'core.hooksPath'], { encoding: 'utf8' }).trim();
+    const current = execFileSync('git', ['-C', root, 'config', '--get', 'core.hooksPath'], { encoding: 'utf8' }).trim();
     if (current && current !== '.githooks') return 'installed';
   } catch {
     // git config returns non-zero when the key is unset; that's the normal case.
   }
   try {
-    execFileSync('git', ['-C', repoPath, 'config', 'core.hooksPath', '.githooks']);
+    execFileSync('git', ['-C', root, 'config', 'core.hooksPath', '.githooks']);
   } catch {
     // Best-effort. Hook still exists; user can configure manually.
   }
   return 'installed';
 }
 
-export function uninstallHook(repoPath: string): boolean {
-  const hookPath = join(repoPath, '.githooks', 'pre-commit');
+export function uninstallHook(localPath: string): boolean {
+  const { root, scope } = resolveHookTarget(localPath);
+  const hookPath = join(root, '.githooks', 'pre-commit');
   if (!existsSync(hookPath)) return false;
   const content = readFileSync(hookPath, 'utf8');
   if (!content.includes(HOOK_BANNER)) return false;
+  if (scope) {
+    // Nested source: only its own pathspec is ours to drop — a whole-repo hook
+    // (root-registered source) or other nested sources' scopes stay.
+    const prior = parseScopes(content);
+    if (!prior.includes(scope)) return false;
+    const remaining = prior.filter((s) => s !== scope);
+    if (remaining.length > 0) {
+      writeFileSync(hookPath, renderHookScript(remaining));
+      chmodSync(hookPath, 0o755);
+      return true;
+    }
+  }
   rmSync(hookPath);
   if (existsSync(hookPath + '.bak')) {
     copyFileSync(hookPath + '.bak', hookPath);

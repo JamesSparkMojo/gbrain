@@ -129,4 +129,96 @@ describe('frontmatter install-hook (B13)', () => {
     expect(removed).toBe(false);
     expect(readFileSync(hookPath, 'utf8')).toContain('user hook');
   });
+
+  // ── #4600: local_path is a SUBDIRECTORY of the host repo (the `<ws>/brain`
+  // layout `gbrain bootstrap` creates) — the hook lands at the discovered git
+  // root, pathspec-scoped to the source, one hook per root.
+
+  test('#4600 nested source: hook installs at the discovered git root, scoped to the subdirectory', () => {
+    mkdirSync(join(tmp, 'brain'));
+    expect(installHook(join(tmp, 'brain'), false)).toBe('installed');
+    const hookPath = join(tmp, '.githooks', 'pre-commit');
+    expect(existsSync(hookPath)).toBe(true);
+    expect(existsSync(join(tmp, 'brain', '.githooks'))).toBe(false);
+    const content = readFileSync(hookPath, 'utf8');
+    expect(content).toContain('# gbrain-scope: brain/');
+    expect(content).toContain("--diff-filter=ACM -- 'brain/' | grep -E '\\.mdx?$'");
+  });
+
+  test('#4600 several nested sources share one hook: pathspecs union, no .bak, idempotent', () => {
+    mkdirSync(join(tmp, 'brain'));
+    mkdirSync(join(tmp, 'wiki'));
+    expect(installHook(join(tmp, 'brain'), false)).toBe('installed');
+    expect(installHook(join(tmp, 'wiki'), false)).toBe('installed');
+    const hookPath = join(tmp, '.githooks', 'pre-commit');
+    const content = readFileSync(hookPath, 'utf8');
+    expect(content).toContain('# gbrain-scope: brain/');
+    expect(content).toContain('# gbrain-scope: wiki/');
+    expect(content).toContain("-- 'brain/' 'wiki/' |");
+    expect(existsSync(hookPath + '.bak')).toBe(false);
+    expect(installHook(join(tmp, 'wiki'), false)).toBe('unchanged');
+  });
+
+  test('#4600 root-registered source keeps the unscoped script; a root install widens a scoped hook to the whole repo', () => {
+    installHook(tmp, false);
+    const hookPath = join(tmp, '.githooks', 'pre-commit');
+    expect(readFileSync(hookPath, 'utf8')).not.toContain('gbrain-scope');
+    expect(readFileSync(hookPath, 'utf8')).toContain("--diff-filter=ACM | grep -E '\\.mdx?$'");
+
+    mkdirSync(join(tmp, 'brain'));
+    expect(installHook(join(tmp, 'brain'), false)).toBe('unchanged'); // whole repo already covers brain/
+    expect(readFileSync(hookPath, 'utf8')).not.toContain('gbrain-scope');
+  });
+
+  test('#4600 the scoped hook ignores staged files outside the source (host README commits pass)', () => {
+    mkdirSync(join(tmp, 'brain'));
+    installHook(join(tmp, 'brain'), false);
+    // A `gbrain` stub that fails every validate call: any staged file that
+    // reaches the loop blocks the commit, so exit 0 proves the pathspec.
+    const bin = mkdtempSync(join(tmpdir(), 'fm-hook-bin-'));
+    writeFileSync(join(bin, 'gbrain'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` };
+    const runHook = (): number => {
+      try {
+        execFileSync('sh', [join(tmp, '.githooks', 'pre-commit')], { cwd: tmp, env, stdio: 'pipe' });
+        return 0;
+      } catch (e) {
+        return (e as { status: number }).status;
+      }
+    };
+    try {
+      writeFileSync(join(tmp, 'README.md'), 'no frontmatter here\n');
+      execFileSync('git', ['-C', tmp, 'add', 'README.md']);
+      expect(runHook()).toBe(0);
+      writeFileSync(join(tmp, 'brain', 'bad.md'), 'no frontmatter here\n');
+      execFileSync('git', ['-C', tmp, 'add', 'brain/bad.md']);
+      expect(runHook()).toBe(1);
+    } finally {
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  test('#4600 uninstall for one nested source drops only its scope; the last one removes the hook', () => {
+    mkdirSync(join(tmp, 'brain'));
+    mkdirSync(join(tmp, 'wiki'));
+    installHook(join(tmp, 'brain'), false);
+    installHook(join(tmp, 'wiki'), false);
+    const hookPath = join(tmp, '.githooks', 'pre-commit');
+    expect(uninstallHook(join(tmp, 'brain'))).toBe(true);
+    const content = readFileSync(hookPath, 'utf8');
+    expect(content).not.toContain('brain/');
+    expect(content).toContain("-- 'wiki/' |");
+    expect(uninstallHook(join(tmp, 'wiki'))).toBe(true);
+    expect(existsSync(hookPath)).toBe(false);
+  });
+
+  test('#4600 a path outside any git repo is refused with the shared sync message, nothing written', () => {
+    const plain = mkdtempSync(join(tmpdir(), 'fm-hook-nogit-'));
+    try {
+      expect(() => installHook(plain, false)).toThrow(/Not inside a git repository/);
+      expect(existsSync(join(plain, '.githooks'))).toBe(false);
+    } finally {
+      rmSync(plain, { recursive: true, force: true });
+    }
+  });
 });
