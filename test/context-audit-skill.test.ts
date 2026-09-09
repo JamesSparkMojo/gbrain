@@ -16,7 +16,10 @@ describe('#4988 context-audit skill states its token-estimate basis', () => {
 
   test('report header carries the estimate basis and defers to the host figure', () => {
     expect(skill).toContain('Estimate basis');
-    expect(skill).toMatch(/\/context/);
+    // Anchor to the deferral clause itself — a bare /\/context/ is satisfied by
+    // the `/tmp/context-audit-draft.md` scratch path on the pre-fix file.
+    expect(skill).toContain('Claude Code `/context`');
+    expect(skill).toContain('host-reported exact total (e.g. `/context`)');
   });
 
   // #5009: the divisor is the one the issue measured (2.65-3.03 bytes/token on
