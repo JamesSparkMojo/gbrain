@@ -21,7 +21,7 @@
  *     rotation (via configureGateway()) invalidates stale entries.
  */
 
-import { embed as aiEmbed, embedMany, generateObject, generateText, jsonSchema } from 'ai';
+import { embed as aiEmbed, embedMany, generateObject, generateText, jsonSchema, type JSONSchema7, type Output } from 'ai';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { listRecipes } from './recipes/index.ts';
@@ -3492,6 +3492,42 @@ export interface ChatOpts {
    * request body — the AI SDK routes provider options by provider key.
    */
   cacheSystem?: boolean;
+  /**
+   * JSON Schema the reply must conform to (#4863). Honored ONLY on
+   * openai-compatible recipes that declare `supports_structured_outputs` —
+   * backends that enforce `response_format: json_schema` server-side
+   * (Ollama's grammar-constrained decoding). Every other lane ignores the
+   * field, so native / claude-cli calls are byte-identical with or without
+   * it, and the reply still arrives as `text`: callers keep parsing and
+   * validating it themselves (see `jsonSchemaOutput`).
+   */
+  responseSchema?: { name: string; description?: string; schema: Record<string, unknown> };
+}
+
+/**
+ * Tolerant AI SDK `Output` spec for `ChatOpts.responseSchema` (#4863). NOT
+ * `Output.object`: generateText parses `output` eagerly when finishReason is
+ * 'stop', and Output.object throws NoObjectGeneratedError on unparseable
+ * text — that would turn a recoverable malformed reply into a thrown
+ * provider_error and skip the caller's own parse + retry lane. This spec only
+ * carries the responseFormat (what the openai-compatible provider turns into
+ * `response_format: json_schema`) and hands the raw text back, so
+ * result.text / stopReason / usage / the facts #2113 truncation retry all run
+ * unchanged. The streaming members are inert (chat() never streams).
+ */
+function jsonSchemaOutput(spec: NonNullable<ChatOpts['responseSchema']>): Output.Output<string, string, never> {
+  return {
+    name: 'json_schema',
+    responseFormat: Promise.resolve({
+      type: 'json' as const,
+      schema: spec.schema as JSONSchema7,
+      name: spec.name,
+      ...(spec.description ? { description: spec.description } : {}),
+    }),
+    parseCompleteOutput: async ({ text }) => text,
+    parsePartialOutput: async () => undefined,
+    createElementStreamTransform: () => undefined,
+  };
 }
 
 /**
@@ -4041,6 +4077,17 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
       }
     : opts.system;
 
+  // #4863: schema-constrained decoding for openai-compatible backends that
+  // honor json_schema. Gated on the recipe declaration so a backend that
+  // would reject the schema is never sent one; a declared backend that
+  // ignores it just returns unconstrained text, which the caller's parse
+  // lane already handles. Native + claude-cli lanes never see the field.
+  const output = opts.responseSchema
+    && recipe.implementation === 'openai-compatible'
+    && recipeSupportsStructuredOutputs(recipe)
+    ? jsonSchemaOutput(opts.responseSchema)
+    : undefined;
+
   try {
     const result = await _generateTextTransport({
       model,
@@ -4049,6 +4096,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
       tools: opts.tools && opts.tools.length > 0 ? tools : undefined,
       maxOutputTokens: opts.maxTokens ?? defaultMaxOutputTokens(modelStr),
       ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+      output,
       // v0.42.20.0 — default a chat timeout (composes with the caller's signal,
       // shorter wins). Covers native-anthropic (the default provider + facts Haiku).
       abortSignal: withDefaultTimeout(opts.abortSignal, AI_CHAT_TIMEOUT_MS),

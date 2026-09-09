@@ -330,6 +330,45 @@ export function buildExtractorSystem(admitsLow: boolean): string {
 
 const MAX_TURN_TEXT_CHARS = 8000;
 
+/**
+ * #4863 — JSON Schema for the extractor reply, sent as `responseSchema` on
+ * every chat() call. Only openai-compatible recipes that declare
+ * `supports_structured_outputs` (Ollama: server-side grammar-constrained
+ * decoding) receive it; every other lane ignores it. Mirrors RawExtracted:
+ * fact + kind required, the rest optional/nullable. `parseExtractorJsonDetailed`
+ * still validates the text — the schema removes the malformed-JSON class on
+ * small local models, it does not replace the parser. Nullable fields stay
+ * out of `required` on purpose: Ollama accepts that, the parser tolerates
+ * absence, and OpenAI-strict (which would demand it) never sees this schema.
+ */
+const FACTS_EXTRACTION_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    facts: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          fact: { type: 'string' },
+          kind: { type: 'string', enum: [...ALL_EXTRACT_KINDS] },
+          entity: { type: ['string', 'null'] },
+          confidence: { type: ['number', 'null'] },
+          notability: { type: 'string', enum: ['high', 'medium', 'low'] },
+          metric: { type: ['string', 'null'] },
+          value: { type: ['number', 'null'] },
+          unit: { type: ['string', 'null'] },
+          period: { type: ['string', 'null'] },
+        },
+        required: ['fact', 'kind'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['facts'],
+  additionalProperties: false,
+};
+const FACTS_RESPONSE_SCHEMA = { name: 'facts_extraction', schema: FACTS_EXTRACTION_SCHEMA };
+
 export type ExtractFailureReason =
   | 'chat_unavailable'
   | 'provider_error'
@@ -476,6 +515,7 @@ export async function extractFactsFromTurnWithOutcome(
       messages: [{ role: 'user', content: userContent }],
       maxTokens,
       abortSignal: input.abortSignal,
+      responseSchema: FACTS_RESPONSE_SCHEMA,
     });
     // #2113: never checked pre-fix — a truncated response (stopReason
     // 'length', e.g. reasoning tokens eating the cap on mandatory-reasoning
@@ -493,6 +533,7 @@ export async function extractFactsFromTurnWithOutcome(
         messages: [{ role: 'user', content: userContent }],
         maxTokens: effectiveMaxTokens,
         abortSignal: input.abortSignal,
+        responseSchema: FACTS_RESPONSE_SCHEMA,
       });
       if (result.stopReason === 'length') {
         process.stderr.write(
@@ -533,6 +574,7 @@ export async function extractFactsFromTurnWithOutcome(
         messages: [{ role: 'user', content: userContent }],
         maxTokens: effectiveMaxTokens,
         abortSignal: input.abortSignal,
+        responseSchema: FACTS_RESPONSE_SCHEMA,
       });
     } catch (err) {
       if (isAbort(err)) throw err;

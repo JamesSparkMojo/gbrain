@@ -69,7 +69,13 @@ export const ollama: Recipe = {
       supports_tools: false,
       supports_subagent_loop: false,
       supports_prompt_cache: false,
-      supports_structured_outputs: false,
+      // Ollama enforces `response_format: json_schema` server-side
+      // (grammar-constrained decoding since 0.5) for every loaded model, so
+      // unlike tools this is a provider-wide fact, not a per-model one.
+      // chat() sends the caller's `responseSchema` here (facts extraction,
+      // #4863) and expand() takes the strict generateObject lane with its
+      // existing rejected-recipe fallback.
+      supports_structured_outputs: true,
       // Reasoning-by-default local families spend output budget on internal
       // reasoning before emitting answer text, and Ollama bills it against
       // `max_tokens` — so callers that size output caps must grant headroom
