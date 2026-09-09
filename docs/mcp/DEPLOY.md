@@ -201,7 +201,14 @@ gbrain serve --http --port 3131 --bind 0.0.0.0 --public-url https://your-brain.n
 
 When `--public-url` is set without `--bind`, a stderr WARN fires at
 startup so the misconfiguration ("the tunnel is up but my agent gets
-ECONNREFUSED") is loud.
+ECONNREFUSED") is loud. Binding `0.0.0.0` without `GBRAIN_HTTP_CORS_ORIGIN`
+warns too: browser-based clients get no CORS header until you set the
+allowlist (see [SECURITY.md — CORS](../../SECURITY.md#cors)).
+
+`--source-guard` is a stdio-lane flag: with `--http` it prints a warning and
+is ignored. HTTP writes are fenced by each token's scopes instead, so
+operators migrating from stdio mint narrowed tokens
+(`gbrain auth create <name> --scopes read`) rather than relying on the guard.
 
 ```bash
 brew install ngrok
@@ -219,6 +226,41 @@ clients), and every 401 carries `WWW-Authenticate: Bearer
 resource_metadata="<that URL>"`, so an MCP client pointed at
 `https://your-brain.ngrok.app/mcp` finds the token endpoint from a fresh
 connection without any pasted URLs.
+
+#### Tailnet / LAN-only (no public tunnel)
+
+Two shapes work without exposing anything to the internet. In both, clients
+authenticate with `gbrain auth create` bearer tokens.
+
+**Tailscale Serve (HTTPS, tailnet-only).** Keep the default `127.0.0.1`
+bind, let Tailscale terminate TLS on the tailnet, and point `--public-url` at
+your MagicDNS name:
+
+```bash
+gbrain serve --http --port 3131 --public-url https://your-machine.your-tailnet.ts.net
+tailscale serve --bg 3131
+```
+
+Clients on the tailnet use `https://your-machine.your-tailnet.ts.net/mcp`.
+The "--public-url is set but --bind is not" WARN is expected in this shape —
+Tailscale Serve forwards to loopback. `tailscale serve` stays inside your
+tailnet; `tailscale funnel` is public exposure (see
+[ALTERNATIVES.md](ALTERNATIVES.md)).
+
+**Plain HTTP, bearer-only.** Bind the tailnet/LAN interface and omit
+`--public-url` entirely:
+
+```bash
+gbrain serve --http --port 3131 --bind 100.x.y.z   # or --bind 0.0.0.0
+```
+
+The OAuth issuer defaults to `http://localhost:3131`, which the MCP SDK
+accepts, and bearer-token verification never reads the issuer. Clients connect
+to `http://100.x.y.z:3131/mcp` with `Authorization: Bearer …`. OAuth discovery
+is the one thing this shape does not offer (the advertised issuer is
+loopback), so OAuth-only clients such as ChatGPT need the HTTPS shape above.
+Passing `--public-url http://100.x.y.z:3131` instead fails at startup — see
+[Troubleshooting](#troubleshooting).
 
 ### 4. Scopes and localOnly
 
@@ -395,6 +437,17 @@ Run `gbrain auth list` to see active tokens.
 
 **"service_unavailable" error**
 Database connection failed. Check your Supabase dashboard for outages.
+
+**"Issuer URL must be HTTPS" at startup**
+The MCP SDK rejects a non-HTTPS OAuth issuer unless the host is `localhost`
+or `127.0.0.1`, so `--public-url http://<lan-or-tailnet-ip>:3131` exits
+before the server listens. Either terminate TLS in front (Tailscale Serve,
+ngrok, Cloudflare Tunnel) and pass the `https://` URL, or drop `--public-url`
+for a bearer-only LAN endpoint — both shapes are in
+[Tailnet / LAN-only](#tailnet--lan-only-no-public-tunnel). Last resort, for
+plain-HTTP OAuth discovery on a private network you fully control: the SDK's
+own `MCP_DANGEROUSLY_ALLOW_INSECURE_ISSUER_URL=1` opt-in. Bearer auth works
+either way; OAuth clients may still refuse a non-HTTPS issuer.
 
 **Claude Desktop doesn't connect**
 Remote servers must be added via Settings > Integrations, NOT
