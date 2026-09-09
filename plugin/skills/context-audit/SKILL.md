@@ -82,9 +82,10 @@ This skill guarantees:
   `gbrain bootstrap render --only <FILE> --force`), never as a direct edit.
   See [skills/soul-audit/SKILL.md](../soul-audit/SKILL.md) for the mechanics.
 - **Estimated with a stated basis, never invented.** Token figures come from
-  the deterministic pre-pass (`wc -c` bytes / 3.5 — Claude-family tokenizers
-  run ~2.6-3.5 bytes/token on markdown dense with paths and code spans, so
-  this is a floor, not a count). The report prints the divisor so a reader can
+  the deterministic pre-pass (`wc -c` bytes/2.8 — Claude-family tokenizers
+  run ~2.6-3.5 bytes/token on markdown dense with paths and code spans; 2.8 is
+  the calibrated midpoint of measured always-loaded markdown, see #4988). The
+  report prints the divisor so a reader can
   re-derive every number. If the host client reports an exact per-category
   context breakdown (e.g. Claude Code `/context`), that figure outranks the
   estimate — quote it and use it for the stack total.
@@ -102,9 +103,9 @@ This skill guarantees:
 List the always-loaded files for this harness and measure each:
 
 ```bash
-# bytes/3.5 (floor for Claude-family tokenizers on markdown); integer math: *2/7
+# bytes/2.8 (calibrated for Claude-family tokenizers on markdown, #4988); integer ceil: (n*10+27)/28
 for f in CLAUDE.md AGENTS.md SOUL.md USER.md ACCESS_POLICY.md HEARTBEAT.md MEMORY.md; do
-  [ -f "$f" ] && echo "$f: $(wc -c < "$f") bytes (~$(( $(wc -c < "$f") * 2 / 7 )) tokens)"
+  [ -f "$f" ] && echo "$f: $(wc -c < "$f") bytes (~$(( ( $(wc -c < "$f") * 10 + 27 ) / 28 )) tokens)"
 done
 ```
 
@@ -144,7 +145,7 @@ Write the draft report to a temp file, then gate it:
 JUDGE=$(gbrain config get models.tier.utility)
 
 gbrain eval cross-modal \
-  --task "Context-stack token-hygiene audit: every finding cites file + quoted evidence; savings are estimated (bytes/3.5, divisor stated in the report), never invented; findings ranked by token savings; every rendered-file recommendation targets the interview answer bank or template, never a direct edit; risk class on every row" \
+  --task "Context-stack token-hygiene audit: every finding cites file + quoted evidence; savings are estimated (bytes/2.8, divisor stated in the report), never invented; findings ranked by token savings; every rendered-file recommendation targets the interview answer bank or template, never a direct edit; risk class on every row" \
   --output /tmp/context-audit-draft.md \
   --slug context-audit-report \
   --cycles 1 \
@@ -176,7 +177,7 @@ harness-routing convention the user can set up (see the cron-scheduler skill)
 # Context Audit — YYYY-MM-DD
 
 Stack total: ~NN,NNN tokens across N files (drift since last audit: +/-N,NNN)
-Estimate basis: bytes/3.5 (floor) | host-reported exact total (e.g. `/context`): NN,NNN or n/a
+Estimate basis: bytes/2.8 | host-reported exact total (e.g. `/context`): NN,NNN or n/a
 Findings: N (~NN,NNN tokens recoverable) | Contradictions: N
 Judge verdict: PASS (single-model, utility tier) | receipt: <path>
 
