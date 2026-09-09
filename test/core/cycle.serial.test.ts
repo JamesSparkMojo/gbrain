@@ -205,6 +205,15 @@ describe('runCycle — dryRun propagates to every phase', () => {
     expect(extractPhase?.status).toBe('skipped');
     expect(extractPhase?.details.reason).toBe('no_dry_run_support');
   });
+
+  test('dryRun skips the calibration trio — no LLM calls, no take_proposals/grade/profile writes (#4823)', async () => {
+    const report = await runCycle(sharedEngine,{ brainDir: '/tmp/brain', dryRun: true });
+    for (const name of ['propose_takes', 'grade_takes', 'calibration_profile'] as const) {
+      const phase = report.phases.find(p => p.phase === name);
+      expect(phase?.status).toBe('skipped');
+      expect(phase?.details.reason).toBe('no_dry_run_support');
+    }
+  });
 });
 
 // ─── Phase selection ──────────────────────────────────────────────

@@ -391,7 +391,8 @@ re-scores the corpus and reconciles the queued synthesis backlog.
 Options:
   --dry-run           Preview all fixes without writing. Note: synthesize
                       runs the cheap scored triage pass (caches verdicts),
-                      but skips the synthesis subagents.
+                      but skips the synthesis subagents; propose_takes,
+                      grade_takes and calibration_profile are skipped.
                       "--dry-run" does NOT mean "zero LLM calls."
   --json              Emit the CycleReport as JSON (agent-readable)
   --phase <name>      Run only the named phase(s). Repeatable — every named
