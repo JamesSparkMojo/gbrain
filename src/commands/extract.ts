@@ -70,14 +70,13 @@ import { pathToSlug, slugifyPath, slugifySegment, pruneDir, isSyncable } from '.
 import { withRetry, isRetryableConnError } from '../core/retry.ts';
 export { withRetry };
 export type { WithRetryOpts } from '../core/retry.ts';
-import { buildGazetteer, findMentionedEntities } from '../core/by-mention.ts';
+import { buildGazetteer, findMentionedEntities, hashGazetteer } from '../core/by-mention.ts';
 // #4611: the cross-source link fallback follows the configured
 // `sources.default` (validated shape) instead of the literal 'default'.
 import { isValidSourceId } from '../core/source-id.ts';
 import {
   loadOpCheckpoint, recordCompleted, clearOpCheckpoint, mentionsFingerprint,
 } from '../core/op-checkpoint.ts';
-import { createHash } from 'crypto';
 // v0.41.15.0 (T7, D9): --workers N for the fs-walk inner loops via the
 // shared sliding-pool helper + PGLite-clamp wrapper.
 import { runSlidingPool } from '../core/worker-pool.ts';
@@ -2379,10 +2378,7 @@ async function extractMentionsFromDb(
   // checkpoint cleanly. Without it, resumed pages would skip new
   // entities silently (codex flag).
   const allowCrossSource = await isCrossSourceLinksEnabled(engine);
-  const gazetteerHash = createHash('sha256')
-    .update([...gazetteer.keys()].sort().join('|'))
-    .digest('hex')
-    .slice(0, 8) + (allowCrossSource ? ':xs' : '');
+  const gazetteerHash = hashGazetteer(gazetteer) + (allowCrossSource ? ':xs' : '');
 
   // #4304: --since prunes at the ref level BEFORE the checkpoint diff and
   // the per-page getPage loop. Refs outside the window never enter the
