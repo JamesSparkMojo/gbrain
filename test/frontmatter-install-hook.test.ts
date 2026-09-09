@@ -3,7 +3,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { execFileSync } from 'child_process';
-import { installHook, uninstallHook } from '../src/commands/frontmatter-install-hook.ts';
+import { activeGitHooks, installHook, uninstallHook } from '../src/commands/frontmatter-install-hook.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 function gitInit(dir: string) {
   execFileSync('git', ['init', '-q', dir]);
@@ -210,6 +211,29 @@ describe('frontmatter install-hook (B13)', () => {
     expect(content).toContain("-- 'wiki/' |");
     expect(uninstallHook(join(tmp, 'wiki'))).toBe(true);
     expect(existsSync(hookPath)).toBe(false);
+  });
+
+  test('a host repo that already runs hooks from .git/hooks keeps core.hooksPath unset (hook written, not wired)', async () => {
+    // Setting core.hooksPath makes git ignore <gitdir>/hooks/* for EVERY hook
+    // type. `git init` ships only *.sample files there (inert); an executable
+    // non-sample entry is a live hook the user relies on, so wiring .githooks
+    // would silently disable it. Non-executable files are ignored by git too.
+    const gitHooks = join(tmp, '.git', 'hooks');
+    writeFileSync(join(gitHooks, 'pre-push'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    writeFileSync(join(gitHooks, 'pre-rebase'), '#!/bin/sh\nexit 0\n', { mode: 0o644 });
+    expect(activeGitHooks(tmp)).toEqual(['pre-push']);
+    mkdirSync(join(tmp, 'brain'));
+    // GIT_CONFIG_GLOBAL=/dev/null: a developer's global core.hooksPath must
+    // not turn this into the "set elsewhere" branch.
+    await withEnv({ GIT_CONFIG_GLOBAL: '/dev/null' }, async () => {
+      expect(installHook(join(tmp, 'brain'), false)).toBe('installed_unwired');
+    });
+    expect(existsSync(join(tmp, '.githooks', 'pre-commit'))).toBe(true);
+    let localHooksPath = '';
+    try {
+      localHooksPath = execFileSync('git', ['-C', tmp, 'config', '--local', '--get', 'core.hooksPath'], { encoding: 'utf8' }).trim();
+    } catch { /* unset is the asserted outcome */ }
+    expect(localHooksPath).toBe('');
   });
 
   test('#4600 a path outside any git repo is refused with the shared sync message, nothing written', () => {

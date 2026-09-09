@@ -46,7 +46,13 @@ The hook lands at `<git root>/.githooks/pre-commit` — the source's own repo,
 or the enclosing host repo when the source is registered as a subdirectory of
 one (see the topology cases below). If `core.hooksPath` is unset, the install
 also runs `git config core.hooksPath .githooks` so the hook is picked up
-without manual git config. Only a source outside any git repo is skipped
+without manual git config. Setting `core.hooksPath` makes git ignore
+`.git/hooks/*` for every hook type, so when that directory already holds an
+active hook (executable, not `*.sample` — a host repo's own pre-push, commit-msg,
+framework-installed hooks, …) the installer writes the gbrain hook but leaves
+`core.hooksPath` unset and prints the hook names plus the manual wiring step:
+move them into `.githooks/`, then `git -C <root> config core.hooksPath
+.githooks`. Only a source outside any git repo is skipped
 (`skipped, not a git repo`).
 
 ## Bypass
