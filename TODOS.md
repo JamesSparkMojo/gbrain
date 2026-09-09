@@ -1,6 +1,6 @@
 # TODOS
 
-## Community fix wave follow-ups (filed 2026-09-09, p-small-infra train)
+## Community fix wave follow-ups (filed 2026-09-09)
 
 - [ ] **P3 — hermes-door: pin the installer bootstrapper by upstream commit instead of sha-pinning the served `install.sh`.**
   **What:** `.github/workflows/heavy-tests.yml` pins `HERMES_INSTALL_SHA256` against the bytes served at the vendor's stable install URL, which upstream edits often: the pin has needed four refreshes in four weeks (latest #4991, fixes #4990) and one was stale within hours of being observed, so every upstream edit is a red nightly until someone re-reviews the upstream diff and re-pins the two homes (the workflow constant + `docs/mcp/HERMES-CLI-PIN.md`). The door also stays red at its Preconditions step until the `ANTHROPIC_API_KEY` repo secret is set; the re-pin restores digest + payload + version verification, not a green job. **How (maintainer design call):** fetch the bootstrapper from the upstream repo at a reviewed commit (the door already commit-pins the PAYLOAD via `HERMES_GIT_COMMIT`, so a commit-pinned bootstrapper is consistent; the served-URL door was kept deliberately as the real user install path — weigh that against a roughly weekly re-pin chore), or keep the served-URL pin and accept the chore. **Effort:** S. **Priority:** P3.
@@ -197,9 +197,7 @@
   retrieval-gate path were deferred. Triage records (verdict, evidence, fix
   sketch, key files per issue) live in the wave workspace
   `.context/wave/triage/issue/` + `.context/wave/refute/issue/` (gitignored
-  wave working state, not repo content). Deferred: #4381 #4558 #4576 #4578
-  #4586 #4588 #4600 #4603 #4605 #4613 #4616 #4622 #4649 #4653 #4670 #4684
-  #4741 #4761 #4766 #4772 #4795 #4797 #4852 #4879 #4910 #4921.
+  wave working state, not repo content). Deferred: #4381 #4576 #4578 #4603 #4616 #4622 #4649 #4772 #4921 (of the 0.48.5.0 wave's 26 deferrals, 17 shipped in 0.48.6.0: #4558 #4586 #4588 #4600 #4605 #4613 #4653 #4670 #4684 #4741 #4761 #4766 #4795 #4797 #4852 #4879 #4910).
   Of the 0.48.1.0 wave's 27 deferrals, ten shipped in 0.48.5.0 (#4744 via
   #4933, #4729 via #4865, #4728, #4696, #4652, #4620, #4606, #4597, #4589,
   #4563), five were re-classified on verification (#4738 and #4732
