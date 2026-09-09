@@ -4437,10 +4437,11 @@ function manageGitignoreAtGitRoot(path: string, engineKind?: 'pglite' | 'postgre
 }
 
 export async function runSync(engine: BrainEngine, args: string[]) {
-  // #4888: under --json, stdout is reserved for JSON lines (the envelope and
-  // any JSON status lines); every slog() human line from performSync and its
-  // callees routes to stderr instead. serr/progress are stderr already, and
-  // the console.log(JSON.stringify(..)) sites are untouched by the wrap.
+  // #4888: under --json, stdout is reserved for the ONE JSON envelope (#4684:
+  // the cost-gate status object rides inside it as `cost_gate`); every slog()
+  // human line from performSync and its callees routes to stderr instead.
+  // serr/progress are stderr already, and the envelope's own
+  // console.log(JSON.stringify(..)) site is untouched by the wrap.
   return args.includes('--json')
     ? withHumanLogsToStderr(() => runSyncInner(engine, args))
     : runSyncInner(engine, args);
@@ -5231,6 +5232,8 @@ See also:
         ok_count: okCount,
         error_count: errCount,
         skipped_count: perSourceResults.filter((r) => r.status === 'skipped_missing_path').length,
+        // #4684: the cost-gate status object rides inside the ONE envelope.
+        ...(embedPlan.costGate ? { cost_gate: embedPlan.costGate } : {}),
       }));
     }
 
@@ -5285,6 +5288,7 @@ See also:
   // inline spend into informed inline-or-deferred spend.
   let singleSourceAutoDefer = false;
   let singleSourceNoWorkerSurface = false;
+  let singleCostGate: Record<string, unknown> | undefined;
   if (!noEmbed && !dryRun && !watch) {
     const gateRows = await engine.executeRaw<{ local_path: string | null; config: Record<string, unknown>; last_commit: string | null; chunker_version: string | null }>(
       `SELECT local_path, config, last_commit, chunker_version FROM sources WHERE id = $1`,
@@ -5302,6 +5306,7 @@ See also:
         jsonOut, yesFlag, full, includeGitignored, noAutoEmbed,
       });
       singleSourceNoWorkerSurface = gate.workerSurface.status === 'no_worker_surface';
+      singleCostGate = gate.costGate;
       if (gate.stop) return;
       if (gate.autoDeferEmbeds) {
         opts.noEmbed = true;
@@ -5397,7 +5402,7 @@ See also:
       }
     }
     if (jsonOut) {
-      console.log(JSON.stringify(buildSingleSyncJsonEnvelope(sourceId, result, singleEmbedBackfill)));
+      console.log(JSON.stringify(buildSingleSyncJsonEnvelope(sourceId, result, singleEmbedBackfill, singleCostGate)));
     }
     return;
   }
