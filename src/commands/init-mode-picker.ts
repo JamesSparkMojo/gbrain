@@ -162,6 +162,9 @@ discount on top of these numbers (cache hits skip downstream entirely).
                     Best for: Opus/frontier models, max retrieval quality,
                     low-volume high-stakes work.
 
+("no LLM expansion" governs gbrain search + callers that leave expansion
+unset; gbrain query expands in every mode unless you pass --no-expand.)
+
 You can change this any time with: gbrain config set search.mode <mode>
 Per-knob tuning + recommendation engine ships at: gbrain search tune
 `;

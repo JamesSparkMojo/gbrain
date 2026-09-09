@@ -217,6 +217,11 @@ project resolves through `src/core/search/mode.ts`.
 | `autocut` (rerank-cliff cut)  | off            | off        | off            |
 | `searchLimit` default         | 10             | 25         | 50             |
 
+The `expansion` row governs no shipped verb today: `gbrain query` expands by
+default in every mode (`--no-expand` / `expand: false` opts out); `search`, the
+memory verbs and the eval harnesses pin it per call; only a caller that leaves
+`expansion` unset AND wires an `expandFn` would inherit the bundle value.
+
 **Cost anchors (downstream agent input cost — gbrain itself is rounding error).**
 The corner-to-corner spread is 25x once you pair mode with downstream model.
 Chunks ~400 tokens avg. Per-query cost @ 10K queries/month (typical
