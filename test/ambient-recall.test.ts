@@ -19,6 +19,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { operations } from '../src/core/operations.ts';
 import { MEMORY_VERBS_VERSION, VERB_NAMES } from '../src/core/verbs.ts';
+import { estimateTokens } from '../src/core/search/token-budget.ts';
 import {
   getSessionContextState,
   upsertSessionContextState,
@@ -256,7 +257,7 @@ describe('delta cursor lifecycle', () => {
       await call(putPage, local, { slug: `notes/${s}`, content: `# ${s}\n\ncontent for ${s}` });
     }
     // tiny budget: deliver a strict subset, has_more = true, cursor lags
-    const r1 = await call(del, local, { session_id: 'alo', budget_tokens: 8 });
+    const r1 = await call(del, local, { session_id: 'alo', budget_tokens: 80 });
     expect(r1.has_more).toBe(true);
     expect(r1.pages.length).toBeGreaterThan(0);
     expect(r1.pages.length).toBeLessThan(3);
@@ -276,7 +277,7 @@ describe('delta cursor lifecycle', () => {
     for (const s of ['txt-a', 'txt-b', 'txt-c']) {
       await call(putPage, local, { slug: `notes/${s}`, content: `# ${s}\n\ncontent` });
     }
-    const r = await call(del, local, { session_id: 'txt', budget_tokens: 8 });
+    const r = await call(del, local, { session_id: 'txt', budget_tokens: 80 });
     const inText = ['txt-a', 'txt-b', 'txt-c'].filter((s) => (r.text as string).includes(s));
     expect(inText.length).toBe(r.pages.length); // text lists exactly the delivered pages
   });
@@ -298,7 +299,7 @@ describe('delta cursor lifecycle', () => {
     });
     // Tiny budget: deliver a strict subset of the tie cluster (all 4 share one
     // timestamp — the keyset paginates within it by slug).
-    const r1 = await call(del, local, { session_id: 'tie', budget_tokens: 8 });
+    const r1 = await call(del, local, { session_id: 'tie', budget_tokens: 80 });
     expect(r1.pages.length).toBeGreaterThan(0);
     expect(r1.pages.length).toBeLessThan(4);
     expect(r1.has_more).toBe(true);
@@ -401,7 +402,9 @@ describe('delta cursor lifecycle', () => {
     // One identical timestamp, earlier than every other fixture cluster.
     await engine.executeRaw(`UPDATE pages SET updated_at = '2026-08-09T10:00:00Z' WHERE slug LIKE 'notes/sr-%'`);
     // NO session_id anywhere: resume rides next_cursor.since/.slug alone.
-    // budget 8 ≈ 2 pages per call, so the 4-page cluster needs ≥2 wakes.
+    // budget 80 ≈ 1 page per call (#4761: ~53 tokens of envelope+headers are
+    // reserved, each rendered page line is ~15), so the 4-page cluster needs
+    // several wakes.
     const seen: string[] = [];
     let since = '2026-08-09T09:59:00Z';
     let sinceSlug: string | undefined;
@@ -410,7 +413,7 @@ describe('delta cursor lifecycle', () => {
       const r = await call(del, ctxFor({ remote: false }), {
         since,
         ...(sinceSlug !== undefined ? { since_slug: sinceSlug } : {}),
-        budget_tokens: 8,
+        budget_tokens: 80,
       });
       for (const pg of r.pages as Array<{ slug: string }>) {
         if (pg.slug.startsWith('notes/sr-')) seen.push(pg.slug);
@@ -720,6 +723,54 @@ describe('budget packing + drop footer', () => {
     const r = await call(contextPack, ctxFor({ remote: false }), { entities: 'acme-example' });
     expect(r.budget_tokens).toBeUndefined();
     expect(r.dropped_count).toBeUndefined();
+  });
+
+  // #4761: `text` is what harnesses inject — it must fit budget_tokens, so the
+  // packer prices the RENDERED line (+ envelope/header reserve), not raw fields.
+  test('context_pack text never exceeds budget_tokens (#4761)', async () => {
+    const r = await call(contextPack, ctxFor({ remote: false }), { entities: 'acme-example', budget_tokens: 80 });
+    expect((r.facts as unknown[]).length).toBeGreaterThan(0);
+    expect(r.dropped_count).toBeGreaterThan(0);
+    expect(estimateTokens(r.text as string)).toBeLessThanOrEqual(80);
+    expect(r.budget_used).toBeLessThanOrEqual(80);
+  });
+
+  test('delta text never exceeds budget_tokens (#4761)', async () => {
+    const putPage = operations.find((o) => o.name === 'put_page')!;
+    const local = ctxFor({ remote: false });
+    await call(del, local, { session_id: 'fit' });
+    for (const s of ['fit-a', 'fit-b', 'fit-c', 'fit-d', 'fit-e', 'fit-f']) {
+      await call(putPage, local, { slug: `notes/${s}`, content: `# ${s}\n\ncontent` });
+    }
+    const r = await call(del, local, { session_id: 'fit', budget_tokens: 90 });
+    expect((r.pages as unknown[]).length).toBeGreaterThan(0);
+    expect(r.has_more).toBe(true);
+    expect(estimateTokens(r.text as string)).toBeLessThanOrEqual(90);
+    expect(r.budget_used).toBeLessThanOrEqual(90);
+  });
+
+  test('delta packs threads too — budget-dropped threads count in dropped_count/has_more (#4761)', async () => {
+    const putPage = operations.find((o) => o.name === 'put_page')!;
+    const local = ctxFor({ remote: false });
+    await call(putPage, local, { slug: 'people/alice-example', content: '# Alice Example\n\nbody' });
+    await call(remember, local, {
+      fact: 'alice-example will send the signed term sheet by Friday',
+      kind: 'commitment',
+      entity: 'people/alice-example',
+      provenance: 'test',
+      visibility: 'world',
+    });
+    __resetHotMemoryCacheForTests();
+    const since = '1970-01-01T00:00:00Z';
+    const full = await call(del, local, { since, entities: 'people/alice-example' });
+    expect((full.threads as unknown[]).length).toBeGreaterThan(0);
+    const r = await call(del, local, { since, entities: 'people/alice-example', budget_tokens: 1 });
+    expect(r.threads).toEqual([]);
+    expect(r.text).toBe('');
+    expect(r.has_more).toBe(true);
+    expect(r.dropped_count).toBe(
+      (full.pages as unknown[]).length + (full.facts as unknown[]).length + (full.threads as unknown[]).length,
+    );
   });
 
   test('forced overflow: dropped_count > 0 and budget_used stays within budget_tokens (v0.45.7)', async () => {
