@@ -902,7 +902,7 @@ async function _runBrainstormInner(
   } catch (err) {
     judgeFailed = true;
     const msg = err instanceof Error ? err.message : String(err);
-    stderr(`[${profile.label}] WARN: judge phase failed (${msg}); saving ideas unscored. Re-run with --retry-judge to score.\n`);
+    stderr(`[${profile.label}] WARN: judge phase failed (${msg}); saving ideas unscored. Re-score with: gbrain ${profile.label} --resume ${runId} (see --list-runs)\n`);
   }
 
   // ---- Phase 5: assemble BrainstormResult ----
@@ -930,9 +930,19 @@ async function _runBrainstormInner(
   // TX4: surface --resume hint when any cross failed during this run.
   // The user can re-run with `--resume <run_id>` and we'll retry only
   // the missing crosses (failed_crosses + never-attempted).
+  //
+  // #4766: a judge failure keeps the checkpoint too. The flush above already
+  // persisted every completed cross with judge_done=false, so `--resume` is
+  // the judge-only retry: completed crosses short-circuit from disk and
+  // Phase 4 re-runs. Pre-fix this branch keyed on failed_crosses alone, so
+  // all-crosses-green + judge-failed marked judge_done and unlinked the file.
   if (liveCheckpoint.failed_crosses.length > 0) {
     stderr(
       `[${profile.label}] ${liveCheckpoint.failed_crosses.length} cross(es) failed. Resume with: gbrain ${profile.label} --resume ${runId}\n`,
+    );
+  } else if (judgeFailed) {
+    stderr(
+      `[${profile.label}] Judge failed; ${liveCheckpoint.completed_crosses.length} cross(es) kept in checkpoint ${runId}. Re-score with: gbrain ${profile.label} --resume ${runId}\n`,
     );
   } else {
     // Clean completion — every cross succeeded. Clear the checkpoint so we
@@ -1008,7 +1018,7 @@ export function formatBrainstormMarkdown(
     lines.push(`# ${result.profile_label === 'lsd' ? 'LSD' : 'Brainstorm'}: ${result.question}`);
     lines.push('');
     if (result.judge_failed) {
-      lines.push('> **Judge phase failed mid-run** — ideas below are unscored. Re-run with `--retry-judge` to score.');
+      lines.push('> **Judge phase failed mid-run** — ideas below are unscored. Re-score with `--resume <run_id>` (see `--list-runs`).');
       lines.push('');
     }
     if (result.short_of_target) {

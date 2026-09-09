@@ -313,8 +313,8 @@ async function runBrainstormCli(
     const title = `${profile.label === 'lsd' ? 'LSD' : 'Brainstorm'}: ${parsed.question.slice(0, 100)}`;
     // Build ONE frontmatter object and render via the canonical serializer so
     // the saved file round-trips through `gbrain sync` byte-for-byte. Include
-    // filtered ideas (onlyPassed:false) so a future --retry-judge has the full
-    // set to re-score.
+    // filtered ideas (onlyPassed:false) so a judge-failed run can be re-scored
+    // from the saved page as well as via --resume.
     const fmObj = buildBrainstormFrontmatterObject(result);
     const body = formatBrainstormMarkdown(result, { onlyPassed: false, includeMeta: true });
     const content = serializeMarkdown(fmObj, body, '', { type: 'note', title, tags: [] });

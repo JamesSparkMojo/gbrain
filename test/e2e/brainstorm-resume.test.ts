@@ -117,7 +117,7 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-function makeChatFnMixed(failOnCrossCallN: number) {
+function makeChatFnMixed(failOnCrossCallN: number, judgeOpts: { garbage?: boolean } = {}) {
   let crossCalls = 0;
   let judgeCalls = 0;
   const fn = async (opts: ChatOpts): Promise<ChatResult> => {
@@ -129,6 +129,18 @@ function makeChatFnMixed(failOnCrossCallN: number) {
     const isJudge = /\(close=.* × far=.*\)/.test(content);
     if (isJudge) {
       judgeCalls++;
+      if (judgeOpts.garbage) {
+        // #4766: a single malformed judge response (parseJudgeJSON throws).
+        const text = 'not json at all';
+        return {
+          text,
+          blocks: [{ type: 'text', text }],
+          stopReason: 'end',
+          model: 'claude-sonnet-4-6',
+          providerId: 'fake',
+          usage: { input_tokens: 200, output_tokens: 10, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        };
+      }
       const ideaIds = Array.from(content.matchAll(/## Idea (\S+)/g)).map((m) => m[1] as string);
       const json = {
         ideas: ideaIds.map((id) => ({
@@ -321,5 +333,81 @@ describe('brainstorm --max-cost pre-flight refusal (F2 smoke)', () => {
     // HTTP would happen on a real run.
     expect(chat.crossCalls).toBe(0);
     expect(chat.judgeCalls).toBe(0);
+  });
+});
+
+// #4766: a judge failure must NOT destroy the paid cross results, and the
+// remediation it prints must be a flag that exists. Pre-fix the cleanup
+// branch keyed on failed_crosses only, so all-crosses-green + judge-failed
+// marked judge_done and unlinked the checkpoint, while the advice named a
+// `--retry-judge` flag that no parser handled. `--resume <run_id>` already IS
+// the judge-only retry: completed crosses short-circuit from disk and Phase 4
+// always runs.
+describe('brainstorm judge failure keeps the checkpoint; --resume re-scores (#4766)', () => {
+  test('judge parse failure → checkpoint retained (judge_done=false, every cross on disk), stderr names --resume', async () => {
+    const chat = makeChatFnMixed(99999, { garbage: true });
+    const stderrChunks: string[] = [];
+    const result = await runBrainstorm(engine, {}, {
+      question: 'judge failure keeps checkpoint question',
+      profile: tinyProfile,
+      skipCostPreview: true,
+      maxCostUsd: 100,
+      chatFn: chat.fn,
+      embedQueryFn: async () => basisEmbedding(0),
+      stderrWrite: (s) => { stderrChunks.push(s); },
+    });
+    expect(result.judge_failed).toBe(true);
+    expect(chat.judgeCalls).toBeGreaterThanOrEqual(1);
+
+    const dir = join(tmp, '.gbrain', 'brainstorm');
+    const files = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith('.json')) : [];
+    expect(files.length).toBe(1);
+    const runId = files[0].replace(/\.json$/, '');
+    const cp = loadCheckpoint(runId);
+    expect(cp).not.toBeNull();
+    expect(cp!.judge_done).toBe(false);
+    // k_close=2 × m_far=4 = 8 crosses, all paid for, all still on disk.
+    expect(cp!.completed_crosses.length).toBe(chat.crossCalls);
+    expect(cp!.failed_crosses.length).toBe(0);
+
+    const stderr = stderrChunks.join('');
+    expect(stderr).toContain(`--resume ${runId}`);
+    expect(stderr).not.toContain('--retry-judge');
+  });
+
+  test('second run with resumeRunId + healthy judge re-scores WITHOUT re-paying any cross', async () => {
+    const bad = makeChatFnMixed(99999, { garbage: true });
+    await runBrainstorm(engine, {}, {
+      question: 'judge failure then resume question',
+      profile: tinyProfile,
+      skipCostPreview: true,
+      maxCostUsd: 100,
+      chatFn: bad.fn,
+      embedQueryFn: async () => basisEmbedding(0),
+      stderrWrite: () => {},
+    });
+    const dir = join(tmp, '.gbrain', 'brainstorm');
+    const files = readdirSync(dir).filter((f) => f.endsWith('.json'));
+    expect(files.length).toBe(1);
+    const runId = files[0].replace(/\.json$/, '');
+
+    const good = makeChatFnMixed(99999);
+    const result = await runBrainstorm(engine, {}, {
+      question: 'judge failure then resume question',
+      profile: tinyProfile,
+      skipCostPreview: true,
+      maxCostUsd: 100,
+      chatFn: good.fn,
+      embedQueryFn: async () => basisEmbedding(0),
+      stderrWrite: () => {},
+      resumeRunId: runId,
+    });
+    expect(good.crossCalls).toBe(0);
+    expect(good.judgeCalls).toBe(1);
+    expect(result.judge_failed).toBe(false);
+    expect(result.ideas.length).toBe(8);
+    expect(result.ideas.every((i) => i.judge !== undefined)).toBe(true);
+    // Clean completion clears the checkpoint as before.
+    expect(readdirSync(dir).filter((f) => f.endsWith('.json')).length).toBe(0);
   });
 });
