@@ -81,3 +81,26 @@ describe('loadActivePackBestEffort', () => {
     });
   });
 });
+
+describe('loadActivePackBestEffort — #4653 DB-plane schema_pack (tier 4)', () => {
+  function engineWithDbPack(pack: string | null) {
+    return { getConfig: async (key: string) => (key === 'schema_pack' ? pack : null) } as never;
+  }
+
+  it('honors the engine-side schema_pack when the ctx carries a live engine', async () => {
+    await withEnv({ GBRAIN_HOME: tmpDir, GBRAIN_SCHEMA_PACK: undefined }, async () => {
+      const ctx = { ...fakeCtx(), engine: engineWithDbPack('gbrain-base-v2') } as OperationContext;
+      const result = await loadActivePackBestEffort(ctx);
+      expect(result?.manifest.name).toBe('gbrain-base-v2');
+    });
+  });
+
+  it('a throwing getConfig degrades to file/env resolution, never throws', async () => {
+    await withEnv({ GBRAIN_HOME: tmpDir, GBRAIN_SCHEMA_PACK: undefined }, async () => {
+      const boom = { getConfig: async () => { throw new Error('no config table'); } } as never;
+      const ctx = { ...fakeCtx(), engine: boom } as OperationContext;
+      const result = await loadActivePackBestEffort(ctx);
+      expect(result?.manifest.name).toBe('gbrain-base');
+    });
+  });
+});
