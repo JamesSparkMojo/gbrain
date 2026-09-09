@@ -165,8 +165,10 @@ export function parseCodexHookTranscript(
     const mapped = mapCodexLine(entry);
     switch (mapped.kind) {
       case 'session':
-        if (mapped.sessionId) sessionId = mapped.sessionId;
-        if (mapped.cwd) cwd = mapped.cwd;
+        // #4981: first header wins (a forked rollout inherits its parent's header
+        // later in the file); identity is payload.id, the id in the rollout filename.
+        if (!sessionId && mapped.sessionId) sessionId = mapped.sessionId;
+        if (!cwd && mapped.cwd) cwd = mapped.cwd;
         break;
       case 'user':
         genuineUserTurnIndexes.push(turns.length);
