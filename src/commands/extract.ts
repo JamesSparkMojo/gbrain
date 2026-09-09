@@ -418,13 +418,13 @@ export function buildSlugPathIndex(
  *   2. Wikilinks:          [[relative/path]] or [[relative/path|Display Text]]
  *
  * Both are resolved relative to the file that contains them. External URLs
- * (containing ://) are always skipped. For wikilinks, the .md suffix is added
- * if absent and section anchors (#heading) are stripped.
+ * (containing ://) are always skipped. Section anchors (#heading) are stripped
+ * from both (#4995); for wikilinks, the .md suffix is added if absent.
  */
 export function extractMarkdownLinks(content: string): { name: string; relTarget: string }[] {
   const results: { name: string; relTarget: string }[] = [];
 
-  const mdPattern = /\[([^\]]+)\]\(([^)]+\.md)\)/g;
+  const mdPattern = /\[([^\]]+)\]\(([^)#]+\.md)(?:#[^)]*)?\)/g;
   let match;
   while ((match = mdPattern.exec(content)) !== null) {
     let target = match[2];

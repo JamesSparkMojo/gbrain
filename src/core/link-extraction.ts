@@ -189,7 +189,7 @@ const ANY_DIR_SEGMENT = '[a-z0-9][a-z0-9_-]*';
  * are dropped by the callers' existence checks, exactly as before.
  */
 const ENTITY_REF_RE = new RegExp(
-  `\\[([^\\]]+)\\]\\((?:\\.\\.\\/)*(${ANY_DIR_SEGMENT}\\/[^)\\s]+?)(?:\\.md)?\\)`,
+  `\\[([^\\]]+)\\]\\((?:\\.\\.\\/)*(${ANY_DIR_SEGMENT}\\/[^)\\s#]+?)(?:\\.md)?(?:#[^)]*)?\\)`,
   'g',
 );
 
@@ -257,7 +257,8 @@ const MARKDOWN_LABEL_WIKILINK_RE = /\[[^\]\n]*\[\[[^\]\n]+\]\][^\]\n]*\]\([^)\n]
 
 /**
  * #3190: same-directory markdown link — `[Name](slug.md)` whose target has
- * NO directory segment and NO scheme/anchor (`/`, `:`, `#` all excluded).
+ * NO directory segment and NO scheme (`/`, `:` excluded). A trailing
+ * `#anchor` is stripped (#4995), as every wikilink regex here already does.
  * #4873: an explicit `./` prefix (`[Name](./slug.md)`, `[Name](./sub/x.md)`)
  * is the same page-dir-relative intent — the FS walker's join() eats it — so
  * the relative arm admits `/` in the tail. The arm takes ANY leading run of
@@ -271,7 +272,7 @@ const MARKDOWN_LABEL_WIKILINK_RE = /\[[^\]\n]*\[\[[^\]\n]+\]\][^\]\n]*\]\([^)\n]
  * linking page's directory happens in extractPageLinks (this module has no
  * page context here).
  */
-const SAME_DIR_MD_RE = /\[([^\]]+)\]\((?:((?:\.{1,2}\/)+)([^):#\s]+?)|([^)/:#\s]+?))\.md\)/g;
+const SAME_DIR_MD_RE = /\[([^\]]+)\]\((?:((?:\.{1,2}\/)+)([^):#\s]+?)|([^)/:#\s]+?))\.md(?:#[^)]*)?\)/g;
 
 /**
  * A code-reference found in markdown prose. Created by extractCodeRefs and
@@ -795,8 +796,11 @@ export async function extractPageLinks(
     const context = idx >= 0 ? excerpt(content, idx, 240) : ref.name;
     // Relative markdown links resolve against THIS page's directory (fixes
     // cross-dir edges for nested / subtree-scoped content); absolute refs pass
-    // through unchanged.
-    const targetSlug = resolveRelativeSlug(slug, ref);
+    // through unchanged. #4995: lowercased (pass-1 markdown + 2a/2b wikilink
+    // refs) — validateSlug stores every slug lowercase on both engines, so a
+    // mixed-case candidate could never resolve. NOT slugifyPath: it strips
+    // characters validateSlug permits and would mangle a legit put_page slug.
+    const targetSlug = resolveRelativeSlug(slug, ref).toLowerCase();
     candidates.push({
       targetSlug,
       linkType: typeFor(context, targetSlug, idx),

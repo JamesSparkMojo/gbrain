@@ -2224,3 +2224,48 @@ describe('makeResolver — dir-hint step tries both slug grammars (#4855)', () =
     expect(await r.resolve('Đức Example', 'people')).toBe('people/duc-example');
   });
 });
+
+// #4995: markdown links carrying a `#anchor` either produced an unmatchable
+// slug (pass 1 kept `x.md#anchor` in the slug) or matched nothing (sameDir
+// pass excluded `#`), while every wikilink regex already stripped anchors. A
+// brain that links with anchors had an empty graph. Pass-1 targets are also
+// lowercased: validateSlug stores every slug lowercase on both engines, so a
+// mixed-case candidate could never resolve.
+describe('#4995 — markdown link anchors are stripped, pass-1 targets lowercased', () => {
+  test('pass-1 dir-shaped link drops the anchor and the .md', () => {
+    expect(extractEntityRefs('[D](registry/sessions/tally.md#x)')).toEqual([
+      { name: 'D', slug: 'registry/sessions/tally', dir: 'registry', index: 0 },
+    ]);
+    expect(extractEntityRefs('[D](registry/sessions/tally#x)')[0].slug).toBe('registry/sessions/tally');
+    expect(extractEntityRefs('[D](../registry/tally.md#a b)')[0]).toEqual(
+      { name: 'D', slug: 'registry/tally', dir: 'registry', upLevels: 1, index: 0 },
+    );
+  });
+
+  test('sameDir link drops the anchor (bare and ./ arms)', () => {
+    expect(extractEntityRefs('See [see](b.md#section).').filter(r => r.sameDir)).toEqual([
+      { name: 'see', slug: 'b', dir: '', sameDir: true, index: 4 },
+    ]);
+    const dot = extractEntityRefs('[x](./beta.md#section)').filter(r => r.sameDir);
+    expect(dot).toHaveLength(1);
+    expect(dot[0].slug).toBe('beta');
+  });
+
+  test('extractPageLinks emits the anchored sibling as a candidate', async () => {
+    const { candidates } = await extractPageLinks(
+      'a', 'See [see](b.md#section).', {}, 'concept', nullResolver, { skipFrontmatter: true },
+    );
+    expect(candidates.map(c => c.targetSlug)).toEqual(['b']);
+  });
+
+  test('extractPageLinks lowercases pass-1 and wikilink targets', async () => {
+    const md = await extractPageLinks(
+      'x', '[D](registry/DECISIONS.md)', {}, 'concept', nullResolver, { skipFrontmatter: true },
+    );
+    expect(md.candidates.map(c => c.targetSlug)).toEqual(['registry/decisions']);
+    const wiki = await extractPageLinks(
+      'x', 'See [[people/Alice]].', {}, 'concept', nullResolver, { skipFrontmatter: true, globalBasename: false },
+    );
+    expect(wiki.candidates.map(c => c.targetSlug)).toContain('people/alice');
+  });
+});
