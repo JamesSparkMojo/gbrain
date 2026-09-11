@@ -212,6 +212,8 @@ type HttpServerLifecycle = EventSubscriber & {
 };
 type SignalSource = EventSubscriber;
 type CleanupRegistrar = typeof registerCleanup;
+/** How long `server.close()` may hold shutdown before the lifecycle gives up on it. */
+const CLOSE_TIMEOUT_MS = 5_000;
 
 /** Live-connection bookkeeping for `waitForHttpServerLifecycle`'s teardown. */
 export interface SocketTracker {
@@ -273,10 +275,15 @@ export function waitForHttpServerLifecycle(
   options: {
     signals?: SignalSource;
     register?: CleanupRegistrar;
+    /** Upper bound on how long `close()` may keep shutdown waiting. */
+    closeTimeoutMs?: number;
+    log?: (msg: string) => void;
   } = {},
 ): Promise<void> {
   const signals = options.signals ?? process;
   const register = options.register ?? registerCleanup;
+  const closeTimeoutMs = options.closeTimeoutMs ?? CLOSE_TIMEOUT_MS;
+  const log = options.log ?? ((msg: string) => console.error(msg));
 
   const sockets = trackServerSockets(server);
 
@@ -291,7 +298,17 @@ export function waitForHttpServerLifecycle(
           closeResolve();
           return;
         }
+        // Backstop for what the tracker cannot reach: sockets are held weakly,
+        // so an idle keep-alive wrapper the runtime already collected leaves a
+        // native handle that close() still waits on. Bound the wait instead
+        // of hanging the daemon; process exit releases the handle.
+        const deadline = setTimeout(() => {
+          log(`GBrain HTTP server: close() still waiting after ${closeTimeoutMs}ms — shutting down anyway`);
+          closeResolve();
+        }, closeTimeoutMs);
+        deadline.unref?.();
         server.close((error?: Error) => {
+          clearTimeout(deadline);
           if (error) closeReject(error);
           else closeResolve();
         });
@@ -317,7 +334,9 @@ export function waitForHttpServerLifecycle(
     const onClose = () => finish();
     const onError = (error: Error) => finish(error);
     const onSigint = () => {
-      void closeServer().catch(onError);
+      // A close() that reports done — or that the deadline gave up on — ends
+      // the lifecycle even when the server never emits 'close'.
+      void closeServer().then(() => finish(), onError);
     };
 
     server.once('close', onClose);
