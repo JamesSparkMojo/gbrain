@@ -166,6 +166,31 @@ describe('HTTP server lifecycle', () => {
     expect(logs.join('\n')).toMatch(/20ms/);
     expect(signals.listenerCount('SIGINT')).toBe(0);
   });
+
+  test('a close() error that lands after the deadline is logged, not dropped', async () => {
+    const server = new FakeHttpServer();
+    server.close = function (this: FakeHttpServer, callback?: (error?: Error) => void) {
+      this.closeCalls++;
+      this.listening = false;
+      setTimeout(() => callback?.(new Error('late close failure')), 40); // after the 20ms deadline
+      return this;
+    };
+    const signals = new EventEmitter();
+    const logs: string[] = [];
+
+    const lifecycle = waitForHttpServerLifecycle(server, {
+      signals,
+      register() { return () => {}; },
+      closeTimeoutMs: 20,
+      log: (msg) => { logs.push(msg); },
+    });
+    signals.emit('SIGINT');
+    await lifecycle; // resolved by the deadline
+    await new Promise((r) => setTimeout(r, 60)); // let the late callback fire
+
+    expect(logs.join('\n')).toMatch(/20ms/);
+    expect(logs.join('\n')).toContain('late close failure');
+  });
 });
 
 // Severing sockets lets close() finish; this is what actually stops the

@@ -302,13 +302,23 @@ export function waitForHttpServerLifecycle(
         // so an idle keep-alive wrapper the runtime already collected leaves a
         // native handle that close() still waits on. Bound the wait instead
         // of hanging the daemon; process exit releases the handle.
+        // The process still exits: the serve lane's own finishHttpServe
+        // (serve.ts) disconnects the engine and calls process.exit once the
+        // lifecycle resolves, so a leaked handle cannot outlive teardown.
+        let timedOut = false;
         const deadline = setTimeout(() => {
+          timedOut = true;
           log(`GBrain HTTP server: close() still waiting after ${closeTimeoutMs}ms — shutting down anyway`);
           closeResolve();
         }, closeTimeoutMs);
         deadline.unref?.();
         server.close((error?: Error) => {
           clearTimeout(deadline);
+          if (timedOut) {
+            // Settled already — a late failure must be seen, not swallowed.
+            if (error) log(`GBrain HTTP server: close() failed after the deadline: ${error.message}`);
+            return;
+          }
           if (error) closeReject(error);
           else closeResolve();
         });
