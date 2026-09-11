@@ -13,6 +13,7 @@ import { readHolders } from './context.ts';
  * from '../operations.ts' here (cycle).
  */
 
+import { createHash } from 'node:crypto';
 import type { Operation } from './contract.ts';
 import { OperationError, verbError } from './contract.ts';
 import { federatedSearchScope, sourceScopeOpts, stampEvidenceSafe } from './context.ts';
@@ -618,6 +619,7 @@ const delta: Operation = {
   params: {
     since: { type: 'string', description: 'ISO 8601 cursor. Returns pages/facts/thread-events newer than this timestamp. Optional when session_id carries an established cursor.' },
     since_slug: { type: 'string', description: 'Stateless keyset resume: pass back `next_cursor.slug` from the previous response (paired with `since`=next_cursor.since) to page through pages sharing one timestamp. Ignored when session_id is set (the session cursor carries it).' },
+    since_skip: { type: 'array', items: { type: 'string' }, description: 'Stateless keyset resume: pass back `next_cursor.skip` from the previous response (with `since` + `since_slug`) — the facts/threads already delivered at the boundary millisecond, so a same-timestamp tie split by budget_tokens drains across wakes instead of re-serving the same item. Ignored when session_id is set (the session cursor carries it).' },
     entities: { type: 'string', description: 'Optional comma-separated entity scope for thread-event deltas. Capped at 8.' },
     budget_tokens: { type: 'number', description: 'Server-side token budget (char/4). Pages pack first, then facts, then threads; each item costs its rendered line and the envelope + section headers are reserved, so `text` fits the budget. Response adds budget_tokens, budget_used (tokens of `text`), dropped_count.' },
     session_id: { type: 'string', description: 'Opaque session id. Drives the per-session cursor: the first call establishes it, each call advances it to the newest DELIVERED change (at-least-once — with has_more:true the undelivered tail returns on the next wake). Without it, pass an explicit `since` for a stateless delta.' },
@@ -723,6 +725,18 @@ const delta: Operation = {
     const cursorSlug = sessionId ? state?.surfaced_slugs?.[0] : undefined;
     const explicitSlug = typeof p.since_slug === 'string' ? p.since_slug : undefined;
     const sinceSlug = explicitSlug ?? cursorSlug;
+    // Boundary tie-break (pre-landing review r3): facts filter on created_at >
+    // since and threads on date > since, so everything at the millisecond right
+    // after the cursor re-serves each wake — a same-timestamp tie split by the
+    // budget would pack the same item and drop the same item forever. The
+    // previous response's `next_cursor.skip` (session: surfaced_slugs[1..])
+    // names the delivered boundary items; a thread key binds kind+text+time
+    // (facts: the row id), so a stale list can never hide a newer item.
+    const explicitSkip = Array.isArray(p.since_skip) ? p.since_skip.filter((k): k is string => typeof k === 'string') : undefined;
+    const skip = new Set<string>(explicitSkip ?? (sessionId ? state?.surfaced_slugs?.slice(1) : undefined) ?? []);
+    const factKey = (f: { id: number }) => `f:${f.id}`;
+    const threadKey = (t: { kind: string; text: string; date?: string | null }) =>
+      `t:${createHash('sha1').update(`${Date.parse(t.date ?? '')}\0${t.kind}\0${t.text}`).digest('hex').slice(0, 16)}`;
 
     const res = await assembleDeltaContext(ctx.engine, {
       sourceId,
@@ -742,8 +756,10 @@ const delta: Operation = {
     // review r2) — each wake then drains the head of the window and the cursor
     // below can advance past it instead of re-serving the same newest slice.
     const factAt = (f: { created_at?: string; valid_from?: string }) => Date.parse(f.created_at ?? f.valid_from ?? '');
-    let facts = [...(res.facts ?? [])].sort((a, b) => factAt(a) - factAt(b) || a.id - b.id);
-    let threads = [...(res.openThreads ?? [])].sort((a, b) => Date.parse(a.date ?? '') - Date.parse(b.date ?? ''));
+    let facts = (res.facts ?? []).filter((f) => !skip.has(factKey(f))).sort((a, b) => factAt(a) - factAt(b) || a.id - b.id);
+    let threads = (res.openThreads ?? [])
+      .filter((t) => !skip.has(threadKey(t)))
+      .sort((a, b) => Date.parse(a.date ?? '') - Date.parse(b.date ?? ''));
     const fetchedPageRows = pages;
     const fetchedFacts = facts;
     const fetchedThreads = threads;
@@ -787,7 +803,7 @@ const delta: Operation = {
     // minus a safety lag (in-flight write txns stamp updated_at at txn START)
     // and clear the keyset slug. If nothing delivered but something dropped, do
     // NOT advance (deliver-before-advance; a too-small budget must not eat it).
-    let nextCursor =
+    let nextCursor: { since: string; slug: string; skip?: string[] } =
       pages.length > 0
         ? { since: pages[pages.length - 1].updated_at, slug: pages[pages.length - 1].slug }
         : { since: effectiveSince, slug: sinceSlug ?? '' };
@@ -826,14 +842,26 @@ const delta: Operation = {
           ? { since: new Date(holdMs).toISOString(), slug: '' }
           : { since: effectiveSince, slug: sinceSlug ?? '' };
     }
+    // Name the delivered items sitting at the millisecond right after the final
+    // cursor — exactly what the next wake's strict `>` would re-serve. A cursor
+    // that did not move keeps the prior list (the tie is still draining).
+    const boundaryMs = Date.parse(nextCursor.since) + 1;
+    const nextSkip = [
+      ...(nextCursor.since === effectiveSince ? skip : []),
+      ...facts.filter((f) => factAt(f) === boundaryMs).map(factKey),
+      ...threads.filter((t) => Date.parse(t.date ?? '') === boundaryMs).map(threadKey),
+    ];
+    if (nextSkip.length > 0) nextCursor.skip = nextSkip;
     if (sessionId) {
-      // Persist any advance (pages delivered OR the time cursor moved past a
-      // delivered fact/thread); a wake that moved nothing and dropped
-      // something keeps its cursor (deliver-before-advance).
-      if (pages.length > 0 || nextCursor.since !== effectiveSince) {
+      // Persist any advance (pages delivered, the time cursor moved past a
+      // delivered fact/thread, or the boundary skip list grew); a wake that
+      // moved nothing and dropped something keeps its cursor
+      // (deliver-before-advance).
+      if (pages.length > 0 || nextCursor.since !== effectiveSince || nextSkip.join('\n') !== [...skip].join('\n')) {
         await upsertSessionContextState(ctx.engine, sourceId, clientId, sessionId, {
           lastWakeAt: nextCursor.since,
           cursorSlug: nextCursor.slug,
+          cursorSkip: nextSkip,
         });
       } else if (!hasMore) {
         await upsertSessionContextState(ctx.engine, sourceId, clientId, sessionId, {
@@ -867,7 +895,7 @@ const delta: Operation = {
       text,
       has_more: hasMore,
       // Stateless resume: a caller with no session_id passes these back as
-      // `since` + `since_slug` on the next call to page deterministically.
+      // `since` + `since_slug` (+ `since_skip`) on the next call to page deterministically.
       next_cursor: nextCursor,
       ...(res.degradedReason ? { degraded_reason: res.degradedReason } : {}),
       ...(budgetTokens !== null

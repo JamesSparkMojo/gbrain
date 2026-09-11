@@ -318,9 +318,11 @@ delivered oldest-first too, so a fixed budget drains each arm as a prefix and
 makes forward progress every wake: the time cursor advances just past the
 newest delivered fact/thread when that is newer than the last delivered page
 (never past an undelivered page), and it never passes a budget-dropped fact
-or thread — it holds just before the oldest undelivered one. Only items
-sharing that boundary millisecond re-deliver (at-least-once); nothing is
-skipped for good. Otherwise dedup is
+or thread — it holds just before the oldest undelivered one. Facts and
+threads delivered at that boundary millisecond are named in
+`next_cursor.skip`, so a same-timestamp tie the budget split drains across
+wakes instead of re-serving the same item; pages sharing the millisecond may
+re-deliver (at-least-once); nothing is skipped for good. Otherwise dedup is
 cursor-based (a delivered page reappears only if it changes again). Same world-only-default +
 `include_private` fail-closed rule as `context_pack`. The session cursor is
 keyed `(source_id, client_id, session_id)` — authenticated remote callers are
@@ -332,11 +334,12 @@ Delivery is at-least-once via a **keyset cursor `(updated_at, slug)`**: a cluste
 of pages sharing one `updated_at` (bulk syncs stamp identical timestamps) pages
 deterministically by slug, so a >fetch-limit cluster drains across wakes instead
 of livelocking. Stateless callers resume by passing the response's
-`next_cursor.since` + `next_cursor.slug` back as `since` + `since_slug`;
-`session_id` callers get this automatically.
+`next_cursor.since` + `next_cursor.slug` (+ `next_cursor.skip` when present)
+back as `since` + `since_slug` (+ `since_skip`); `session_id` callers get this
+automatically.
 
 Response: `{ protocol_version, since, pages[], facts[], threads[], text,
-has_more, next_cursor: { since, slug }, degraded_reason?, budget_tokens?,
+has_more, next_cursor: { since, slug, skip? }, degraded_reason?, budget_tokens?,
 budget_used?, dropped_count? }`. `budget_tokens` packs pages first, then facts,
 then threads — each item costs its rendered line and the envelope + section
 headers are reserved first, so `text` (rendered from the packed sets) never

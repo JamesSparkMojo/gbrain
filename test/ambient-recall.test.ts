@@ -20,7 +20,7 @@ import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { operations } from '../src/core/operations.ts';
 import { MEMORY_VERBS_VERSION, VERB_NAMES } from '../src/core/verbs.ts';
 import { estimateTokens } from '../src/core/search/token-budget.ts';
-import { deltaHeaderCost, renderFactLine, renderPageLine } from '../src/core/context/turn-context.ts';
+import { deltaHeaderCost, renderFactLine, renderPageLine, renderThreadLine } from '../src/core/context/turn-context.ts';
 import {
   getSessionContextState,
   upsertSessionContextState,
@@ -855,6 +855,74 @@ describe('budget packing + drop footer', () => {
     });
     expect(tag(r2)).toEqual(['ofo-3', 'ofo-4']);
     expect(r2.has_more).toBe(false);
+  });
+
+  // Pre-landing review r3: open-thread events sharing ONE `date` with a budget
+  // that fits exactly one line. The hold parks the cursor 1ms before the tie,
+  // so every tied event re-fetches on the next wake; without a tie-break the
+  // same one packs and the same one drops forever. `next_cursor.skip` names the
+  // delivered boundary items so consecutive wakes drain the tie.
+  test('a budget-split same-timestamp thread tie drains across wakes instead of stalling (pre-landing review r3)', async () => {
+    const putPage = operations.find((o) => o.name === 'put_page')!;
+    const local = ctxFor({ remote: false });
+    await call(putPage, local, { slug: 'people/carol-example', content: '# Carol Example\n\nbody' });
+    // Three commitments recorded BEFORE `since` (facts arm stays empty) whose
+    // thread event time is one shared future instant.
+    const tieAt = new Date(Date.now() + 86_400_000).toISOString();
+    for (const tag of ['tie-a', 'tie-b', 'tie-c']) {
+      await call(remember, local, {
+        fact: `${tag} carol-example will ${'q'.repeat(40)}`,
+        kind: 'commitment',
+        entity: 'people/carol-example',
+        provenance: 'test',
+        visibility: 'world',
+      });
+    }
+    await engine.executeRaw(`UPDATE facts SET valid_from = '${tieAt}' WHERE fact LIKE 'tie-% carol-example%'`);
+    // Earlier tests stamp facts a few seconds into the FUTURE; pull them behind
+    // `since` so the facts arm (packed before threads) stays empty here.
+    await engine.executeRaw(`UPDATE facts SET created_at = now() - interval '1 minute' WHERE created_at > now()`);
+    __resetHotMemoryCacheForTests();
+    await new Promise((r) => setTimeout(r, 5));
+    // Canonical microsecond form — the exact string a session cursor reads
+    // back, so the header cost (it embeds `since`) prices one budget for both paths.
+    const since = new Date().toISOString().replace(/Z$/, '000Z');
+    const full = await call(del, local, { since, entities: 'people/carol-example' });
+    expect(full.facts).toEqual([]);
+    const threads = full.threads as Parameters<typeof renderThreadLine>[0][];
+    expect(threads.length).toBe(3);
+    expect(new Set(threads.map((t) => t.date)).size).toBe(1);
+    const want = threads.map((t) => t.text).sort();
+    // Budget = envelope/headers + exactly one thread line (all three cost the same).
+    const budget_tokens = deltaHeaderCost(since) + estimateTokens(renderThreadLine(threads[0]) + '\n') + 1;
+
+    // Stateless: pass the whole next_cursor back each wake.
+    let cursor: Record<string, unknown> = { since };
+    const seen: string[] = [];
+    let wakes = 0;
+    let last: VerbResult;
+    do {
+      last = await call(del, local, { ...cursor, entities: 'people/carol-example', budget_tokens });
+      wakes++;
+      seen.push(...(last.threads as Array<{ text: string }>).map((t) => t.text));
+      cursor = { since: last.next_cursor.since, since_slug: last.next_cursor.slug, since_skip: last.next_cursor.skip };
+    } while (last.has_more && wakes < 6);
+    expect(wakes).toBe(3);
+    expect(seen.sort()).toEqual(want); // each delivered exactly once
+    expect(last.has_more).toBe(false);
+
+    // Session: the cursor (slug + boundary keys) rides session_context_state.
+    await upsertSessionContextState(engine, 'default', null, 'tie-session', { lastWakeAt: since, cursorSlug: '' });
+    const seenS: string[] = [];
+    wakes = 0;
+    do {
+      last = await call(del, local, { session_id: 'tie-session', entities: 'people/carol-example', budget_tokens });
+      wakes++;
+      seenS.push(...(last.threads as Array<{ text: string }>).map((t) => t.text));
+    } while (last.has_more && wakes < 6);
+    expect(wakes).toBe(3);
+    expect(seenS.sort()).toEqual(want);
+    expect(last.has_more).toBe(false);
   });
 
   test('forced overflow: dropped_count > 0 and budget_used stays within budget_tokens (v0.45.7)', async () => {

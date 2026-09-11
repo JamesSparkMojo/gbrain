@@ -740,8 +740,12 @@ export const RESPONSE_SCHEMAS: Record<VerbName, Record<string, unknown>> = {
       next_cursor: {
         type: 'object',
         required: ['since', 'slug'],
-        description: 'Keyset to resume from (stateless callers pass back as since + since_slug).',
-        properties: { since: { type: 'string' }, slug: { type: 'string' } },
+        description: 'Keyset to resume from (stateless callers pass back as since + since_slug + since_skip).',
+        properties: {
+          since: { type: 'string' },
+          slug: { type: 'string' },
+          skip: { type: 'array', items: { type: 'string' }, description: 'Present when facts/threads delivered at the boundary millisecond must not re-serve on the next wake (a budget-split same-timestamp tie).' },
+        },
       },
       pages: {
         type: 'array',

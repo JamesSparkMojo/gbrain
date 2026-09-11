@@ -30,7 +30,7 @@ const SURFACED_SLUGS_CAP = 500;
 
 export interface SessionContextState {
   standing_entities: string[];
-  /** Keyset slug component: `[cursorSlug]` (or `[]`). Column name is historical. */
+  /** Keyset slug component + boundary skip keys: `[cursorSlug, ...cursorSkip]` (or `[]`). Column name is historical. */
   surfaced_slugs: string[];
   last_wake_at: string | null;
 }
@@ -50,9 +50,16 @@ export interface SessionContextPatch {
   /**
    * REPLACE the keyset slug — the slug of the last DELIVERED page at
    * `lastWakeAt` (omit to leave unchanged; `''` = start of the timestamp
-   * bucket). Stored in the surfaced_slugs jsonb column (single-element).
+   * bucket). Stored first in the surfaced_slugs jsonb column.
    */
   cursorSlug?: string;
+  /**
+   * Keys of the facts/threads already delivered at the millisecond right after
+   * `lastWakeAt` — the `delta` verb's same-timestamp tie-break. Replaced
+   * together with `cursorSlug` (stored after it in surfaced_slugs); omitted =
+   * cleared on a slug replace.
+   */
+  cursorSkip?: string[];
 }
 
 /** 'local' sentinel for the trusted CLI/hook path; the auth client id otherwise. */
@@ -152,7 +159,11 @@ export async function upsertSessionContextState(
         resolveClientId(clientId),
         normSession(sessionId),
         JSON.stringify(patch.standingEntities ?? []),
-        JSON.stringify(typeof patch.cursorSlug === 'string' ? [patch.cursorSlug.slice(0, ID_MAX_LEN)] : []),
+        JSON.stringify(
+          typeof patch.cursorSlug === 'string'
+            ? [patch.cursorSlug.slice(0, ID_MAX_LEN), ...(patch.cursorSkip ?? []).slice(0, SURFACED_SLUGS_CAP)]
+            : [],
+        ),
         patch.lastWakeAt ?? null,
         replaceStanding,
         replaceCursorSlug,
