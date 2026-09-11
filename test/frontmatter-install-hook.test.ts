@@ -180,6 +180,18 @@ describe('frontmatter install-hook (B13)', () => {
     expect(readFileSync(hookPath, 'utf8')).not.toContain('gbrain-scope');
   });
 
+  test('#4600 the other order: a root install after a nested one widens the scoped hook to the whole repo', () => {
+    mkdirSync(join(tmp, 'brain'));
+    installHook(join(tmp, 'brain'), false);
+    const hookPath = join(tmp, '.githooks', 'pre-commit');
+    expect(readFileSync(hookPath, 'utf8')).toContain('# gbrain-scope: brain/');
+    expect(installHook(tmp, false)).toBe('installed');
+    const content = readFileSync(hookPath, 'utf8');
+    expect(content).not.toContain('gbrain-scope');
+    expect(content).toContain("--diff-filter=ACM | grep -E '\\.mdx?$'");
+    expect(existsSync(hookPath + '.bak')).toBe(false);
+  });
+
   test('#4600 the scoped hook ignores staged files outside the source (host README commits pass)', () => {
     mkdirSync(join(tmp, 'brain'));
     installHook(join(tmp, 'brain'), false);
@@ -236,9 +248,32 @@ describe('frontmatter install-hook (B13)', () => {
     // not turn this into the "set elsewhere" branch.
     await withEnv({ GIT_CONFIG_GLOBAL: '/dev/null' }, async () => {
       expect(installHook(join(tmp, 'brain'), false)).toBe('installed_unwired');
+      // A re-run refreshes an identical script — still inert, so still unwired
+      // (not "unchanged", which the CLI prints as "already up to date").
+      expect(installHook(join(tmp, 'brain'), false)).toBe('installed_unwired');
     });
     expect(existsSync(join(tmp, '.githooks', 'pre-commit'))).toBe(true);
     expect(localHooksPath(tmp)).toBe('');
+  });
+
+  test('a fresh clone that carries the committed gbrain hook gets wired on install (not "unchanged" while inert)', async () => {
+    // The hook FILE travels with the repo; core.hooksPath is per-clone config
+    // and does not. Install on the clone must fall through to the wiring step
+    // instead of stopping at "the script is already current".
+    installHook(tmp, false);
+    execFileSync('git', ['-C', tmp, 'add', '.githooks']);
+    execFileSync('git', ['-C', tmp, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'add hook']);
+    const clone = mkdtempSync(join(tmpdir(), 'fm-hook-clone-'));
+    try {
+      execFileSync('git', ['clone', '-q', tmp, clone]);
+      expect(localHooksPath(clone)).toBe('');
+      await withEnv({ GIT_CONFIG_GLOBAL: '/dev/null' }, async () => {
+        expect(installHook(clone, false)).toBe('installed');
+      });
+      expect(localHooksPath(clone)).toBe('.githooks');
+    } finally {
+      rmSync(clone, { recursive: true, force: true });
+    }
   });
 
   test('a host repo that ships other hook scripts under .githooks/ keeps core.hooksPath unset (wiring would activate them)', async () => {

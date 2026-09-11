@@ -285,6 +285,8 @@ export function installHook(localPath: string, force: boolean): InstallResult {
   const hookPath = join(hooksDir, 'pre-commit');
   mkdirSync(hooksDir, { recursive: true });
 
+  let next = renderHookScript(scope ? [scope] : []);
+  let changed = true;
   if (existsSync(hookPath)) {
     const existing = readFileSync(hookPath, 'utf8');
     if (existing.includes(HOOK_BANNER)) {
@@ -293,23 +295,25 @@ export function installHook(localPath: string, force: boolean): InstallResult {
       // whole-repo hook (root source, or no marker) already covers everything.
       const prior = parseScopes(existing);
       const wholeRepo = !scope || prior.length === 0;
-      const next = renderHookScript(wholeRepo ? [] : [...new Set([...prior, scope])].sort());
-      writeFileSync(hookPath, next);
-      chmodSync(hookPath, 0o755);
-      return next === existing ? 'unchanged' : 'installed';
+      next = renderHookScript(wholeRepo ? [] : [...new Set([...prior, scope])].sort());
+      changed = next !== existing;
+    } else if (!force) {
+      return 'skipped_existing';
+    } else {
+      copyFileSync(hookPath, hookPath + '.bak');
     }
-    if (!force) return 'skipped_existing';
-    copyFileSync(hookPath, hookPath + '.bak');
   }
-
-  writeFileSync(hookPath, renderHookScript(scope ? [scope] : []));
+  writeFileSync(hookPath, next);
   chmodSync(hookPath, 0o755);
 
-  // Set core.hooksPath unless the user has set it already (to `.githooks` —
-  // nothing to do — or elsewhere — theirs to keep).
+  // Every branch that leaves a hook on disk reaches the wiring step: the hook
+  // FILE travels with the repo, core.hooksPath is per-clone config, so a fresh
+  // clone of a repo that committed the hook has the script but git never runs
+  // it. Set core.hooksPath unless the user has set it already (to `.githooks`
+  // — nothing to do — or elsewhere — theirs to keep).
   try {
     const current = execFileSync('git', ['-C', root, 'config', '--get', 'core.hooksPath'], { encoding: 'utf8' }).trim();
-    if (current) return 'installed';
+    if (current) return changed ? 'installed' : 'unchanged';
   } catch {
     // git config returns non-zero when the key is unset; that's the normal case.
   }
