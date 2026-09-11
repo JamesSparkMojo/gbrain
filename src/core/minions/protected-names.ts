@@ -61,8 +61,9 @@ export const PROTECTED_JOB_NAMES: ReadonlySet<string> = new Set([
   // calls Haiku to extract atoms (~$0.30/source/run), so it MUST NOT be
   // submittable by an MCP/OAuth-scoped caller — same posture as the protected
   // `extract-takes-from-pages`. Only trusted local callers (the autopilot
-  // auto-drain branch, an explicit `gbrain jobs submit extract-atoms-drain
-  // --allow-protected`) can insert it.
+  // auto-drain branch, an explicit `gbrain jobs submit extract-atoms-drain`
+  // from the CLI — which sets allowProtectedSubmit for protected names itself;
+  // no submit flag exists or is needed) can insert it.
   'extract-atoms-drain',
 ]);
 
