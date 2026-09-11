@@ -52,10 +52,13 @@ export { parseInlineCitationTimelineEntries, type InlineCitationTimelineCandidat
 // 2026-09-09: #4985 — normalizeBasename strips Unicode variation selectors (twin
 // of slugifySegment), so emoji+VS16 wikilinks re-resolve to the clean slug.
 // 2026-09-09 (same wave): #4977 — the page-role prior no longer applies to
-// links inside Timeline / See-also and the other machine-written list
-// sections (rolePriorSuppressedRanges), so pre-fix extractions carrying
-// prior-typed works_at/advises edges from those sections must re-run to
-// demote them to 'mentions'.
+// links inside the machine-written list sections rolePriorSuppressedRanges
+// matches (Timeline, See also, Related, Facts, Sources, Links, Email mention
+// links, Backlinks, Significant moments), so pre-fix extractions re-run.
+// NOTE: a re-run ADDS a 'mentions' row beside the prior-typed works_at/advises
+// row — link_type is part of the links conflict key and the insert is
+// ON CONFLICT DO NOTHING with no prune — it does NOT demote the old edge;
+// cleaning those up is a separate maintainer decision.
 // 2026-09-06: #4873 — pass 1b accepts a leading `./` (and, same wave, the
 // `../` / `./../` sibling forms + the folded bare-wikilink grammar), so pages
 // whose links were pruned by the sweep reconcile re-extract on `extract --stale`.
@@ -638,10 +641,11 @@ export async function extractPageLinks(
   const pack = opts.pack ?? null;
   const packBudget = pack ? new PageRegexBudget() : undefined;
   // Timeline / See-also links never receive the page-role prior — see
-  // rolePriorSuppressedRanges. idx is the link's position in `content`
-  // (stripCodeBlocks and the wikilink mask are both length-preserving, so
-  // pass-2 indices line up); idx < 0 / undefined keeps the old behavior.
-  const suppressedRanges = rolePriorSuppressedRanges(content);
+  // rolePriorSuppressedRanges (matched on the code-stripped content, so a
+  // fenced `## Timeline` never opens a range). idx is the link's position in
+  // `content` (stripCodeBlocks and the wikilink mask are length-preserving,
+  // so indices line up); idx < 0 / undefined keeps the old behavior.
+  const suppressedRanges = rolePriorSuppressedRanges(stripCodeBlocks(content));
   const typeFor = (ctx: string, targetSlug: string, idx?: number): string => {
     if (pack) {
       const packVerb = inferLinkTypeFromPack(pack, pageType as string, ctx, packBudget);
@@ -988,8 +992,10 @@ const ADVISOR_ROLE_RE = /\b(?:full-time advisor|professional advisor|advises (?:
 const EMPLOYEE_ROLE_RE = /\b(?:is an? (?:senior|staff|principal|lead|backend|frontend|full-?stack|ML|data|security|DevOps|platform)? ?engineer at|is an? (?:senior|staff|principal|lead)? ?(?:developer|designer|product manager|engineering manager|director|VP) (?:at|of)|holds? the (?:CTO|CEO|CFO|COO|CMO|CRO|VP) (?:role|position|seat|title) at|is the (?:CTO|CEO|CFO|COO|CMO|CRO) of|employee at|on the team at|works on .{0,30} at)\b/i;
 
 /**
- * Content index ranges where the page-role prior must NOT apply: Timeline
- * and See-also sections. Links there are list-shaped, per-event references
+ * Content index ranges where the page-role prior must NOT apply: the
+ * machine-written list sections — Timeline, See also, Related, Facts,
+ * Sources, Links, Email mention links, Backlinks, Significant moments
+ * (headingRe below is the one source of truth). Links there are list-shaped, per-event references
  * ("2026-05-12 — met with [[companies/x]]", Iron-Law back-links) — the
  * role prior is a statement about the AUTHOR's standing relationships, not
  * about every entity that passes through their timeline, so applying it

@@ -2120,6 +2120,20 @@ describe('extractPageLinks — role prior suppressed in Timeline/See-also', () =
     expect(acme!.linkType).toBe('advises');
   });
 
+  test('a `## Timeline` line inside a fenced code block does not open a suppression range', async () => {
+    // Headings are matched on the code-stripped content (same length-preserving
+    // mask the passes use), so a fence quoting a heading never blanks the
+    // prior for the prose that follows it.
+    const content =
+      advisorBio +
+      '\n```md\n## Timeline\n```\n' +
+      '\nShe spends most weeks with [Acme](companies/acme) and the broader group.\n';
+    const { candidates } = await extractPageLinks('people/jane', content, {}, 'person', allowAllResolver);
+    const acme = candidates.find(c => c.targetSlug === 'companies/acme');
+    expect(acme).toBeDefined();
+    expect(acme!.linkType).toBe('advises');
+  });
+
   test('machine-list sections (Related / Email mention links) are suppressed too', async () => {
     const content =
       'Jane is an advisor to several startups and serves as advisor across fintech.\n' +
