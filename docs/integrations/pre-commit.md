@@ -52,6 +52,12 @@ every hook type, so the installer writes the gbrain hook but leaves
 `core.hooksPath` unset (`hook written …; core.hooksPath left unset`) and
 prints the reason plus the manual wiring step when:
 
+- `core.hooksPath` is already set — in any scope, a global one from husky,
+  secret-scanner templates or dotfiles counts — to somewhere other than
+  `.githooks` (git reads hooks only from there, so the gbrain hook would be
+  inert) — copy `.githooks/pre-commit` into that directory, or point
+  `core.hooksPath` at `.githooks`; a value that already resolves to
+  `.githooks` is left alone and counts as wired;
 - `.githooks/` already holds other executable hook scripts (third-party
   clones commit `post-commit`, `pre-push`, … there as a convention) — review
   them, then `git -C <root> config core.hooksPath .githooks`;

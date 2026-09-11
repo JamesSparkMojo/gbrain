@@ -12,6 +12,15 @@ function gitInit(dir: string) {
   execFileSync('git', ['-C', dir, 'config', 'user.name', 'Test']);
 }
 
+/**
+ * installHook with the developer's global/system git config masked: a global
+ * core.hooksPath (husky, secret-scanner templates, dotfiles) would otherwise
+ * turn every "installed" here into "installed_unwired". Tests that WANT a
+ * global value wrap withEnv themselves.
+ */
+const install = (path: string, force = false) =>
+  withEnv({ GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' }, () => installHook(path, force));
+
 /** The repo-local core.hooksPath ('' when unset) — global scope never leaks in. */
 function localHooksPath(dir: string): string {
   try {
@@ -33,38 +42,22 @@ describe('frontmatter install-hook (B13)', () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  test('installHook writes executable .githooks/pre-commit and sets core.hooksPath', () => {
-    const result = installHook(tmp, false);
+  test('installHook writes executable .githooks/pre-commit and sets core.hooksPath', async () => {
+    const result = await install(tmp);
     expect(result).toBe('installed');
     const hookPath = join(tmp, '.githooks', 'pre-commit');
     expect(existsSync(hookPath)).toBe(true);
     const content = readFileSync(hookPath, 'utf8');
     expect(content).toContain('gbrain frontmatter');
     expect(content).toContain('git diff --cached');
-    // installHook's contract is "set core.hooksPath unless it's already set
-    // elsewhere". Test BOTH branches deterministically by reading the local
-    // scope only: clean CI → local should be `.githooks`; developer with a
-    // global core.hooksPath (e.g. dotfiles → ~/.config/git/hooks) → local
-    // should be empty because installHook correctly skipped clobbering.
-    // Reading via `--get` without `--local` falls back to global scope when
-    // local is unset, which made this test environmentally fragile.
-    let globalHooksPath = '';
-    try {
-      globalHooksPath = execFileSync('git', ['config', '--global', '--get', 'core.hooksPath'], { encoding: 'utf8' }).trim();
-    } catch { /* unset is the expected clean-env case */ }
-    let localHooksPath = '';
-    try {
-      localHooksPath = execFileSync('git', ['-C', tmp, 'config', '--local', '--get', 'core.hooksPath'], { encoding: 'utf8' }).trim();
-    } catch { /* unset is fine when global was present */ }
-    if (globalHooksPath) {
-      expect(localHooksPath).toBe('');
-    } else {
-      expect(localHooksPath).toBe('.githooks');
-    }
+    // install() masks the developer's global config, so the clean-machine
+    // branch is the only one here; the "already set elsewhere" branch has its
+    // own test below. Read the LOCAL scope so a global value can't satisfy it.
+    expect(localHooksPath(tmp)).toBe('.githooks');
   });
 
-  test('#1840 — generated hook matches .md/.mdx (single-backslash regex, not over-escaped)', () => {
-    installHook(tmp, false);
+  test('#1840 — generated hook matches .md/.mdx (single-backslash regex, not over-escaped)', async () => {
+    await install(tmp);
     const content = readFileSync(join(tmp, '.githooks', 'pre-commit'), 'utf8');
     // The shell must see `grep -E '\.mdx?$'`. Pre-fix it emitted `'\\.mdx?$'`
     // (literal backslash), so the hook matched nothing and silently no-opped.
@@ -82,45 +75,45 @@ describe('frontmatter install-hook (B13)', () => {
     expect(re.test('notes/thing.txt')).toBe(false);
   });
 
-  test('installHook refuses to clobber existing hook without --force', () => {
+  test('installHook refuses to clobber existing hook without --force', async () => {
     const hooksDir = join(tmp, '.githooks');
     mkdirSync(hooksDir, { recursive: true });
     const hookPath = join(hooksDir, 'pre-commit');
     writeFileSync(hookPath, '#!/bin/sh\necho "user hook"');
-    const result = installHook(tmp, false);
+    const result = await install(tmp);
     expect(result).toBe('skipped_existing');
     // Original survives.
     expect(readFileSync(hookPath, 'utf8')).toContain('user hook');
     expect(existsSync(hookPath + '.bak')).toBe(false);
   });
 
-  test('installHook with force overwrites and saves .bak', () => {
+  test('installHook with force overwrites and saves .bak', async () => {
     const hooksDir = join(tmp, '.githooks');
     mkdirSync(hooksDir, { recursive: true });
     const hookPath = join(hooksDir, 'pre-commit');
     writeFileSync(hookPath, '#!/bin/sh\necho "user hook"');
-    const result = installHook(tmp, true);
+    const result = await install(tmp, true);
     expect(result).toBe('installed');
     expect(existsSync(hookPath + '.bak')).toBe(true);
     expect(readFileSync(hookPath + '.bak', 'utf8')).toContain('user hook');
     expect(readFileSync(hookPath, 'utf8')).toContain('gbrain frontmatter');
   });
 
-  test('installHook on existing gbrain hook refreshes silently (no .bak)', () => {
-    installHook(tmp, false);
+  test('installHook on existing gbrain hook refreshes silently (no .bak)', async () => {
+    await install(tmp);
     const hookPath = join(tmp, '.githooks', 'pre-commit');
     expect(existsSync(hookPath + '.bak')).toBe(false);
     // Re-run; should be 'unchanged' (banner already present).
-    const second = installHook(tmp, false);
+    const second = await install(tmp);
     expect(second).toBe('unchanged');
   });
 
-  test('uninstallHook removes the gbrain hook and restores .bak when present', () => {
+  test('uninstallHook removes the gbrain hook and restores .bak when present', async () => {
     const hooksDir = join(tmp, '.githooks');
     mkdirSync(hooksDir, { recursive: true });
     const hookPath = join(hooksDir, 'pre-commit');
     writeFileSync(hookPath, '#!/bin/sh\necho "user hook"');
-    installHook(tmp, true);
+    await install(tmp, true);
     expect(existsSync(hookPath + '.bak')).toBe(true);
 
     const removed = uninstallHook(tmp);
@@ -130,7 +123,7 @@ describe('frontmatter install-hook (B13)', () => {
     expect(existsSync(hookPath + '.bak')).toBe(false);
   });
 
-  test('uninstallHook on a non-gbrain hook returns false (does not remove user hook)', () => {
+  test('uninstallHook on a non-gbrain hook returns false (does not remove user hook)', async () => {
     const hooksDir = join(tmp, '.githooks');
     mkdirSync(hooksDir, { recursive: true });
     const hookPath = join(hooksDir, 'pre-commit');
@@ -144,9 +137,9 @@ describe('frontmatter install-hook (B13)', () => {
   // layout `gbrain bootstrap` creates) — the hook lands at the discovered git
   // root, pathspec-scoped to the source, one hook per root.
 
-  test('#4600 nested source: hook installs at the discovered git root, scoped to the subdirectory', () => {
+  test('#4600 nested source: hook installs at the discovered git root, scoped to the subdirectory', async () => {
     mkdirSync(join(tmp, 'brain'));
-    expect(installHook(join(tmp, 'brain'), false)).toBe('installed');
+    expect(await install(join(tmp, 'brain'))).toBe('installed');
     const hookPath = join(tmp, '.githooks', 'pre-commit');
     expect(existsSync(hookPath)).toBe(true);
     expect(existsSync(join(tmp, 'brain', '.githooks'))).toBe(false);
@@ -155,46 +148,46 @@ describe('frontmatter install-hook (B13)', () => {
     expect(content).toContain("--diff-filter=ACM -- 'brain/' | grep -E '\\.mdx?$'");
   });
 
-  test('#4600 several nested sources share one hook: pathspecs union, no .bak, idempotent', () => {
+  test('#4600 several nested sources share one hook: pathspecs union, no .bak, idempotent', async () => {
     mkdirSync(join(tmp, 'brain'));
     mkdirSync(join(tmp, 'wiki'));
-    expect(installHook(join(tmp, 'brain'), false)).toBe('installed');
-    expect(installHook(join(tmp, 'wiki'), false)).toBe('installed');
+    expect(await install(join(tmp, 'brain'))).toBe('installed');
+    expect(await install(join(tmp, 'wiki'))).toBe('installed');
     const hookPath = join(tmp, '.githooks', 'pre-commit');
     const content = readFileSync(hookPath, 'utf8');
     expect(content).toContain('# gbrain-scope: brain/');
     expect(content).toContain('# gbrain-scope: wiki/');
     expect(content).toContain("-- 'brain/' 'wiki/' |");
     expect(existsSync(hookPath + '.bak')).toBe(false);
-    expect(installHook(join(tmp, 'wiki'), false)).toBe('unchanged');
+    expect(await install(join(tmp, 'wiki'))).toBe('unchanged');
   });
 
-  test('#4600 root-registered source keeps the unscoped script; a root install widens a scoped hook to the whole repo', () => {
-    installHook(tmp, false);
+  test('#4600 root-registered source keeps the unscoped script; a root install widens a scoped hook to the whole repo', async () => {
+    await install(tmp);
     const hookPath = join(tmp, '.githooks', 'pre-commit');
     expect(readFileSync(hookPath, 'utf8')).not.toContain('gbrain-scope');
     expect(readFileSync(hookPath, 'utf8')).toContain("--diff-filter=ACM | grep -E '\\.mdx?$'");
 
     mkdirSync(join(tmp, 'brain'));
-    expect(installHook(join(tmp, 'brain'), false)).toBe('unchanged'); // whole repo already covers brain/
+    expect(await install(join(tmp, 'brain'))).toBe('unchanged'); // whole repo already covers brain/
     expect(readFileSync(hookPath, 'utf8')).not.toContain('gbrain-scope');
   });
 
-  test('#4600 the other order: a root install after a nested one widens the scoped hook to the whole repo', () => {
+  test('#4600 the other order: a root install after a nested one widens the scoped hook to the whole repo', async () => {
     mkdirSync(join(tmp, 'brain'));
-    installHook(join(tmp, 'brain'), false);
+    await install(join(tmp, 'brain'));
     const hookPath = join(tmp, '.githooks', 'pre-commit');
     expect(readFileSync(hookPath, 'utf8')).toContain('# gbrain-scope: brain/');
-    expect(installHook(tmp, false)).toBe('installed');
+    expect(await install(tmp)).toBe('installed');
     const content = readFileSync(hookPath, 'utf8');
     expect(content).not.toContain('gbrain-scope');
     expect(content).toContain("--diff-filter=ACM | grep -E '\\.mdx?$'");
     expect(existsSync(hookPath + '.bak')).toBe(false);
   });
 
-  test('#4600 the scoped hook ignores staged files outside the source (host README commits pass)', () => {
+  test('#4600 the scoped hook ignores staged files outside the source (host README commits pass)', async () => {
     mkdirSync(join(tmp, 'brain'));
-    installHook(join(tmp, 'brain'), false);
+    await install(join(tmp, 'brain'));
     // A `gbrain` stub that fails every validate call: any staged file that
     // reaches the loop blocks the commit, so exit 0 proves the pathspec.
     const bin = mkdtempSync(join(tmpdir(), 'fm-hook-bin-'));
@@ -220,11 +213,11 @@ describe('frontmatter install-hook (B13)', () => {
     }
   });
 
-  test('#4600 uninstall for one nested source drops only its scope; the last one removes the hook', () => {
+  test('#4600 uninstall for one nested source drops only its scope; the last one removes the hook', async () => {
     mkdirSync(join(tmp, 'brain'));
     mkdirSync(join(tmp, 'wiki'));
-    installHook(join(tmp, 'brain'), false);
-    installHook(join(tmp, 'wiki'), false);
+    await install(join(tmp, 'brain'));
+    await install(join(tmp, 'wiki'));
     const hookPath = join(tmp, '.githooks', 'pre-commit');
     expect(uninstallHook(join(tmp, 'brain'))).toBe(true);
     const content = readFileSync(hookPath, 'utf8');
@@ -244,32 +237,49 @@ describe('frontmatter install-hook (B13)', () => {
     writeFileSync(join(gitHooks, 'pre-rebase'), '#!/bin/sh\nexit 0\n', { mode: 0o644 });
     expect(activeGitHooks(tmp)).toEqual(['pre-push']);
     mkdirSync(join(tmp, 'brain'));
-    // GIT_CONFIG_GLOBAL=/dev/null: a developer's global core.hooksPath must
-    // not turn this into the "set elsewhere" branch.
-    await withEnv({ GIT_CONFIG_GLOBAL: '/dev/null' }, async () => {
-      expect(installHook(join(tmp, 'brain'), false)).toBe('installed_unwired');
-      // A re-run refreshes an identical script — still inert, so still unwired
-      // (not "unchanged", which the CLI prints as "already up to date").
-      expect(installHook(join(tmp, 'brain'), false)).toBe('installed_unwired');
-    });
+    expect(await install(join(tmp, 'brain'))).toBe('installed_unwired');
+    // A re-run refreshes an identical script — still inert, so still unwired
+    // (not "unchanged", which the CLI prints as "already up to date").
+    expect(await install(join(tmp, 'brain'))).toBe('installed_unwired');
     expect(existsSync(join(tmp, '.githooks', 'pre-commit'))).toBe(true);
     expect(localHooksPath(tmp)).toBe('');
+  });
+
+  test('a core.hooksPath already pointing elsewhere (global/corporate templates) is reported unwired, not installed', async () => {
+    // git resolves core.hooksPath from every scope; a global one (husky,
+    // secret-scanner templates, dotfiles) means git never looks at .githooks.
+    // "installed" would be a lie — the hook is on disk but inert.
+    const other = mkdtempSync(join(tmpdir(), 'fm-hook-elsewhere-'));
+    try {
+      writeFileSync(join(other, 'gitconfig'), `[core]\n\thooksPath = ${join(other, 'hooks')}\n`);
+      // installHook directly: install() would mask the very global config
+      // this test supplies.
+      await withEnv({ GIT_CONFIG_GLOBAL: join(other, 'gitconfig') }, async () => {
+        expect(installHook(tmp, false)).toBe('installed_unwired');
+      });
+      expect(existsSync(join(tmp, '.githooks', 'pre-commit'))).toBe(true);
+      expect(localHooksPath(tmp)).toBe(''); // theirs to keep — never clobbered
+      // The inverse: a hooksPath that RESOLVES to our dir (absolute, unresolved
+      // /tmp on macOS) is wired, whatever its spelling.
+      execFileSync('git', ['-C', tmp, 'config', 'core.hooksPath', join(tmp, '.githooks')]);
+      expect(await install(tmp)).toBe('unchanged');
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
   });
 
   test('a fresh clone that carries the committed gbrain hook gets wired on install (not "unchanged" while inert)', async () => {
     // The hook FILE travels with the repo; core.hooksPath is per-clone config
     // and does not. Install on the clone must fall through to the wiring step
     // instead of stopping at "the script is already current".
-    installHook(tmp, false);
+    await install(tmp);
     execFileSync('git', ['-C', tmp, 'add', '.githooks']);
     execFileSync('git', ['-C', tmp, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'add hook']);
     const clone = mkdtempSync(join(tmpdir(), 'fm-hook-clone-'));
     try {
       execFileSync('git', ['clone', '-q', tmp, clone]);
       expect(localHooksPath(clone)).toBe('');
-      await withEnv({ GIT_CONFIG_GLOBAL: '/dev/null' }, async () => {
-        expect(installHook(clone, false)).toBe('installed');
-      });
+      expect(await install(clone)).toBe('installed');
       expect(localHooksPath(clone)).toBe('.githooks');
     } finally {
       rmSync(clone, { recursive: true, force: true });
@@ -283,17 +293,15 @@ describe('frontmatter install-hook (B13)', () => {
     mkdirSync(join(tmp, '.githooks'));
     writeFileSync(join(tmp, '.githooks', 'post-commit'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     writeFileSync(join(tmp, '.githooks', 'README.md'), 'docs, not a hook\n');
-    await withEnv({ GIT_CONFIG_GLOBAL: '/dev/null' }, async () => {
-      expect(installHook(tmp, false)).toBe('installed_unwired');
-    });
+    expect(await install(tmp)).toBe('installed_unwired');
     expect(readFileSync(join(tmp, '.githooks', 'pre-commit'), 'utf8')).toContain('gbrain frontmatter');
     expect(localHooksPath(tmp)).toBe('');
   });
 
-  test('#4600 a path outside any git repo is refused with the shared sync message, nothing written', () => {
+  test('#4600 a path outside any git repo is refused with the shared sync message, nothing written', async () => {
     const plain = mkdtempSync(join(tmpdir(), 'fm-hook-nogit-'));
     try {
-      expect(() => installHook(plain, false)).toThrow(/Not inside a git repository/);
+      await expect(install(plain)).rejects.toThrow(/Not inside a git repository/);
       expect(existsSync(join(plain, '.githooks'))).toBe(false);
     } finally {
       rmSync(plain, { recursive: true, force: true });
