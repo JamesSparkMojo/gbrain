@@ -73,17 +73,23 @@ if ! command -v gbrain >/dev/null 2>&1; then
   exit 0
 fi
 
-staged=$(git diff --cached --name-only --diff-filter=ACM${pathspec} | grep -E '\\.mdx?$' || true)
+# One path per line: -z disables git's quoting (a non-ASCII name would print
+# as "caf\\303\\251.md"), tr turns the NUL terminators into newlines, and the
+# read loop keeps spaces intact (a newline INSIDE a name is the one unsupported
+# shape). The heredoc keeps the loop in this shell so 'failed' survives it.
+staged=$(git diff --cached --name-only -z --diff-filter=ACM${pathspec} | tr '\\0' '\\n' | grep -E '\\.mdx?$' || true)
 [ -z "$staged" ] && exit 0
 
 failed=0
-for f in $staged; do
+while IFS= read -r f; do
   [ -f "$f" ] || continue
   if ! gbrain frontmatter validate "$f" >/dev/null 2>&1; then
     gbrain frontmatter validate "$f" >&2
     failed=1
   fi
-done
+done <<EOF
+$staged
+EOF
 
 if [ $failed -ne 0 ]; then
   echo "" >&2

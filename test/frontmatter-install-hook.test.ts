@@ -21,6 +21,28 @@ function gitInit(dir: string) {
 const install = (path: string, force = false) =>
   withEnv({ GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' }, () => installHook(path, force));
 
+/**
+ * Run the installed hook (via sh, as git would) with a `gbrain` stub that FAILS
+ * every validate call: any staged file that reaches the loop blocks the
+ * commit, so exit 0 proves a file was never reached and exit 1 proves it was.
+ */
+function runHookWithFailingGbrain(repo: string): number {
+  const bin = mkdtempSync(join(tmpdir(), 'fm-hook-bin-'));
+  writeFileSync(join(bin, 'gbrain'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  try {
+    execFileSync('sh', [join(repo, '.githooks', 'pre-commit')], {
+      cwd: repo,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` },
+      stdio: 'pipe',
+    });
+    return 0;
+  } catch (e) {
+    return (e as { status: number }).status;
+  } finally {
+    rmSync(bin, { recursive: true, force: true });
+  }
+}
+
 /** The repo-local core.hooksPath ('' when unset) — global scope never leaks in. */
 function localHooksPath(dir: string): string {
   try {
@@ -145,7 +167,7 @@ describe('frontmatter install-hook (B13)', () => {
     expect(existsSync(join(tmp, 'brain', '.githooks'))).toBe(false);
     const content = readFileSync(hookPath, 'utf8');
     expect(content).toContain('# gbrain-scope: brain/');
-    expect(content).toContain("--diff-filter=ACM -- 'brain/' | grep -E '\\.mdx?$'");
+    expect(content).toContain("--diff-filter=ACM -- 'brain/' | tr '\\0' '\\n' | grep -E '\\.mdx?$'");
   });
 
   test('#4600 several nested sources share one hook: pathspecs union, no .bak, idempotent', async () => {
@@ -166,7 +188,7 @@ describe('frontmatter install-hook (B13)', () => {
     await install(tmp);
     const hookPath = join(tmp, '.githooks', 'pre-commit');
     expect(readFileSync(hookPath, 'utf8')).not.toContain('gbrain-scope');
-    expect(readFileSync(hookPath, 'utf8')).toContain("--diff-filter=ACM | grep -E '\\.mdx?$'");
+    expect(readFileSync(hookPath, 'utf8')).toContain("--diff-filter=ACM | tr '\\0' '\\n' | grep -E '\\.mdx?$'");
 
     mkdirSync(join(tmp, 'brain'));
     expect(await install(join(tmp, 'brain'))).toBe('unchanged'); // whole repo already covers brain/
@@ -181,36 +203,49 @@ describe('frontmatter install-hook (B13)', () => {
     expect(await install(tmp)).toBe('installed');
     const content = readFileSync(hookPath, 'utf8');
     expect(content).not.toContain('gbrain-scope');
-    expect(content).toContain("--diff-filter=ACM | grep -E '\\.mdx?$'");
+    expect(content).toContain("--diff-filter=ACM | tr '\\0' '\\n' | grep -E '\\.mdx?$'");
     expect(existsSync(hookPath + '.bak')).toBe(false);
   });
 
   test('#4600 the scoped hook ignores staged files outside the source (host README commits pass)', async () => {
     mkdirSync(join(tmp, 'brain'));
     await install(join(tmp, 'brain'));
-    // A `gbrain` stub that fails every validate call: any staged file that
-    // reaches the loop blocks the commit, so exit 0 proves the pathspec.
-    const bin = mkdtempSync(join(tmpdir(), 'fm-hook-bin-'));
-    writeFileSync(join(bin, 'gbrain'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
-    const env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` };
-    const runHook = (): number => {
-      try {
-        execFileSync('sh', [join(tmp, '.githooks', 'pre-commit')], { cwd: tmp, env, stdio: 'pipe' });
-        return 0;
-      } catch (e) {
-        return (e as { status: number }).status;
-      }
-    };
-    try {
-      writeFileSync(join(tmp, 'README.md'), 'no frontmatter here\n');
-      execFileSync('git', ['-C', tmp, 'add', 'README.md']);
-      expect(runHook()).toBe(0);
-      writeFileSync(join(tmp, 'brain', 'bad.md'), 'no frontmatter here\n');
-      execFileSync('git', ['-C', tmp, 'add', 'brain/bad.md']);
-      expect(runHook()).toBe(1);
-    } finally {
-      rmSync(bin, { recursive: true, force: true });
-    }
+    writeFileSync(join(tmp, 'README.md'), 'no frontmatter here\n');
+    execFileSync('git', ['-C', tmp, 'add', 'README.md']);
+    expect(runHookWithFailingGbrain(tmp)).toBe(0);
+    writeFileSync(join(tmp, 'brain', 'bad.md'), 'no frontmatter here\n');
+    execFileSync('git', ['-C', tmp, 'add', 'brain/bad.md']);
+    expect(runHookWithFailingGbrain(tmp)).toBe(1);
+  });
+
+  test('the hook checks a staged filename containing a space or non-ASCII characters', async () => {
+    mkdirSync(join(tmp, 'brain'));
+    await install(join(tmp, 'brain'));
+    // `for f in $staged` word-split "brain/my note.md" into two non-files
+    // (skipped), and git's default core.quotePath printed "brain/caf\303\251.md"
+    // in double quotes, which `grep '\.mdx?$'` then rejected — both silently
+    // let malformed pages through.
+    writeFileSync(join(tmp, 'brain', 'my note.md'), 'no frontmatter here\n');
+    execFileSync('git', ['-C', tmp, 'add', 'brain/my note.md']);
+    expect(runHookWithFailingGbrain(tmp)).toBe(1);
+    execFileSync('git', ['-C', tmp, 'reset', '-q']);
+    writeFileSync(join(tmp, 'brain', 'café.md'), 'no frontmatter here\n');
+    execFileSync('git', ['-C', tmp, 'add', 'brain/café.md']);
+    expect(runHookWithFailingGbrain(tmp)).toBe(1);
+  });
+
+  test('#4600 a scope containing a quote is shell-quoted into the pathspec and the hook still runs', async () => {
+    mkdirSync(join(tmp, "it's"));
+    await install(join(tmp, "it's"));
+    const content = readFileSync(join(tmp, '.githooks', 'pre-commit'), 'utf8');
+    expect(content).toContain("# gbrain-scope: it's/");
+    expect(content).toContain(`-- 'it'\\''s/'`);
+    writeFileSync(join(tmp, 'README.md'), 'outside\n');
+    execFileSync('git', ['-C', tmp, 'add', 'README.md']);
+    expect(runHookWithFailingGbrain(tmp)).toBe(0);
+    writeFileSync(join(tmp, "it's", 'bad.md'), 'inside\n');
+    execFileSync('git', ['-C', tmp, 'add', "it's/bad.md"]);
+    expect(runHookWithFailingGbrain(tmp)).toBe(1);
   });
 
   test('#4600 uninstall for one nested source drops only its scope; the last one removes the hook', async () => {
