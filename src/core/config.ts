@@ -1648,6 +1648,8 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // Read by performSync + runImport summary aggregation; 'false'/'0'/'off'
   // silences both surfaces (schema lint rules stay active).
   'schema.type_warnings',
+  // #4795 reindex-search-vector marker (doctor fts_reindex_incomplete reads it); `config unset` is the escape hatch.
+  'fts.reindex_in_progress',
 ];
 
 /**

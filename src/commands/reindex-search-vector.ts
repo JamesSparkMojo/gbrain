@@ -254,7 +254,15 @@ export async function runReindexSearchVector(
   }
   await engine.setConfig(FTS_REINDEX_MARKER_KEY, lang);
 
-  await engine.executeRaw(recreatePagesFn);
+  try {
+    await engine.executeRaw(recreatePagesFn);
+  } catch (err) {
+    // Nothing landed (e.g. no CREATE FUNCTION privilege): clear the marker so
+    // doctor doesn't report a permanent fts_reindex_incomplete whose suggested
+    // fix re-fails. Once the pages trigger has flipped, the marker MUST stay.
+    await engine.unsetConfig(FTS_REINDEX_MARKER_KEY).catch(() => {});
+    throw err;
+  }
   await engine.executeRaw(recreateChunksFn);
 
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));

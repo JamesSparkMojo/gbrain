@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { runReindexSearchVector } from '../src/commands/reindex-search-vector.ts';
 import { resetFtsLanguageCache } from '../src/core/fts-language.ts';
+import { KNOWN_CONFIG_KEYS } from '../src/core/config.ts';
 
 const ENV_KEY = 'GBRAIN_FTS_LANGUAGE';
 const originalLang = process.env[ENV_KEY];
@@ -187,6 +188,37 @@ describe('runReindexSearchVector', () => {
 
       await expect(runReindexSearchVector(engine, { yes: true, json: true })).rejects.toThrow();
       expect(state.config!.get(MARKER)).toBe('pt_br');
+    });
+
+    test('a failure on the first DDL clears the marker — nothing landed, so doctor must not flag an incomplete reindex', async () => {
+      // A missing CREATE FUNCTION privilege fails here, before either trigger
+      // flipped. Leaving the marker set would be a permanent false
+      // fts_reindex_incomplete whose suggested fix (re-run) fails the same way.
+      const state: MockState = {
+        calls: [], rowsToReturn: { pages: 10, chunks: 30 }, failOn: /update_page_search_vector/,
+      };
+      const engine = makeMockEngine(state);
+      process.env[ENV_KEY] = 'pt_br';
+      resetFtsLanguageCache();
+
+      await expect(runReindexSearchVector(engine, { yes: true, json: true })).rejects.toThrow();
+      expect(state.config!.has(MARKER)).toBe(false);
+    });
+
+    test('a failure on the second DDL keeps the marker — the pages trigger already flipped', async () => {
+      const state: MockState = {
+        calls: [], rowsToReturn: { pages: 10, chunks: 30 }, failOn: /update_chunk_search_vector/,
+      };
+      const engine = makeMockEngine(state);
+      process.env[ENV_KEY] = 'pt_br';
+      resetFtsLanguageCache();
+
+      await expect(runReindexSearchVector(engine, { yes: true, json: true })).rejects.toThrow();
+      expect(state.config!.get(MARKER)).toBe('pt_br');
+    });
+
+    test('the marker key is registered so `gbrain config` treats the escape hatch as a known key', () => {
+      expect(KNOWN_CONFIG_KEYS).toContain(MARKER);
     });
 
     test('successful run sets the marker before the first CREATE OR REPLACE and clears all state at the end', async () => {
