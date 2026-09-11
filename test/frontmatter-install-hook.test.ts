@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { execFileSync } from 'child_process';
@@ -331,6 +331,25 @@ describe('frontmatter install-hook (B13)', () => {
     expect(await install(tmp)).toBe('installed_unwired');
     expect(readFileSync(join(tmp, '.githooks', 'pre-commit'), 'utf8')).toContain('gbrain frontmatter');
     expect(localHooksPath(tmp)).toBe('');
+  });
+
+  test('a symlinked .githooks/ or pre-commit is refused — nothing is written or removed through the link', async () => {
+    // A committed symlink in a host repo would otherwise redirect our
+    // writeFileSync/chmodSync (and uninstall's rmSync) to wherever it points.
+    const elsewhere = mkdtempSync(join(tmpdir(), 'fm-hook-linktarget-'));
+    try {
+      symlinkSync(elsewhere, join(tmp, '.githooks'));
+      await expect(install(tmp)).rejects.toThrow(/symlink/);
+      expect(existsSync(join(elsewhere, 'pre-commit'))).toBe(false);
+      rmSync(join(tmp, '.githooks'));
+      mkdirSync(join(tmp, '.githooks'));
+      symlinkSync(join(elsewhere, 'target'), join(tmp, '.githooks', 'pre-commit'));
+      await expect(install(tmp)).rejects.toThrow(/symlink/);
+      expect(existsSync(join(elsewhere, 'target'))).toBe(false);
+      expect(() => uninstallHook(tmp)).toThrow(/symlink/);
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
   });
 
   test('#4600 a path outside any git repo is refused with the shared sync message, nothing written', async () => {

@@ -30,7 +30,7 @@
  *   - Bypass via `git commit --no-verify`.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, rmSync, copyFileSync, realpathSync, readdirSync, statSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, rmSync, copyFileSync, realpathSync, readdirSync, statSync, lstatSync } from 'fs';
 import { isAbsolute, join, relative, resolve } from 'path';
 import { execFileSync } from 'child_process';
 import type { BrainEngine } from '../core/engine.ts';
@@ -171,7 +171,15 @@ export async function runFrontmatterInstallHook(args: string[]): Promise<void> {
         }
         continue;
       }
-      const result = installHook(src.local_path, force);
+      let result: InstallResult;
+      try {
+        result = installHook(src.local_path, force);
+      } catch (err) {
+        // e.g. a symlinked .githooks/ — refused, the other sources still run.
+        console.log(`[${src.id}] skipped — ${err instanceof Error ? err.message : String(err)}`);
+        skipped++;
+        continue;
+      }
       if (result === 'installed') {
         const where = join(target.root, '.githooks', 'pre-commit');
         console.log(`[${src.id}] hook installed at ${where}${target.scope ? ` (scoped to ${target.scope})` : ''}`);
@@ -254,6 +262,22 @@ function resolveHookTarget(localPath: string): HookTarget {
 type InstallResult = 'installed' | 'installed_unwired' | 'skipped_existing' | 'unchanged';
 
 /**
+ * `.githooks/` and its `pre-commit` under `root`. Refuses a symlink at either
+ * level: a committed link in a host repo would redirect our write/chmod/rm to
+ * wherever it points (lstat, so a dangling link is refused too).
+ */
+function hookPaths(root: string): { hooksDir: string; hookPath: string } {
+  const hooksDir = join(root, '.githooks');
+  const hookPath = join(hooksDir, 'pre-commit');
+  for (const p of [hooksDir, hookPath]) {
+    let link = false;
+    try { link = lstatSync(p).isSymbolicLink(); } catch { /* absent — fine */ }
+    if (link) throw new Error(`Refusing to write through a symlink: ${p}`);
+  }
+  return { hooksDir, hookPath };
+}
+
+/**
  * Hooks git would run from the repo's own hooks dir today: executable,
  * non-`*.sample` files (git skips both non-executable files and samples).
  * The dir is `<git common dir>/hooks` (worktree-safe — `.git` is a FILE in
@@ -325,8 +349,7 @@ export function hooksPathBlocker(root: string): string | null {
 
 export function installHook(localPath: string, force: boolean): InstallResult {
   const { root, scope } = resolveHookTarget(localPath);
-  const hooksDir = join(root, '.githooks');
-  const hookPath = join(hooksDir, 'pre-commit');
+  const { hooksDir, hookPath } = hookPaths(root);
   mkdirSync(hooksDir, { recursive: true });
 
   let next = renderHookScript(scope ? [scope] : []);
@@ -367,7 +390,7 @@ export function installHook(localPath: string, force: boolean): InstallResult {
 
 export function uninstallHook(localPath: string): boolean {
   const { root, scope } = resolveHookTarget(localPath);
-  const hookPath = join(root, '.githooks', 'pre-commit');
+  const { hookPath } = hookPaths(root);
   if (!existsSync(hookPath)) return false;
   const content = readFileSync(hookPath, 'utf8');
   if (!content.includes(HOOK_BANNER)) return false;
