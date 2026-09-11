@@ -257,10 +257,16 @@ export async function runReindexSearchVector(
   try {
     await engine.executeRaw(recreatePagesFn);
   } catch (err) {
-    // Nothing landed (e.g. no CREATE FUNCTION privilege): clear the marker so
-    // doctor doesn't report a permanent fts_reindex_incomplete whose suggested
-    // fix re-fails. Once the pages trigger has flipped, the marker MUST stay.
-    await engine.unsetConfig(FTS_REINDEX_MARKER_KEY).catch(() => {});
+    // Nothing landed (e.g. no CREATE FUNCTION privilege): put the marker back
+    // the way THIS run found it. Absent before → clear it, so doctor doesn't
+    // report a permanent fts_reindex_incomplete whose suggested fix re-fails.
+    // Set before (a prior run was interrupted) → the index is still split, so
+    // restore the prior value; clearing it would hide a real incomplete
+    // reindex. Once the pages trigger has flipped, the marker MUST stay.
+    await (inProgress === null
+      ? engine.unsetConfig(FTS_REINDEX_MARKER_KEY)
+      : engine.setConfig(FTS_REINDEX_MARKER_KEY, inProgress)
+    ).catch(() => {});
     throw err;
   }
   await engine.executeRaw(recreateChunksFn);

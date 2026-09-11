@@ -205,6 +205,24 @@ describe('runReindexSearchVector', () => {
       expect(state.config!.has(MARKER)).toBe(false);
     });
 
+    test('a failure on the first DDL restores a PRE-EXISTING marker — a previously split index must stay visible to doctor', async () => {
+      // A prior run already flipped triggers and was interrupted (marker set).
+      // This resume fails before any DDL lands, so the index is still split
+      // exactly as before: the marker must survive with its prior value.
+      for (const prior of ['pt_br', 'english']) {
+        const state: MockState = {
+          calls: [], rowsToReturn: { pages: 10, chunks: 30 }, failOn: /update_page_search_vector/,
+          config: new Map([[MARKER, prior]]),
+        };
+        const engine = makeMockEngine(state);
+        process.env[ENV_KEY] = 'pt_br';
+        resetFtsLanguageCache();
+
+        await expect(runReindexSearchVector(engine, { yes: true, json: true })).rejects.toThrow();
+        expect(state.config!.get(MARKER)).toBe(prior);
+      }
+    });
+
     test('a failure on the second DDL keeps the marker — the pages trigger already flipped', async () => {
       const state: MockState = {
         calls: [], rowsToReturn: { pages: 10, chunks: 30 }, failOn: /update_chunk_search_vector/,
