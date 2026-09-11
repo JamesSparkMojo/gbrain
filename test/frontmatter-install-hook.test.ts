@@ -12,6 +12,15 @@ function gitInit(dir: string) {
   execFileSync('git', ['-C', dir, 'config', 'user.name', 'Test']);
 }
 
+/** The repo-local core.hooksPath ('' when unset) — global scope never leaks in. */
+function localHooksPath(dir: string): string {
+  try {
+    return execFileSync('git', ['-C', dir, 'config', '--local', '--get', 'core.hooksPath'], { encoding: 'utf8' }).trim();
+  } catch {
+    return '';
+  }
+}
+
 describe('frontmatter install-hook (B13)', () => {
   let tmp: string;
 
@@ -229,11 +238,21 @@ describe('frontmatter install-hook (B13)', () => {
       expect(installHook(join(tmp, 'brain'), false)).toBe('installed_unwired');
     });
     expect(existsSync(join(tmp, '.githooks', 'pre-commit'))).toBe(true);
-    let localHooksPath = '';
-    try {
-      localHooksPath = execFileSync('git', ['-C', tmp, 'config', '--local', '--get', 'core.hooksPath'], { encoding: 'utf8' }).trim();
-    } catch { /* unset is the asserted outcome */ }
-    expect(localHooksPath).toBe('');
+    expect(localHooksPath(tmp)).toBe('');
+  });
+
+  test('a host repo that ships other hook scripts under .githooks/ keeps core.hooksPath unset (wiring would activate them)', async () => {
+    // Third-party clones commit `.githooks/<hook>` as a convention. Pointing
+    // core.hooksPath at that dir makes git run EVERY executable script in
+    // it — not just ours — so the installer must refuse to flip the switch.
+    mkdirSync(join(tmp, '.githooks'));
+    writeFileSync(join(tmp, '.githooks', 'post-commit'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    writeFileSync(join(tmp, '.githooks', 'README.md'), 'docs, not a hook\n');
+    await withEnv({ GIT_CONFIG_GLOBAL: '/dev/null' }, async () => {
+      expect(installHook(tmp, false)).toBe('installed_unwired');
+    });
+    expect(readFileSync(join(tmp, '.githooks', 'pre-commit'), 'utf8')).toContain('gbrain frontmatter');
+    expect(localHooksPath(tmp)).toBe('');
   });
 
   test('#4600 a path outside any git repo is refused with the shared sync message, nothing written', () => {

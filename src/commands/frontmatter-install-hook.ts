@@ -17,10 +17,11 @@
  *     hook at the host root, pathspec-scoped to that subdirectory; several
  *     nested sources union their scopes; a source registered at the root
  *     renders the unscoped whole-repo script. We `git config core.hooksPath
- *     .githooks` if no other hooksPath is set AND the repo's own hooks dir
- *     (`.git/hooks`) has no active hook — setting hooksPath makes git ignore
- *     that dir for EVERY hook type, so we never sideline hooks a host repo
- *     already runs; the hook is still written and the manual wiring printed.
+ *     .githooks` only when no other hooksPath is set AND `hooksPathBlocker`
+ *     finds nothing: no foreign executable under `.githooks/` (wiring would
+ *     start running it) and no active hook in the repo's own hooks dir
+ *     (`.git/hooks` — wiring makes git ignore it for EVERY hook type). Either
+ *     way the hook is written and the manual wiring step printed.
  *   - When the gbrain binary is missing, the hook prints a one-line warning
  *     and exits 0 (don't break commits if a developer uninstalls gbrain).
  *   - Bypass via `git commit --no-verify`.
@@ -160,8 +161,7 @@ export async function runFrontmatterInstallHook(args: string[]): Promise<void> {
         installed++;
       } else if (result === 'installed_unwired') {
         const where = join(target.root, '.githooks', 'pre-commit');
-        const active = activeGitHooks(target.root).join(', ');
-        console.log(`[${src.id}] hook written at ${where}; core.hooksPath left unset — active hooks in .git/hooks (${active}) would stop running. Move them into .githooks/ then run: git -C ${target.root} config core.hooksPath .githooks`);
+        console.log(`[${src.id}] hook written at ${where}; core.hooksPath left unset — ${hooksPathBlocker(target.root)}`);
         installed++;
       } else if (result === 'skipped_existing') {
         console.log(`[${src.id}] existing pre-commit hook found; pass --force to overwrite (.bak created)`);
@@ -248,6 +248,11 @@ export function activeGitHooks(root: string): string[] {
     const p = execFileSync('git', ['-C', root, 'rev-parse', '--git-path', 'hooks'], { encoding: 'utf8' }).trim();
     if (p) dir = isAbsolute(p) ? p : join(root, p);
   } catch { /* classic layout fallback */ }
+  return executableHooks(dir);
+}
+
+/** Executable, non-`*.sample` files in `dir` — what git runs from a hooks dir. */
+function executableHooks(dir: string): string[] {
   if (!existsSync(dir)) return [];
   return readdirSync(dir).filter((f) => {
     if (f.endsWith('.sample')) return false;
@@ -256,6 +261,22 @@ export function activeGitHooks(root: string): string[] {
       return st.isFile() && (st.mode & 0o111) !== 0;
     } catch { return false; }
   }).sort();
+}
+
+/**
+ * Why `core.hooksPath` must stay unset (an operator-facing sentence with the
+ * manual step), or null when pointing it at `.githooks` is safe. Wiring makes
+ * git run EVERY executable script in `.githooks/` — third-party clones commit
+ * hooks there as a convention — and ignore `.git/hooks/*` for every hook type,
+ * so a foreign `.githooks/<hook>` or a live `.git/hooks/<hook>` both block it.
+ */
+export function hooksPathBlocker(root: string): string | null {
+  const wire = `then run: git -C ${root} config core.hooksPath .githooks`;
+  const foreign = executableHooks(join(root, '.githooks')).filter((f) => f !== 'pre-commit');
+  if (foreign.length > 0) return `.githooks/ holds other hook scripts git would start running (${foreign.join(', ')}); review them, ${wire}`;
+  const live = activeGitHooks(root);
+  if (live.length > 0) return `active hooks in .git/hooks (${live.join(', ')}) would stop running; move them into .githooks/, ${wire}`;
+  return null;
 }
 
 export function installHook(localPath: string, force: boolean): InstallResult {
@@ -292,10 +313,9 @@ export function installHook(localPath: string, force: boolean): InstallResult {
   } catch {
     // git config returns non-zero when the key is unset; that's the normal case.
   }
-  // Wiring hooksPath makes git ignore .git/hooks/* for EVERY hook type. A
-  // host repo already running hooks there (a nested `<ws>/brain` source's
-  // enclosing dev repo) keeps them; the CLI prints the manual wiring step.
-  if (activeGitHooks(root).length > 0) return 'installed_unwired';
+  // A host repo already running hooks (a nested `<ws>/brain` source's
+  // enclosing dev repo) keeps them; the CLI prints the reason + manual step.
+  if (hooksPathBlocker(root)) return 'installed_unwired';
   try {
     execFileSync('git', ['-C', root, 'config', 'core.hooksPath', '.githooks']);
   } catch {
