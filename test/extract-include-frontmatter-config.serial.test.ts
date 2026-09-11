@@ -85,6 +85,17 @@ describe('resolveIncludeFrontmatter', () => {
     }
   }));
 
+  test('a non-boolean file-plane value falls through to the DB plane instead of winning as false (#2120 class)', () => inHome(async () => {
+    // A hand-edited config.json with "true" (string) or 1 used to short-circuit
+    // to false AND shadow the DB plane — so `gbrain config set <key> true` was
+    // a silent no-op. Only a real boolean is a file-plane answer.
+    for (const garbled of ['true', 1, 'yes']) {
+      writeConfigFile({ autopilot: { incremental_extract_include_frontmatter: garbled } });
+      expect(await resolveIncludeFrontmatter(engineWith({ [INCLUDE_FRONTMATTER_KEY]: 'true' }))).toBe(true);
+      expect(await resolveIncludeFrontmatter(engineWith({}))).toBe(false);
+    }
+  }));
+
   test('fails closed when the config table is unreadable', () => inHome(async () => {
     const throwing = { getConfig: async (): Promise<string | null> => { throw new Error('no config table'); } };
     expect(await resolveIncludeFrontmatter(throwing)).toBe(false);

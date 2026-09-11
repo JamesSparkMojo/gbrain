@@ -12,8 +12,9 @@
  *
  * Both planes, file wins (same precedence as loadConfigWithEngine). `gbrain
  * config set` writes the DB plane, so a file-only read would make the
- * documented enable command a silent no-op (#2120 class). Fails closed:
- * absent, garbled or unreadable values yield false.
+ * documented enable command a silent no-op (#2120 class). A non-boolean
+ * file-plane value is not an answer — it falls through to the DB plane. Fails
+ * closed: absent, garbled or unreadable values yield false.
  */
 
 import { isConfigTruthy, loadConfig } from './config.ts';
@@ -31,7 +32,9 @@ export async function resolveIncludeFrontmatter(
 ): Promise<boolean> {
   if (explicit !== undefined) return explicit;
   const fileVal = loadConfig()?.autopilot?.incremental_extract_include_frontmatter;
-  if (fileVal !== undefined) return fileVal === true;
+  // Only a real boolean is a file-plane answer; a hand-edited "true"/1 used to
+  // resolve false AND shadow the DB plane (silent `config set` no-op, #2120 class).
+  if (typeof fileVal === 'boolean') return fileVal;
   if (!engine) return false;
   try {
     return isConfigTruthy(await engine.getConfig(INCLUDE_FRONTMATTER_KEY));
