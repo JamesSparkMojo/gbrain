@@ -739,6 +739,8 @@ const delta: Operation = {
     let pages = res.deltaPages ?? [];
     let facts = res.facts ?? [];
     let threads = res.openThreads ?? [];
+    const fetchedFacts = facts;
+    const fetchedThreads = threads;
     let droppedCount: number | undefined;
     let factsDropped = 0;
     let threadsDropped = 0;
@@ -769,9 +771,6 @@ const delta: Operation = {
     // dropped pages, budget-dropped facts (pre-landing review: facts were
     // silently lost when pages fit but facts overflowed), AND budget-dropped
     // threads (#4761).
-    // ponytail: dropped facts/threads share the pre-existing ceiling — the
-    // cursor still advances past delivered pages, so they re-surface only if
-    // their event time is after the new cursor; a per-arm cursor would fix it.
     const hasMore = res.deltaOverflow === true || pagesDropped > 0 || factsDropped > 0 || threadsDropped > 0;
 
     // Cursor advance (keyset, at-least-once): advance to the last DELIVERED
@@ -782,10 +781,32 @@ const delta: Operation = {
     // minus a safety lag (in-flight write txns stamp updated_at at txn START)
     // and clear the keyset slug. If nothing delivered but something dropped, do
     // NOT advance (deliver-before-advance; a too-small budget must not eat it).
-    const nextCursor =
+    let nextCursor =
       pages.length > 0
         ? { since: pages[pages.length - 1].updated_at, slug: pages[pages.length - 1].slug }
         : { since: effectiveSince, slug: sinceSlug ?? '' };
+    // Never advance past an UNDELIVERED fact/thread (pre-landing review, #4761
+    // regression): facts filter on created_at > since and threads on date >
+    // since, so a dropped one dated at/before the delivered pages' updated_at
+    // would fall behind the cursor for good. Hold the cursor 1ms before the
+    // oldest dropped item (never behind `since`); the pages in that sliver
+    // re-deliver on the next wake — at-least-once beats silent loss.
+    // ponytail: pages still pack first, so a budget too small for the pages
+    // plus the oldest dropped fact/thread re-delivers the same pages every
+    // wake; a per-arm cursor would fix it.
+    const droppedAt = [
+      ...fetchedFacts.slice(facts.length).map((f) => f.created_at ?? f.valid_from),
+      ...fetchedThreads.slice(threads.length).map((t) => t.date),
+    ]
+      .map((v) => Date.parse(v ?? ''))
+      .filter(Number.isFinite);
+    const holdMs = droppedAt.length > 0 ? Math.min(...droppedAt) - 1 : null;
+    if (holdMs !== null && holdMs < Date.parse(nextCursor.since)) {
+      nextCursor =
+        holdMs > Date.parse(effectiveSince)
+          ? { since: new Date(holdMs).toISOString(), slug: '' }
+          : { since: effectiveSince, slug: sinceSlug ?? '' };
+    }
     if (sessionId) {
       if (pages.length > 0) {
         await upsertSessionContextState(ctx.engine, sourceId, clientId, sessionId, {

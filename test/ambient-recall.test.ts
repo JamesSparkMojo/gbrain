@@ -20,6 +20,7 @@ import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { operations } from '../src/core/operations.ts';
 import { MEMORY_VERBS_VERSION, VERB_NAMES } from '../src/core/verbs.ts';
 import { estimateTokens } from '../src/core/search/token-budget.ts';
+import { deltaHeaderCost, renderPageLine } from '../src/core/context/turn-context.ts';
 import {
   getSessionContextState,
   upsertSessionContextState,
@@ -771,6 +772,56 @@ describe('budget packing + drop footer', () => {
     expect(r.dropped_count).toBe(
       (full.pages as unknown[]).length + (full.facts as unknown[]).length + (full.threads as unknown[]).length,
     );
+  });
+
+  // Pre-landing review (regression from #4761): a budget-dropped fact/thread
+  // dated at or before the delivered page's updated_at must NOT be skipped by
+  // the advanced cursor — the next wake (larger budget) still delivers it.
+  test('budget-dropped thread is delivered on the next wake from next_cursor (pre-landing review)', async () => {
+    const putPage = operations.find((o) => o.name === 'put_page')!;
+    const local = ctxFor({ remote: false });
+    await call(putPage, local, { slug: 'people/bob-example', content: '# Bob Example\n\nbody' });
+    await new Promise((r) => setTimeout(r, 5));
+    const since = new Date().toISOString();
+    await new Promise((r) => setTimeout(r, 5));
+    await call(remember, local, {
+      fact: `bob-example will send the revised partnership deck ${'y'.repeat(240)}`,
+      kind: 'commitment',
+      entity: 'people/bob-example',
+      provenance: 'test',
+      visibility: 'world',
+    });
+    // The page that fits the budget is stamped AFTER the thread's event time.
+    await call(putPage, local, { slug: 'notes/after', content: '# After\n\nx' });
+    __resetHotMemoryCacheForTests();
+    const full = await call(del, local, { since, entities: 'people/bob-example' });
+    expect((full.pages as Array<{ slug: string }>).map((p) => p.slug)).toContain('notes/after');
+    expect((full.threads as unknown[]).length).toBeGreaterThan(0);
+    // Budget = envelope/headers + every page line + a sliver: pages fit, the
+    // long fact + thread lines cannot.
+    const pageLines = (full.pages as Parameters<typeof renderPageLine>[0][]).reduce(
+      (n, pg) => n + estimateTokens(renderPageLine(pg) + '\n'),
+      0,
+    );
+    const r1 = await call(del, local, {
+      since,
+      entities: 'people/bob-example',
+      budget_tokens: deltaHeaderCost(since) + pageLines + 5,
+    });
+    expect((r1.pages as unknown[]).length).toBe((full.pages as unknown[]).length);
+    expect(r1.threads).toEqual([]);
+    expect(r1.has_more).toBe(true);
+    const r2 = await call(del, local, {
+      since: r1.next_cursor.since,
+      since_slug: r1.next_cursor.slug,
+      entities: 'people/bob-example',
+      budget_tokens: 4000,
+    });
+    expect((r2.threads as Array<{ text: string }>).map((t) => t.text)).toEqual(
+      (full.threads as Array<{ text: string }>).map((t) => t.text),
+    );
+    expect((r2.facts as unknown[]).length).toBe((full.facts as unknown[]).length);
+    expect(r2.has_more).toBe(false);
   });
 
   test('forced overflow: dropped_count > 0 and budget_used stays within budget_tokens (v0.45.7)', async () => {

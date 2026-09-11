@@ -313,8 +313,11 @@ O(changes) instead of re-deriving. Provide `since` (ISO 8601) OR a
 `session_id` whose cursor carries the last wake. Delivery is **at-least-once**:
 when a budget or the fetch limit drops pages, `has_more: true` is set and the
 session cursor advances only to the newest DELIVERED page — the undelivered
-tail surfaces on the next wake, never silently lost. Dedup is cursor-based (a
-delivered page reappears only if it changes again). Same world-only-default +
+tail surfaces on the next wake, never silently lost. The cursor also never
+passes a budget-dropped fact or thread: it holds just before the oldest one,
+so a few already-delivered pages may reappear on that wake (at-least-once)
+rather than the fact/thread being skipped for good. Otherwise dedup is
+cursor-based (a delivered page reappears only if it changes again). Same world-only-default +
 `include_private` fail-closed rule as `context_pack`. The session cursor is
 keyed `(source_id, client_id, session_id)` — authenticated remote callers are
 namespaced by their auth client id, auth-less remotes share the `'remote'`
