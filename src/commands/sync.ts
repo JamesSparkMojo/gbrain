@@ -2343,8 +2343,9 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     // plus zero imports must not produce a clean `up_to_date` (and must not
     // advance the anchor past commits this run never looked at remotely).
     // Reached when local-only commits landed with no syncable content while
-    // the pull kept failing. Nothing is written; the next sync re-diffs the
-    // same trivial range and retries the pull.
+    // the pull kept failing. Nothing is imported (the #4786 sweep above may
+    // have soft-deleted pages — report it); the next sync re-diffs the same
+    // trivial range and retries the pull.
     if (pullFailed) {
       serr(
         `[sync] git pull failed and no syncable changes imported — reporting partial ` +
@@ -2356,7 +2357,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
         filesImported: 0,
         pagesAffected: [],
         chunksCreated: 0,
-        added: 0, modified: 0, deleted: 0, renamed: 0,
+        added: 0, modified: 0, deleted: swept, renamed: 0,
         reason: 'pull_failed',
       });
     }

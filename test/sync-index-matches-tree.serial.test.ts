@@ -236,6 +236,35 @@ describe('un-syncable sweep is reported (#4786)', () => {
     expect(res.deleted).toBe(1);
     expect(res.status).toBe('synced');
   }, 120_000);
+
+  test('a failed pull on a sweep-only run reports partial/pull_failed AND carries deleted=N (not zeroed)', async () => {
+    await ensureSetup();
+    const { performSync } = await import('../src/commands/sync.ts');
+    // Local-path origin: pullRepo always passes `protocol.file.allow=never`,
+    // so its internal pull fails deterministically (the #3068 topology) while
+    // the working tree still imports. Pull is ENABLED here (no noPull).
+    const upstream = mkMixedRepo();
+    const mirror = mkdtempSync(join(tmpdir(), 'gb-tw-mirror-'));
+    extraRepos.push(mirror);
+    rmSync(mirror, { recursive: true, force: true });
+    execSync(`git clone -q ${JSON.stringify(upstream)} ${JSON.stringify(mirror)}`, { stdio: 'pipe' });
+    execSync('git config user.email t@t && git config user.name T', { cwd: mirror, stdio: 'pipe' });
+    const PULL_OPTS = { noEmbed: true, noExtract: true, sourceId: 'sweep-pull' } as const;
+    await addSource('sweep-pull', 'auto', mirror);
+    const first = await performSync(engine!, { repoPath: mirror, ...PULL_OPTS });
+    expect(first.status).toBe('first_sync');
+    expect(await slugsFor('sweep-pull')).toEqual(['docs/x', 'lib-x-ts']);
+
+    writeFileSync(join(mirror, 'lib/x.ts'), 'export const x = 2;\n');
+    execSync('git add -A && git commit -qm edit', { cwd: mirror, stdio: 'pipe' });
+    const res = await performSync(engine!, { repoPath: mirror, ...PULL_OPTS, strategy: 'markdown' });
+    expect(await slugsFor('sweep-pull')).toEqual(['docs/x']);
+    expect(res.status).toBe('partial');
+    expect(res.reason).toBe('pull_failed');
+    // #4786's invariant holds on this early return too: the sweep is the
+    // run's only effect and must be what the result reports.
+    expect(res.deleted).toBe(1);
+  }, 120_000);
 });
 
 describe('sweep-only sync must not mint an embed-backfill (#4786 x #2139)', () => {
