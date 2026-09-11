@@ -697,7 +697,7 @@ export class PostgresEngine implements BrainEngine {
         SELECT id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, deleted_at,
                effective_date, effective_date_source,
                source_kind, source_uri, ingested_via, ingested_at,
-               contextual_retrieval_mode
+               contextual_retrieval_mode, source_path
         FROM pages
         WHERE slug = ${slug} ${sourceCondition} ${deletedCondition} ${privacy}
         ORDER BY (source_id = ${anchorSourceId}) DESC, source_id ASC

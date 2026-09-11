@@ -639,6 +639,7 @@ describeBoth('Engine parity — Postgres vs PGLite', () => {
       source_kind: 'capture-cli',
       source_uri: 'file:///tmp/parity.md',
       ingested_via: 'put_page',
+      source_path: 'wiki/provenance-parity.md',
     };
     await pgEngine.putPage(slug, input);
     await pgliteEngine.putPage(slug, input);
@@ -648,6 +649,11 @@ describeBoth('Engine parity — Postgres vs PGLite', () => {
 
     expect(pgPage).not.toBeNull();
     expect(pglitePage).not.toBeNull();
+
+    // getPage projects source_path on both engines (the import skip path
+    // compares it before issuing the #4588 refresh UPDATE).
+    expect(pgPage!.source_path).toBe('wiki/provenance-parity.md');
+    expect(pglitePage!.source_path).toBe('wiki/provenance-parity.md');
 
     // All 4 provenance fields must match across engines.
     expect(pgPage!.source_kind).toBe('capture-cli');

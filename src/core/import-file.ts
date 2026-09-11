@@ -285,12 +285,15 @@ function invalidYamlFrontmatterError(parsed: ReturnType<typeof parseMarkdown>): 
  * removed" and soft-deletes the live page. The changed-content path already
  * heals this via putPage's `COALESCE(EXCLUDED.source_path, …)`; the
  * unchanged-content skip is the natural heal moment and used to discard the
- * real path importFile handed in. `IS DISTINCT FROM` makes it a zero-row no-op
- * for correct rows; brainstorm passes `${slug}.md`, the value putPage writes
- * on its own path. Bookkeeping only — never fails the import.
+ * real path importFile handed in. `current` is the path getPage already read:
+ * equal → no statement at all (an unchanged 20k-file tree must not issue 20k
+ * zero-row UPDATEs, each firing the generation-clock trigger); undefined
+ * (projection-less engine) falls through and `IS DISTINCT FROM` keeps the
+ * UPDATE zero-row. brainstorm passes `${slug}.md`, the value putPage writes on
+ * its own path. Bookkeeping only — never fails the import.
  */
-async function refreshSourcePath(engine: BrainEngine, slug: string, sourceId: string | undefined, sourcePath: string | undefined): Promise<void> {
-  if (!sourcePath) return;
+async function refreshSourcePath(engine: BrainEngine, slug: string, sourceId: string | undefined, sourcePath: string | undefined, current: string | null | undefined): Promise<void> {
+  if (!sourcePath || current === sourcePath) return;
   try {
     await engine.executeRaw(
       'UPDATE pages SET source_path = $1 WHERE source_id = $2 AND slug = $3 AND deleted_at IS NULL AND source_path IS DISTINCT FROM $1',
@@ -751,7 +754,7 @@ export async function importFromContent(
   };
 
   if (existing?.content_hash === hash && !opts.forceRechunk) {
-    await refreshSourcePath(engine, slug, sourceId, opts.sourcePath);
+    await refreshSourcePath(engine, slug, sourceId, opts.sourcePath, existing?.source_path);
     return { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}) };
   }
 
@@ -776,7 +779,7 @@ export async function importFromContent(
         parsed.timeline || '',
         hash,
       );
-      await refreshSourcePath(engine, slug, sourceId, opts.sourcePath);
+      await refreshSourcePath(engine, slug, sourceId, opts.sourcePath, existing?.source_path);
       return { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}) };
     }
   }
