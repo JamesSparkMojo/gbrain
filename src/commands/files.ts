@@ -313,7 +313,7 @@ async function uploadRaw(engine: BrainEngine, args: string[]) {
          mime_type = EXCLUDED.mime_type,
          ${FILES_METADATA_MERGE_SQL}`,
       [sourceId, pageSlug, filename, storagePath, mimeType, stat.size, 'sha256:' + hash],
-      [{ storage: 'git', type: fileType }],
+      [{ storage: 'git', ...(fileType ? { type: fileType } : {}) }],
     );
     console.log(JSON.stringify({
       success: true,
@@ -381,7 +381,7 @@ async function uploadRaw(engine: BrainEngine, args: string[]) {
        mime_type = EXCLUDED.mime_type,
        ${FILES_METADATA_MERGE_SQL}`,
     [pageSlug, filename, storagePath, mimeType, stat.size, 'sha256:' + hash],
-    [{ storage: (config.storage as StorageConfig).backend, type: fileType, upload_method: method }],
+    [{ storage: (config.storage as StorageConfig).backend, ...(fileType ? { type: fileType } : {}), upload_method: method }],
   );
 
   // Output JSON for scripting
