@@ -750,179 +750,100 @@ describe('budget packing + drop footer', () => {
     expect(r.budget_used).toBeLessThanOrEqual(90);
   });
 
-  test('delta packs threads too — budget-dropped threads count in dropped_count/has_more (#4761)', async () => {
+  // Threads are the commitments a heartbeat must never miss: delta reserves
+  // every thread line ahead of pages/facts and never budget-drops one. Only
+  // pages and facts count toward dropped_count; budget_used reports the real
+  // rendered size (it exceeds the budget only when header + threads alone do).
+  test('delta never budget-drops threads — dropped_count counts only pages/facts', async () => {
     const putPage = operations.find((o) => o.name === 'put_page')!;
     const local = ctxFor({ remote: false });
     await call(putPage, local, { slug: 'people/alice-example', content: '# Alice Example\n\nbody' });
-    await call(remember, local, {
-      fact: 'alice-example will send the signed term sheet by Friday',
-      kind: 'commitment',
-      entity: 'people/alice-example',
-      provenance: 'test',
-      visibility: 'world',
-    });
+    for (const tag of ['nt-a', 'nt-b', 'nt-c']) {
+      await call(remember, local, {
+        fact: `${tag} alice-example will send the signed term sheet by Friday`,
+        kind: 'commitment',
+        entity: 'people/alice-example',
+        provenance: 'test',
+        visibility: 'world',
+      });
+    }
     __resetHotMemoryCacheForTests();
     const since = '1970-01-01T00:00:00Z';
     const full = await call(del, local, { since, entities: 'people/alice-example' });
-    expect((full.threads as unknown[]).length).toBeGreaterThan(0);
+    const threadText = (r: VerbResult) => (r.threads as Array<{ text: string }>).map((t) => t.text).sort();
+    expect((full.threads as unknown[]).length).toBe(3);
+    expect((full.pages as unknown[]).length + (full.facts as unknown[]).length).toBeGreaterThan(0);
+    // A budget below even the envelope: every page and fact drops, every thread stays.
     const r = await call(del, local, { since, entities: 'people/alice-example', budget_tokens: 1 });
-    expect(r.threads).toEqual([]);
-    expect(r.text).toBe('');
+    expect(threadText(r)).toEqual(threadText(full));
+    expect(r.pages).toEqual([]);
+    expect(r.facts).toEqual([]);
+    expect(r.dropped_count).toBe((full.pages as unknown[]).length + (full.facts as unknown[]).length);
     expect(r.has_more).toBe(true);
-    expect(r.dropped_count).toBe(
-      (full.pages as unknown[]).length + (full.facts as unknown[]).length + (full.threads as unknown[]).length,
-    );
+    for (const t of threadText(full)) expect(r.text as string).toContain(t);
+    expect(r.budget_used).toBe(estimateTokens(r.text as string));
+    expect(r.budget_used).toBeGreaterThan(1); // documented: threads are never truncated
   });
 
-  // Pre-landing review (regression from #4761): a budget-dropped fact/thread
-  // dated at or before the delivered page's updated_at must NOT be skipped by
-  // the advanced cursor — the next wake (larger budget) still delivers it.
-  test('budget-dropped thread is delivered on the next wake from next_cursor (pre-landing review)', async () => {
+  // Cursor semantics are the v1 page keyset alone: facts/threads never move
+  // `next_cursor`, and it carries exactly { since, slug } (no skip list).
+  test('next_cursor is the page keyset — unaffected by delivered or dropped facts/threads', async () => {
     const putPage = operations.find((o) => o.name === 'put_page')!;
     const local = ctxFor({ remote: false });
     await call(putPage, local, { slug: 'people/bob-example', content: '# Bob Example\n\nbody' });
     await new Promise((r) => setTimeout(r, 5));
     const since = new Date().toISOString();
     await new Promise((r) => setTimeout(r, 5));
+    for (const s of ['kc-a', 'kc-b']) {
+      await call(putPage, local, { slug: `notes/${s}`, content: `# ${s}\n\ncontent` });
+    }
+    await new Promise((r) => setTimeout(r, 5));
+    const mid = new Date().toISOString();
+    await new Promise((r) => setTimeout(r, 5));
+    for (let i = 0; i < 3; i++) {
+      await call(remember, local, { fact: `kc-fact-${i} ${'z'.repeat(120)}`, provenance: 'test', visibility: 'world' });
+    }
     await call(remember, local, {
-      fact: `bob-example will send the revised partnership deck ${'y'.repeat(240)}`,
+      fact: 'bob-example will send the revised partnership deck',
       kind: 'commitment',
       entity: 'people/bob-example',
       provenance: 'test',
       visibility: 'world',
     });
-    // The page that fits the budget is stamped AFTER the thread's event time.
-    await call(putPage, local, { slug: 'notes/after', content: '# After\n\nx' });
     __resetHotMemoryCacheForTests();
     const full = await call(del, local, { since, entities: 'people/bob-example' });
-    expect((full.pages as Array<{ slug: string }>).map((p) => p.slug)).toContain('notes/after');
+    const pages = full.pages as Parameters<typeof renderPageLine>[0][];
+    expect(pages.map((p) => p.slug)).toEqual(['notes/kc-a', 'notes/kc-b']);
+    expect((full.facts as unknown[]).length).toBeGreaterThanOrEqual(3);
     expect((full.threads as unknown[]).length).toBeGreaterThan(0);
-    // Budget = envelope/headers + every page line + a sliver: pages fit, the
-    // long fact + thread lines cannot.
-    const pageLines = (full.pages as Parameters<typeof renderPageLine>[0][]).reduce(
-      (n, pg) => n + estimateTokens(renderPageLine(pg) + '\n'),
-      0,
-    );
+    // Unbudgeted: the cursor is the last delivered page, exactly as a
+    // stateless page-only call would report it.
+    expect(full.next_cursor).toEqual({ since: pages[1].updated_at, slug: pages[1].slug });
+    // Budget = header + every thread line + the first page line + a sliver:
+    // one page delivered, every fact dropped — the cursor is still that page.
+    const reserved =
+      deltaHeaderCost(since) +
+      (full.threads as Parameters<typeof renderThreadLine>[0][]).reduce((n, t) => n + estimateTokens(renderThreadLine(t) + '\n'), 0);
     const r1 = await call(del, local, {
       since,
       entities: 'people/bob-example',
-      budget_tokens: deltaHeaderCost(since) + pageLines + 5,
+      budget_tokens: reserved + estimateTokens(renderPageLine(pages[0]) + '\n') + 2,
     });
-    expect((r1.pages as unknown[]).length).toBe((full.pages as unknown[]).length);
-    expect(r1.threads).toEqual([]);
+    expect((r1.pages as Array<{ slug: string }>).map((p) => p.slug)).toEqual(['notes/kc-a']);
+    expect(r1.facts).toEqual([]);
+    expect((r1.threads as unknown[]).length).toBe((full.threads as unknown[]).length);
     expect(r1.has_more).toBe(true);
-    const r2 = await call(del, local, {
-      since: r1.next_cursor.since,
-      since_slug: r1.next_cursor.slug,
-      entities: 'people/bob-example',
-      budget_tokens: 4000,
-    });
-    expect((r2.threads as Array<{ text: string }>).map((t) => t.text)).toEqual(
-      (full.threads as Array<{ text: string }>).map((t) => t.text),
-    );
-    expect((r2.facts as unknown[]).length).toBe((full.facts as unknown[]).length);
-    expect(r2.has_more).toBe(false);
-  });
-
-  test('budget-dropped facts drain OLDEST-first across wakes: disjoint, complete, has_more ends false (pre-landing review r2)', async () => {
-    const local = ctxFor({ remote: false });
-    await new Promise((r) => setTimeout(r, 5));
-    const since = new Date().toISOString();
-    const base = Date.parse(since);
-    // Four facts recorded strictly after `since`, one second apart, tagged so
-    // the delivery order is observable from the response alone.
-    for (let i = 1; i <= 4; i++) {
-      await call(remember, local, { fact: `ofo-${i} ${'z'.repeat(120)}`, provenance: 'test', visibility: 'world' });
-      const at = new Date(base + i * 1000).toISOString();
-      await engine.executeRaw(`UPDATE facts SET created_at = '${at}', valid_from = '${at}' WHERE fact LIKE 'ofo-${i} %'`);
-    }
-    __resetHotMemoryCacheForTests();
-    const tag = (r: VerbResult) => (r.facts as Array<{ fact: string }>).map((f) => f.fact.split(' ')[0]);
-    const full = await call(del, local, { since });
-    expect(tag(full)).toEqual(['ofo-1', 'ofo-2', 'ofo-3', 'ofo-4']);
-    expect(full.pages).toEqual([]);
-    // Budget = envelope/headers + the two oldest fact lines + a sliver.
-    const twoLines = (full.facts as Parameters<typeof renderFactLine>[0][])
-      .slice(0, 2)
-      .reduce((n, f) => n + estimateTokens(renderFactLine(f) + '\n'), 0);
-    const r1 = await call(del, local, { since, budget_tokens: deltaHeaderCost(since) + twoLines + 3 });
-    expect(tag(r1)).toEqual(['ofo-1', 'ofo-2']);
-    expect(r1.has_more).toBe(true);
-    const r2 = await call(del, local, {
-      since: r1.next_cursor.since,
-      since_slug: r1.next_cursor.slug,
-      budget_tokens: 4000,
-    });
-    expect(tag(r2)).toEqual(['ofo-3', 'ofo-4']);
-    expect(r2.has_more).toBe(false);
-  });
-
-  // Pre-landing review r3: open-thread events sharing ONE `date` with a budget
-  // that fits exactly one line. The hold parks the cursor 1ms before the tie,
-  // so every tied event re-fetches on the next wake; without a tie-break the
-  // same one packs and the same one drops forever. `next_cursor.skip` names the
-  // delivered boundary items so consecutive wakes drain the tie.
-  test('a budget-split same-timestamp thread tie drains across wakes instead of stalling (pre-landing review r3)', async () => {
-    const putPage = operations.find((o) => o.name === 'put_page')!;
-    const local = ctxFor({ remote: false });
-    await call(putPage, local, { slug: 'people/carol-example', content: '# Carol Example\n\nbody' });
-    // Three commitments recorded BEFORE `since` (facts arm stays empty) whose
-    // thread event time is one shared future instant.
-    const tieAt = new Date(Date.now() + 86_400_000).toISOString();
-    for (const tag of ['tie-a', 'tie-b', 'tie-c']) {
-      await call(remember, local, {
-        fact: `${tag} carol-example will ${'q'.repeat(40)}`,
-        kind: 'commitment',
-        entity: 'people/carol-example',
-        provenance: 'test',
-        visibility: 'world',
-      });
-    }
-    await engine.executeRaw(`UPDATE facts SET valid_from = '${tieAt}' WHERE fact LIKE 'tie-% carol-example%'`);
-    // Earlier tests stamp facts a few seconds into the FUTURE; pull them behind
-    // `since` so the facts arm (packed before threads) stays empty here.
-    await engine.executeRaw(`UPDATE facts SET created_at = now() - interval '1 minute' WHERE created_at > now()`);
-    __resetHotMemoryCacheForTests();
-    await new Promise((r) => setTimeout(r, 5));
-    // Canonical microsecond form — the exact string a session cursor reads
-    // back, so the header cost (it embeds `since`) prices one budget for both paths.
-    const since = new Date().toISOString().replace(/Z$/, '000Z');
-    const full = await call(del, local, { since, entities: 'people/carol-example' });
-    expect(full.facts).toEqual([]);
-    const threads = full.threads as Parameters<typeof renderThreadLine>[0][];
-    expect(threads.length).toBe(3);
-    expect(new Set(threads.map((t) => t.date)).size).toBe(1);
-    const want = threads.map((t) => t.text).sort();
-    // Budget = envelope/headers + exactly one thread line (all three cost the same).
-    const budget_tokens = deltaHeaderCost(since) + estimateTokens(renderThreadLine(threads[0]) + '\n') + 1;
-
-    // Stateless: pass the whole next_cursor back each wake.
-    let cursor: Record<string, unknown> = { since };
-    const seen: string[] = [];
-    let wakes = 0;
-    let last: VerbResult;
-    do {
-      last = await call(del, local, { ...cursor, entities: 'people/carol-example', budget_tokens });
-      wakes++;
-      seen.push(...(last.threads as Array<{ text: string }>).map((t) => t.text));
-      cursor = { since: last.next_cursor.since, since_slug: last.next_cursor.slug, since_skip: last.next_cursor.skip };
-    } while (last.has_more && wakes < 6);
-    expect(wakes).toBe(3);
-    expect(seen.sort()).toEqual(want); // each delivered exactly once
-    expect(last.has_more).toBe(false);
-
-    // Session: the cursor (slug + boundary keys) rides session_context_state.
-    await upsertSessionContextState(engine, 'default', null, 'tie-session', { lastWakeAt: since, cursorSlug: '' });
-    const seenS: string[] = [];
-    wakes = 0;
-    do {
-      last = await call(del, local, { session_id: 'tie-session', entities: 'people/carol-example', budget_tokens });
-      wakes++;
-      seenS.push(...(last.threads as Array<{ text: string }>).map((t) => t.text));
-    } while (last.has_more && wakes < 6);
-    expect(wakes).toBe(3);
-    expect(seenS.sort()).toEqual(want);
-    expect(last.has_more).toBe(false);
+    expect(r1.next_cursor).toEqual({ since: pages[0].updated_at, slug: pages[0].slug });
+    expect(estimateTokens(r1.text as string)).toBeLessThanOrEqual(r1.budget_tokens);
+    // Page-less wake: facts/threads delivered (and some facts dropped) leave
+    // the time cursor exactly where the caller put it.
+    const oneFact = estimateTokens(renderFactLine((full.facts as Parameters<typeof renderFactLine>[0][])[0]) + '\n');
+    const r2 = await call(del, local, { since: mid, entities: 'people/bob-example', budget_tokens: reserved + oneFact + 2 });
+    expect(r2.pages).toEqual([]);
+    expect((r2.facts as unknown[]).length).toBe(1);
+    expect((r2.threads as unknown[]).length).toBe((full.threads as unknown[]).length);
+    expect(r2.has_more).toBe(true);
+    expect(r2.next_cursor).toEqual({ since: mid, slug: '' });
   });
 
   test('forced overflow: dropped_count > 0 and budget_used stays within budget_tokens (v0.45.7)', async () => {

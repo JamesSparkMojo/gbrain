@@ -67,7 +67,8 @@ synopses.
 ## Budgets
 
 Every pack/delta call takes `budget_tokens`. The server packs highest-priority
-arms first (cards → facts for packs; pages → facts → threads for deltas),
+arms first (cards → facts for packs; pages → facts for deltas — a delta never
+drops threads, their lines are reserved ahead of pages and facts),
 costing each item as the line it renders to and reserving the envelope +
 section headers up front, and reports `budget_used` (the token estimate of
 `text`) + `dropped_count`; the injectable `text` field is rendered from the

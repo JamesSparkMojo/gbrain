@@ -13,7 +13,6 @@ import { readHolders } from './context.ts';
  * from '../operations.ts' here (cycle).
  */
 
-import { createHash } from 'node:crypto';
 import type { Operation } from './contract.ts';
 import { OperationError, verbError } from './contract.ts';
 import { federatedSearchScope, sourceScopeOpts, stampEvidenceSafe } from './context.ts';
@@ -615,13 +614,12 @@ const context_pack: Operation = {
 const delta: Operation = {
   name: 'delta',
   description:
-    'MEMORY VERB (v1): "what changed since T" for heartbeats — pages updated after `since` + hot facts newer than `since` + open-thread events after `since`, zero-LLM. Lets a periodic wake maintain warm state in O(changes) instead of re-deriving. Optionally scope thread deltas to `entities`. WORLD-ONLY by default; include_private honored for local trusted callers only. budget_tokens packs server-side (pages first, then facts, then threads; `text` fits the budget). protocol_version rides every response.',
+    'MEMORY VERB (v1): "what changed since T" for heartbeats — pages updated after `since` + hot facts newer than `since` + open-thread events after `since`, zero-LLM. Lets a periodic wake maintain warm state in O(changes) instead of re-deriving. Optionally scope thread deltas to `entities`. WORLD-ONLY by default; include_private honored for local trusted callers only. budget_tokens packs server-side (pages first, then facts; threads are never dropped). protocol_version rides every response.',
   params: {
     since: { type: 'string', description: 'ISO 8601 cursor. Returns pages/facts/thread-events newer than this timestamp. Optional when session_id carries an established cursor.' },
     since_slug: { type: 'string', description: 'Stateless keyset resume: pass back `next_cursor.slug` from the previous response (paired with `since`=next_cursor.since) to page through pages sharing one timestamp. Ignored when session_id is set (the session cursor carries it).' },
-    since_skip: { type: 'array', items: { type: 'string' }, description: 'Stateless keyset resume: pass back `next_cursor.skip` from the previous response (with `since` + `since_slug`) — the facts/threads already delivered at the boundary millisecond, so a same-timestamp tie split by budget_tokens drains across wakes instead of re-serving the same item. Ignored when session_id is set (the session cursor carries it).' },
     entities: { type: 'string', description: 'Optional comma-separated entity scope for thread-event deltas. Capped at 8.' },
-    budget_tokens: { type: 'number', description: 'Server-side token budget (char/4). Pages pack first, then facts, then threads; each item costs its rendered line and the envelope + section headers are reserved, so `text` fits the budget. Response adds budget_tokens, budget_used (tokens of `text`), dropped_count.' },
+    budget_tokens: { type: 'number', description: 'Server-side token budget (char/4). Pages pack first, then facts; each item costs its rendered line and the envelope + section headers + every thread line are reserved, so `text` fits the budget. Threads are never dropped (budget_used can exceed the budget only when the header + threads alone do). Response adds budget_tokens, budget_used (tokens of `text`), dropped_count.' },
     session_id: { type: 'string', description: 'Opaque session id. Drives the per-session cursor: the first call establishes it, each call advances it to the newest DELIVERED change (at-least-once — with has_more:true the undelivered tail returns on the next wake). Without it, pass an explicit `since` for a stateless delta.' },
     include_private: { type: 'boolean', description: 'Local trusted callers only: widen ALL arms to include private facts. Ignored (world-only) for remote callers. Default false.' },
   },
@@ -725,18 +723,6 @@ const delta: Operation = {
     const cursorSlug = sessionId ? state?.surfaced_slugs?.[0] : undefined;
     const explicitSlug = typeof p.since_slug === 'string' ? p.since_slug : undefined;
     const sinceSlug = explicitSlug ?? cursorSlug;
-    // Boundary tie-break (pre-landing review r3): facts filter on created_at >
-    // since and threads on date > since, so everything at the millisecond right
-    // after the cursor re-serves each wake — a same-timestamp tie split by the
-    // budget would pack the same item and drop the same item forever. The
-    // previous response's `next_cursor.skip` (session: surfaced_slugs[1..])
-    // names the delivered boundary items; a thread key binds kind+text+time
-    // (facts: the row id), so a stale list can never hide a newer item.
-    const explicitSkip = Array.isArray(p.since_skip) ? p.since_skip.filter((k): k is string => typeof k === 'string') : undefined;
-    const skip = new Set<string>(explicitSkip ?? (sessionId ? state?.surfaced_slugs?.slice(1) : undefined) ?? []);
-    const factKey = (f: { id: number }) => `f:${f.id}`;
-    const threadKey = (t: { kind: string; text: string; date?: string | null }) =>
-      `t:${createHash('sha1').update(`${Date.parse(t.date ?? '')}\0${t.kind}\0${t.text}`).digest('hex').slice(0, 16)}`;
 
     const res = await assembleDeltaContext(ctx.engine, {
       sourceId,
@@ -751,49 +737,38 @@ const delta: Operation = {
     // Pages arrive OLDEST first by (updated_at, slug) — no client-side dedup
     // needed; the keyset already excludes everything at/before the cursor.
     let pages = res.deltaPages ?? [];
-    // Facts arrive NEWEST first from the engine and threads in card order;
-    // packToBudget keeps a PREFIX, so deliver both OLDEST first (pre-landing
-    // review r2) — each wake then drains the head of the window and the cursor
-    // below can advance past it instead of re-serving the same newest slice.
-    const factAt = (f: { created_at?: string; valid_from?: string }) => Date.parse(f.created_at ?? f.valid_from ?? '');
-    let facts = (res.facts ?? []).filter((f) => !skip.has(factKey(f))).sort((a, b) => factAt(a) - factAt(b) || a.id - b.id);
-    let threads = (res.openThreads ?? [])
-      .filter((t) => !skip.has(threadKey(t)))
-      .sort((a, b) => Date.parse(a.date ?? '') - Date.parse(b.date ?? ''));
-    const fetchedPageRows = pages;
-    const fetchedFacts = facts;
-    const fetchedThreads = threads;
+    let facts = res.facts ?? [];
+    // Threads are NEVER budget-dropped: they are the commitments a heartbeat
+    // must not miss, and they have no keyset of their own to resume from.
+    const threads = res.openThreads ?? [];
     let droppedCount: number | undefined;
     let factsDropped = 0;
-    let threadsDropped = 0;
     const fetchedPages = pages.length;
     if (budgetTokens !== null) {
       // packToBudget keeps a contiguous PREFIX (order-preserving, stops at the
       // first overflow) — with oldest-first pages the kept set stays contiguous
       // from the cursor, which the advance logic below depends on.
       // #4761: reserve the envelope + headers (they embed `since`, so price per
-      // call), cost each item as its rendered line, and pack threads THIRD —
-      // an unpacked section cannot honor the budget `text` promises.
-      const itemBudget = budgetTokens - deltaHeaderCost(effectiveSince);
+      // call) AND every thread line, then cost each page/fact as its rendered
+      // line — `text` fits the budget whenever the reserved part alone does.
+      const itemBudget =
+        budgetTokens - deltaHeaderCost(effectiveSince) - threads.reduce((n, t) => n + lineCost(renderThreadLine(t)), 0);
       const pagePack = itemBudget > 0 ? packToBudget(pages, (pg) => lineCost(renderPageLine(pg)), itemBudget) : dropAll(pages);
       pages = pagePack.items;
-      const afterPages = itemBudget - pagePack.meta.used;
-      const factPack = afterPages > 0 ? packToBudget(facts, (f) => lineCost(renderFactLine(f)), afterPages) : dropAll(facts);
+      const remaining = itemBudget - pagePack.meta.used;
+      const factPack = remaining > 0 ? packToBudget(facts, (f) => lineCost(renderFactLine(f)), remaining) : dropAll(facts);
       facts = factPack.items;
-      const afterFacts = afterPages - factPack.meta.used;
-      const threadPack =
-        afterFacts > 0 ? packToBudget(threads, (t) => lineCost(renderThreadLine(t)), afterFacts) : dropAll(threads);
-      threads = threadPack.items;
-      droppedCount = pagePack.meta.dropped + factPack.meta.dropped + threadPack.meta.dropped;
+      droppedCount = pagePack.meta.dropped + factPack.meta.dropped;
       factsDropped = factPack.meta.dropped;
-      threadsDropped = threadPack.meta.dropped;
     }
     const pagesDropped = fetchedPages - pages.length;
     // has_more covers ALL undelivered content — fetch-limit overflow, budget-
-    // dropped pages, budget-dropped facts (pre-landing review: facts were
-    // silently lost when pages fit but facts overflowed), AND budget-dropped
-    // threads (#4761).
-    const hasMore = res.deltaOverflow === true || pagesDropped > 0 || factsDropped > 0 || threadsDropped > 0;
+    // dropped pages, AND budget-dropped facts (pre-landing review: facts were
+    // silently lost when pages fit but facts overflowed).
+    // ponytail: dropped facts keep the pre-existing ceiling — the cursor still
+    // advances past delivered pages, so they re-surface only if their
+    // created_at is after the new cursor; a per-arm cursor would fix it.
+    const hasMore = res.deltaOverflow === true || pagesDropped > 0 || factsDropped > 0;
 
     // Cursor advance (keyset, at-least-once): advance to the last DELIVERED
     // (updated_at, slug). The keyset's strict `>` means the next wake starts
@@ -803,65 +778,15 @@ const delta: Operation = {
     // minus a safety lag (in-flight write txns stamp updated_at at txn START)
     // and clear the keyset slug. If nothing delivered but something dropped, do
     // NOT advance (deliver-before-advance; a too-small budget must not eat it).
-    let nextCursor: { since: string; slug: string; skip?: string[] } =
+    const nextCursor =
       pages.length > 0
         ? { since: pages[pages.length - 1].updated_at, slug: pages[pages.length - 1].slug }
         : { since: effectiveSince, slug: sinceSlug ?? '' };
-    // Facts/threads are time-keyed only, so a delivered one newer than the last
-    // delivered page (or a page-less wake) would re-serve every wake unless the
-    // TIME cursor moves past it (pre-landing review r2 livelock). Advance to
-    // 1ms past the newest delivered fact/thread — the +1 clears the row's own
-    // sub-millisecond created_at — capped 1ms before the oldest budget-dropped
-    // page so no fetched page falls behind. A fetch-limit page tail is bounded
-    // only by the keyset, so the page cursor stands when it overflowed.
-    if (res.deltaOverflow !== true) {
-      const deliveredAt = [...facts.map(factAt), ...threads.map((t) => Date.parse(t.date ?? ''))].filter(Number.isFinite);
-      const oldestDroppedPage = fetchedPageRows[pages.length]?.updated_at;
-      let target = deliveredAt.length > 0 ? Math.max(...deliveredAt) + 1 : NaN;
-      if (oldestDroppedPage !== undefined) target = Math.min(target, Date.parse(oldestDroppedPage) - 1);
-      if (Number.isFinite(target) && target > Date.parse(nextCursor.since)) {
-        nextCursor = { since: new Date(target).toISOString(), slug: '' };
-      }
-    }
-    // Never advance past an UNDELIVERED fact/thread (pre-landing review, #4761
-    // regression): facts filter on created_at > since and threads on date >
-    // since, so a dropped one dated at/before the cursor would fall behind it
-    // for good. Hold the cursor 1ms before the oldest dropped item (never
-    // behind `since`); with oldest-first delivery that is at or past the last
-    // delivered item, so only a same-millisecond tie re-delivers (at-least-once).
-    const droppedAt = [
-      ...fetchedFacts.slice(facts.length).map((f) => f.created_at ?? f.valid_from),
-      ...fetchedThreads.slice(threads.length).map((t) => t.date),
-    ]
-      .map((v) => Date.parse(v ?? ''))
-      .filter(Number.isFinite);
-    const holdMs = droppedAt.length > 0 ? Math.min(...droppedAt) - 1 : null;
-    if (holdMs !== null && holdMs < Date.parse(nextCursor.since)) {
-      nextCursor =
-        holdMs > Date.parse(effectiveSince)
-          ? { since: new Date(holdMs).toISOString(), slug: '' }
-          : { since: effectiveSince, slug: sinceSlug ?? '' };
-    }
-    // Name the delivered items sitting at the millisecond right after the final
-    // cursor — exactly what the next wake's strict `>` would re-serve. A cursor
-    // that did not move keeps the prior list (the tie is still draining).
-    const boundaryMs = Date.parse(nextCursor.since) + 1;
-    const nextSkip = [
-      ...(nextCursor.since === effectiveSince ? skip : []),
-      ...facts.filter((f) => factAt(f) === boundaryMs).map(factKey),
-      ...threads.filter((t) => Date.parse(t.date ?? '') === boundaryMs).map(threadKey),
-    ];
-    if (nextSkip.length > 0) nextCursor.skip = nextSkip;
     if (sessionId) {
-      // Persist any advance (pages delivered, the time cursor moved past a
-      // delivered fact/thread, or the boundary skip list grew); a wake that
-      // moved nothing and dropped something keeps its cursor
-      // (deliver-before-advance).
-      if (pages.length > 0 || nextCursor.since !== effectiveSince || nextSkip.join('\n') !== [...skip].join('\n')) {
+      if (pages.length > 0) {
         await upsertSessionContextState(ctx.engine, sourceId, clientId, sessionId, {
           lastWakeAt: nextCursor.since,
           cursorSlug: nextCursor.slug,
-          cursorSkip: nextSkip,
         });
       } else if (!hasMore) {
         await upsertSessionContextState(ctx.engine, sourceId, clientId, sessionId, {
@@ -874,7 +799,8 @@ const delta: Operation = {
     // Re-render the injectable block from the FINAL sets (adversarial review):
     // `text` must honor the budget AND the boundary-tie exclusion the
     // structured arrays reflect — the assembler's render predates both.
-    // budget_used reports that text.
+    // budget_used reports that text; it exceeds budget_tokens only when the
+    // header + the never-truncated threads alone do.
     const text = renderDelta(pages, facts, threads, effectiveSince);
     const budgetUsed = budgetTokens !== null ? estimateTokens(text) : undefined;
 
@@ -895,7 +821,7 @@ const delta: Operation = {
       text,
       has_more: hasMore,
       // Stateless resume: a caller with no session_id passes these back as
-      // `since` + `since_slug` (+ `since_skip`) on the next call to page deterministically.
+      // `since` + `since_slug` on the next call to page deterministically.
       next_cursor: nextCursor,
       ...(res.degradedReason ? { degraded_reason: res.degradedReason } : {}),
       ...(budgetTokens !== null
