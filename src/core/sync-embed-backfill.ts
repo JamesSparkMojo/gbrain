@@ -109,6 +109,22 @@ export async function resolveSingleSyncEmbedPlan(
     : { stop: false, workerSurface, autoDeferEmbeds: gate.autoDeferEmbeds, costGate: gate.notice };
 }
 
+/**
+ * Did this sync create anything an embed-backfill could embed? A run whose
+ * only effect is the un-syncable sweep (#4786 soft-deletes) or a plain
+ * deletion reports `synced` but wrote no chunks; minting a backfill for it
+ * starts the per-source cooldown / active-job block in
+ * `submitEmbedBackfill`, so a real import inside that window is skipped and
+ * its NULL-embedded chunks strand until the next tick. Every automatic
+ * submit site (sync --all, single-source autodefer, the jobs sync handler)
+ * gates on this, not on status alone.
+ */
+export function syncProducedEmbeddableContent(
+  result: { chunksCreated: number; added: number; modified: number; renamed: number },
+): boolean {
+  return result.chunksCreated > 0 || result.added + result.modified + result.renamed > 0;
+}
+
 export type SyncEmbedBackfillOutcome =
   | { status: 'queued'; job_id: number }
   | {

@@ -99,6 +99,7 @@ import {
   resolveSingleSyncEmbedPlan,
   resolveSyncAllEmbedPlan,
   resolveSyncEmbedBackfill,
+  syncProducedEmbeddableContent,
   type SyncEmbedBackfillOutcome,
 } from '../core/sync-embed-backfill.ts';
 import {
@@ -5144,7 +5145,7 @@ See also:
         !dryRun &&
         result.status !== 'dry_run' &&
         result.status !== 'up_to_date' &&
-        result.status !== 'partial'
+        result.status !== 'partial' && syncProducedEmbeddableContent(result)
       ) {
         try {
           const outcome = await resolveSyncEmbedBackfill(engine, src.id, {
@@ -5452,7 +5453,7 @@ See also:
       )) &&
       result.status !== 'dry_run' &&
       result.status !== 'up_to_date' &&
-      result.status !== 'partial'
+      result.status !== 'partial' && syncProducedEmbeddableContent(result)
     ) {
       try {
         singleEmbedBackfill = await resolveSyncEmbedBackfill(engine, sourceId, {

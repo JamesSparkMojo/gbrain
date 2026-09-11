@@ -237,3 +237,56 @@ describe('un-syncable sweep is reported (#4786)', () => {
     expect(res.status).toBe('synced');
   }, 120_000);
 });
+
+describe('sweep-only sync must not mint an embed-backfill (#4786 x #2139)', () => {
+  test('syncProducedEmbeddableContent is false for sweep/delete-only results, true for imports', async () => {
+    const { syncProducedEmbeddableContent } = await import('../src/core/sync-embed-backfill.ts');
+    const zero = { chunksCreated: 0, added: 0, modified: 0, renamed: 0 };
+    expect(syncProducedEmbeddableContent(zero)).toBe(false);
+    expect(syncProducedEmbeddableContent({ ...zero, added: 1 })).toBe(true);
+    expect(syncProducedEmbeddableContent({ ...zero, modified: 1 })).toBe(true);
+    expect(syncProducedEmbeddableContent({ ...zero, renamed: 1 })).toBe(true);
+    expect(syncProducedEmbeddableContent({ ...zero, chunksCreated: 3 })).toBe(true);
+  });
+
+  test('jobs sync handler: a sweep-only run skips the submitter (no_new_content); an importing run still reaches it', async () => {
+    await ensureSetup();
+    const { registerBuiltinHandlers } = await import('../src/commands/jobs.ts');
+    type Handler = (job: unknown) => Promise<unknown>;
+    const handlers = new Map<string, Handler>();
+    const worker = { register: (name: string, fn: Handler) => { handlers.set(name, fn); } };
+    await registerBuiltinHandlers(worker as never, engine!, { quiet: true });
+    const runSync = (data: Record<string, unknown>) => handlers.get('sync')!({
+      id: 1, name: 'sync', data, attempts_made: 0, deadlineAtMs: null,
+      signal: new AbortController().signal, shutdownSignal: new AbortController().signal,
+      updateProgress: async () => {}, updateTokens: async () => {}, log: async () => {},
+      isActive: async () => true, readInbox: async () => [],
+    }) as Promise<{ status: string; deleted: number; embed_job_id: number | null; embed_skip_reason: string | null }>;
+
+    const r = mkMixedRepo();
+    await addSource('sweep-backfill', 'auto', r);
+    const first = await runSync({ repoPath: r, sourceId: 'sweep-backfill', noPull: true });
+    expect(first.status).toBe('first_sync');
+    // PGLite has no worker surface, so the SUBMITTER refuses — which proves
+    // the handler reached it: an import passes the content gate.
+    expect(first.embed_skip_reason).toBe('no_worker_surface');
+
+    // The handler takes no strategy from job data; narrow the PERSISTED
+    // strategy (honored per #4903) so the edited code page is un-syncable
+    // and the run's only effect is the #4786 sweep.
+    await engine!.executeRaw(
+      `UPDATE sources SET config = config || '{"strategy":"markdown"}'::jsonb WHERE id = $1`,
+      ['sweep-backfill'],
+    );
+    writeFileSync(join(r, 'lib/x.ts'), 'export const x = 2;\n');
+    execSync('git add -A && git commit -qm edit', { cwd: r, stdio: 'pipe' });
+    const swept = await runSync({ repoPath: r, sourceId: 'sweep-backfill', noPull: true });
+    expect(await slugsFor('sweep-backfill')).toEqual(['docs/x']);
+    expect(swept.status).toBe('synced');
+    expect(swept.deleted).toBe(1);
+    // Nothing was created to embed: minting a backfill here would start the
+    // per-source cooldown and make the NEXT real import's job skip.
+    expect(swept.embed_job_id).toBeNull();
+    expect(swept.embed_skip_reason).toBe('no_new_content');
+  }, 120_000);
+});
