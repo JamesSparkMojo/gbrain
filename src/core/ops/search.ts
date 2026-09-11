@@ -24,7 +24,7 @@ import type { HybridSearchMeta } from '../types.ts';
 import { bumpLastRetrievedAt } from '../last-retrieved.ts';
 import { applySnippetCap, DEFAULT_AGENT_SNIPPET_CHARS } from '../search/snippet-cap.ts';
 import { resolveExcludePrivatePages } from '../search/private-visibility.ts';
-import { safeChunksFilter } from '../search/safe-chunks.ts';
+import { SAFE_FENCE_CHUNKER_VERSION } from '../search/safe-chunks.ts';
 import { QUERY_DESCRIPTION, SEARCH_DESCRIPTION } from '../operations-descriptions.ts';
 import { OperationError } from './contract.ts';
 import type { Operation, OperationContext } from './contract.ts';
@@ -66,7 +66,15 @@ type SourceScope = { sourceId?: string; sourceIds?: string[] };
  * `gbrain reindex --markdown` seals them, so an empty remote result on such
  * a brain is a policy gap, not a clean miss. Same scope precedence as
  * sourceScopeOpts (federated array > scalar > brain-wide); indexed LIMIT 1
- * probe (pages_chunker_version_idx), portable SQL on both engines, fail-open.
+ * probe, portable SQL on both engines, fail-open.
+ *
+ * The predicate is the plain range `chunker_version < N` (the column is
+ * SMALLINT NOT NULL, so it is the same set as `NOT safeChunksFilter`), NOT
+ * the COALESCE form the read legs use: only the range is sargable, and this
+ * runs on every empty remote result — on a fully sealed brain the COALESCE
+ * form walked every markdown page. The probe deliberately ignores the call's
+ * `types` / `excludePrivate` filters: it answers "is the fence withholding
+ * anything in scope", not "would this exact query have matched".
  */
 async function hasUnsealedPagesInScope(ctx: OperationContext, scope: SourceScope): Promise<boolean> {
   const [sourceClause, params] = scope.sourceIds?.length
@@ -78,7 +86,7 @@ async function hasUnsealedPagesInScope(ctx: OperationContext, scope: SourceScope
     const rows = await ctx.engine.executeRaw(
       `SELECT 1 FROM pages p JOIN sources s ON s.id = p.source_id
        WHERE p.page_kind = 'markdown' AND p.deleted_at IS NULL AND NOT s.archived
-         AND NOT (${safeChunksFilter('p')}) ${sourceClause} LIMIT 1`,
+         AND p.chunker_version < ${SAFE_FENCE_CHUNKER_VERSION} ${sourceClause} LIMIT 1`,
       params,
     );
     return rows.length > 0;
