@@ -408,6 +408,26 @@ export function buildSlugPathIndex(
   return index;
 }
 
+/**
+ * Resolve one requested slug to its on-disk relPath: the index first, then
+ * the legacy `slug + '.md'` reconstruction. The index only covers what
+ * `walkMarkdownFiles` emits, but sync ADMITS files the walker never emits —
+ * `_`-prefixed names, and dot-dirs waived via `sync.include_hidden` — and
+ * those slugs still round-trip to their real path. Without the fallback the
+ * per-slug extractors treated every such page as deleted and it imported
+ * with no edges. Only a miss on BOTH means "no file behind this slug".
+ */
+export function resolveSlugRelPath(
+  slugToPath: ReadonlyMap<string, string>,
+  repoPath: string,
+  slug: string,
+): string | undefined {
+  const indexed = slugToPath.get(slug);
+  if (indexed !== undefined) return indexed;
+  const legacy = `${slug}.md`;
+  return existsSync(join(repoPath, legacy)) ? legacy : undefined;
+}
+
 // --- Link extraction ---
 
 /**
@@ -1408,7 +1428,7 @@ async function extractForSlugs(
       // #1972: bail before doing any work for this slug on abort. Trailing
       // flushLinks/flushTimeline still commit accumulated rows — no torn write.
       if (isAborted(signal)) return;
-      const relPath = slugToPath.get(slug);
+      const relPath = resolveSlugRelPath(slugToPath, brainDir, slug);
       if (relPath === undefined) return; // deleted file — sync already handled removal
       const fullPath = join(brainDir, relPath);
       try {
@@ -1700,7 +1720,7 @@ export async function extractLinksForSlugs(
   // leaves the page stale and `extract --stale` picks it up next run.
   const processed: string[] = [];
   for (const slug of slugs) {
-    const relPath = slugToPath.get(slug);
+    const relPath = resolveSlugRelPath(slugToPath, repoPath, slug);
     if (relPath === undefined) continue;
     const filePath = join(repoPath, relPath);
     try {
@@ -1730,7 +1750,7 @@ export async function extractTimelineForSlugs(
   let created = 0;
   const processed: string[] = [];
   for (const slug of slugs) {
-    const relPath = slugToPath.get(slug);
+    const relPath = resolveSlugRelPath(slugToPath, repoPath, slug);
     if (relPath === undefined) continue;
     const filePath = join(repoPath, relPath);
     try {

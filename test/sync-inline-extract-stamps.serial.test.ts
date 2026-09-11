@@ -163,4 +163,66 @@ describe('#1696 — inline sync extract stamps links_extracted_at', () => {
     expect(timeline.processed).toEqual(['companies/acme']);
     expect(slugsSafeToStamp(links, timeline)).toEqual(['companies/acme']);
   }, 60_000);
+
+  // Pre-landing review of #4967: the slug index is built from
+  // walkMarkdownFiles, which drops `_`-prefixed filenames and hidden dirs —
+  // but sync ADMITS both (`_note.md` always; `.github/**` via includeHidden).
+  // An index miss must fall back to the legacy `slug + '.md'` path before the
+  // page is declared missing, or the page imports without its edges.
+  test('an admitted `_`-prefixed page still extracts and is stamped', async () => {
+    const { performSync } = await import('../src/commands/sync.ts');
+    writeFileSync(join(repoPath, '_note.md'), [
+      '---', 'type: note', 'title: Note', '---', '',
+      '[Alice](people/alice.md) is mentioned in this note.',
+    ].join('\n'));
+    git('git add -A && git commit -m "add underscore note"');
+    const result = await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    expect(['synced', 'first_sync']).toContain(result.status);
+
+    const pages = await engine.executeRaw<{ slug: string }>(
+      `SELECT slug FROM pages WHERE slug = '_note' AND source_id = 'default'`,
+    );
+    expect(pages).toHaveLength(1);
+    const links = await engine.getLinks('_note');
+    expect(links.some(l => l.to_slug === 'people/alice')).toBe(true);
+    expect(await stampOf('_note')).not.toBeNull();
+  }, 60_000);
+
+  test('an includeHidden-admitted page under a dot-dir still extracts and is stamped', async () => {
+    const { performSync } = await import('../src/commands/sync.ts');
+    mkdirSync(join(repoPath, '.github'), { recursive: true });
+    writeFileSync(join(repoPath, '.github/note.md'), [
+      '---', 'type: note', 'title: Hidden Note', '---', '',
+      '[Alice](../people/alice.md) is mentioned in this hidden note.',
+    ].join('\n'));
+    git('git add -A && git commit -m "add hidden note"');
+    const result = await performSync(engine, {
+      repoPath, noPull: true, noEmbed: true, includeHidden: ['.github/**'],
+    });
+    expect(['synced', 'first_sync']).toContain(result.status);
+
+    const pages = await engine.executeRaw<{ slug: string }>(
+      `SELECT slug FROM pages WHERE slug = '.github/note' AND source_id = 'default'`,
+    );
+    expect(pages).toHaveLength(1);
+    const links = await engine.getLinks('.github/note');
+    expect(links.some(l => l.to_slug === 'people/alice')).toBe(true);
+    expect(await stampOf('.github/note')).not.toBeNull();
+  }, 60_000);
+
+  test('the legacy-path fallback reports only slugs with a file behind them as processed', async () => {
+    const { extractLinksForSlugs, extractTimelineForSlugs, slugsSafeToStamp } =
+      await import('../src/commands/extract.ts');
+    writeFileSync(join(repoPath, '_note.md'), '[Alice](people/alice.md) again.');
+    mkdirSync(join(repoPath, '.github'), { recursive: true });
+    writeFileSync(join(repoPath, '.github/note.md'), '[Alice](../people/alice.md) again.');
+
+    const slugs = ['_note', '.github/note', 'companies/ghost', 'companies/acme'];
+    const links = await extractLinksForSlugs(engine, repoPath, slugs);
+    const timeline = await extractTimelineForSlugs(engine, repoPath, slugs);
+
+    expect(links.processed).toEqual(['_note', '.github/note', 'companies/acme']);
+    expect(timeline.processed).toEqual(['_note', '.github/note', 'companies/acme']);
+    expect(slugsSafeToStamp(links, timeline)).toEqual(['_note', '.github/note', 'companies/acme']);
+  }, 60_000);
 });
