@@ -45,6 +45,17 @@ const SCOPE_MARKER = '# gbrain-scope: ';
 const shellQuote = (s: string): string => `'${s.replace(/'/g, "'\\''")}'`;
 
 /**
+ * A scope is rendered into a `#` comment line and a `'…'` pathspec: a line
+ * terminator inside it would end the comment early and run the rest of the
+ * path as hook code. Refused at the seam (path → scope) and again at render.
+ */
+function assertNoLineTerminator(scope: string): void {
+  if (/[\n\r\0]/.test(scope)) {
+    throw new Error(`source path contains a line terminator; refusing to install hook: ${JSON.stringify(scope)}`);
+  }
+}
+
+/**
  * Run git in `root`; trimmed stdout, throws on non-zero. `env: process.env`
  * keeps the child on the LIVE environment (Bun's default is a startup
  * snapshot, Node's is live) so a caller's `GIT_CONFIG_*` overrides are honored.
@@ -59,6 +70,7 @@ const git = (root: string, args: string[]): string =>
  * root-relative paths it lists resolve as-is for `gbrain frontmatter validate`.
  */
 function renderHookScript(scopes: string[]): string {
+  scopes.forEach(assertNoLineTerminator);
   const marker = scopes.map((s) => `${SCOPE_MARKER}${s}\n`).join('');
   const pathspec = scopes.length > 0 ? ` -- ${scopes.map(shellQuote).join(' ')}` : '';
   return `#!/bin/sh
@@ -157,8 +169,9 @@ export async function runFrontmatterInstallHook(args: string[]): Promise<void> {
       let target: HookTarget;
       try {
         target = resolveHookTarget(src.local_path);
-      } catch {
-        console.log(`[${src.id}] ${src.local_path} — skipped, not a git repo`);
+      } catch (err) {
+        // Outside any git repo, or a path the hook script cannot carry safely.
+        console.log(`[${src.id}] ${src.local_path} — skipped, ${err instanceof Error ? err.message : String(err)}`);
         skipped++;
         continue;
       }
@@ -256,6 +269,7 @@ function resolveHookTarget(localPath: string): HookTarget {
   if (rel === '..' || rel.startsWith('../') || isAbsolute(rel)) {
     throw new Error(`Not inside a git repository: ${localPath} resolves outside its git root ${root}`);
   }
+  assertNoLineTerminator(rel);
   return { root, scope: rel ? `${rel}/` : '' };
 }
 

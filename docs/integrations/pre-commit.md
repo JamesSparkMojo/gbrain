@@ -65,7 +65,10 @@ prints the reason plus the manual wiring step when:
   repo's own pre-push, commit-msg, framework-installed hooks, …) — move them
   into `.githooks/`, then run the same command.
 
-Only a source outside any git repo is skipped (`skipped, not a git repo`).
+A source is skipped only when it sits outside any git repo (`skipped, Not
+inside a git repository: …`) or its path contains a line terminator, which
+the generated shell script could not carry safely (`skipped, source path
+contains a line terminator; refusing to install hook`).
 
 ## Bypass
 

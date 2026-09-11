@@ -352,6 +352,35 @@ describe('frontmatter install-hook (B13)', () => {
     }
   });
 
+  test('a source path containing a line terminator is refused before rendering — nothing written, an installed hook untouched (pre-landing review r3)', async () => {
+    // "# gbrain-scope: <path>" is a shell comment: a newline inside the path
+    // would end it early and the remainder would run as hook code.
+    const evil = join(tmp, 'brain\necho pwned');
+    mkdirSync(evil);
+    await expect(install(evil)).rejects.toThrow(/line terminator/);
+    expect(existsSync(join(tmp, '.githooks', 'pre-commit'))).toBe(false);
+    // A hook already guarding a sibling source stays byte-identical.
+    mkdirSync(join(tmp, 'brain'));
+    await install(join(tmp, 'brain'));
+    const before = readFileSync(join(tmp, '.githooks', 'pre-commit'), 'utf8');
+    for (const bad of [evil, join(tmp, 'brain\rx')]) {
+      if (!existsSync(bad)) mkdirSync(bad);
+      await expect(install(bad)).rejects.toThrow(/line terminator/);
+      expect(() => uninstallHook(bad)).toThrow(/line terminator/);
+    }
+    expect(readFileSync(join(tmp, '.githooks', 'pre-commit'), 'utf8')).toBe(before);
+    // Control: quotes + spaces still install, and the scope text appears ONLY
+    // on a marker (comment) line or inside the quoted `--` pathspec.
+    mkdirSync(join(tmp, "it's here"));
+    await install(join(tmp, "it's here"));
+    const hook = readFileSync(join(tmp, '.githooks', 'pre-commit'), 'utf8');
+    const carrying = hook.split('\n').filter((l) => l.includes('s here/')); // the pathspec spells it 'it'\''s here/'
+    expect(carrying.length).toBe(2);
+    for (const line of carrying) {
+      expect(line.startsWith('# gbrain-scope: ') || line.startsWith('staged=$(git diff --cached ')).toBe(true);
+    }
+  });
+
   test('#4600 a path outside any git repo is refused with the shared sync message, nothing written', async () => {
     const plain = mkdtempSync(join(tmpdir(), 'fm-hook-nogit-'));
     try {
