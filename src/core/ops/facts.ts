@@ -737,8 +737,14 @@ const delta: Operation = {
     // Pages arrive OLDEST first by (updated_at, slug) — no client-side dedup
     // needed; the keyset already excludes everything at/before the cursor.
     let pages = res.deltaPages ?? [];
-    let facts = res.facts ?? [];
-    let threads = res.openThreads ?? [];
+    // Facts arrive NEWEST first from the engine and threads in card order;
+    // packToBudget keeps a PREFIX, so deliver both OLDEST first (pre-landing
+    // review r2) — each wake then drains the head of the window and the cursor
+    // below can advance past it instead of re-serving the same newest slice.
+    const factAt = (f: { created_at?: string; valid_from?: string }) => Date.parse(f.created_at ?? f.valid_from ?? '');
+    let facts = [...(res.facts ?? [])].sort((a, b) => factAt(a) - factAt(b) || a.id - b.id);
+    let threads = [...(res.openThreads ?? [])].sort((a, b) => Date.parse(a.date ?? '') - Date.parse(b.date ?? ''));
+    const fetchedPageRows = pages;
     const fetchedFacts = facts;
     const fetchedThreads = threads;
     let droppedCount: number | undefined;
@@ -785,15 +791,28 @@ const delta: Operation = {
       pages.length > 0
         ? { since: pages[pages.length - 1].updated_at, slug: pages[pages.length - 1].slug }
         : { since: effectiveSince, slug: sinceSlug ?? '' };
+    // Facts/threads are time-keyed only, so a delivered one newer than the last
+    // delivered page (or a page-less wake) would re-serve every wake unless the
+    // TIME cursor moves past it (pre-landing review r2 livelock). Advance to
+    // 1ms past the newest delivered fact/thread — the +1 clears the row's own
+    // sub-millisecond created_at — capped 1ms before the oldest budget-dropped
+    // page so no fetched page falls behind. A fetch-limit page tail is bounded
+    // only by the keyset, so the page cursor stands when it overflowed.
+    if (res.deltaOverflow !== true) {
+      const deliveredAt = [...facts.map(factAt), ...threads.map((t) => Date.parse(t.date ?? ''))].filter(Number.isFinite);
+      const oldestDroppedPage = fetchedPageRows[pages.length]?.updated_at;
+      let target = deliveredAt.length > 0 ? Math.max(...deliveredAt) + 1 : NaN;
+      if (oldestDroppedPage !== undefined) target = Math.min(target, Date.parse(oldestDroppedPage) - 1);
+      if (Number.isFinite(target) && target > Date.parse(nextCursor.since)) {
+        nextCursor = { since: new Date(target).toISOString(), slug: '' };
+      }
+    }
     // Never advance past an UNDELIVERED fact/thread (pre-landing review, #4761
     // regression): facts filter on created_at > since and threads on date >
-    // since, so a dropped one dated at/before the delivered pages' updated_at
-    // would fall behind the cursor for good. Hold the cursor 1ms before the
-    // oldest dropped item (never behind `since`); the pages in that sliver
-    // re-deliver on the next wake — at-least-once beats silent loss.
-    // ponytail: pages still pack first, so a budget too small for the pages
-    // plus the oldest dropped fact/thread re-delivers the same pages every
-    // wake; a per-arm cursor would fix it.
+    // since, so a dropped one dated at/before the cursor would fall behind it
+    // for good. Hold the cursor 1ms before the oldest dropped item (never
+    // behind `since`); with oldest-first delivery that is at or past the last
+    // delivered item, so only a same-millisecond tie re-delivers (at-least-once).
     const droppedAt = [
       ...fetchedFacts.slice(facts.length).map((f) => f.created_at ?? f.valid_from),
       ...fetchedThreads.slice(threads.length).map((t) => t.date),
@@ -808,7 +827,10 @@ const delta: Operation = {
           : { since: effectiveSince, slug: sinceSlug ?? '' };
     }
     if (sessionId) {
-      if (pages.length > 0) {
+      // Persist any advance (pages delivered OR the time cursor moved past a
+      // delivered fact/thread); a wake that moved nothing and dropped
+      // something keeps its cursor (deliver-before-advance).
+      if (pages.length > 0 || nextCursor.since !== effectiveSince) {
         await upsertSessionContextState(ctx.engine, sourceId, clientId, sessionId, {
           lastWakeAt: nextCursor.since,
           cursorSlug: nextCursor.slug,

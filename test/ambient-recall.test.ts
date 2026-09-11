@@ -20,7 +20,7 @@ import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { operations } from '../src/core/operations.ts';
 import { MEMORY_VERBS_VERSION, VERB_NAMES } from '../src/core/verbs.ts';
 import { estimateTokens } from '../src/core/search/token-budget.ts';
-import { deltaHeaderCost, renderPageLine } from '../src/core/context/turn-context.ts';
+import { deltaHeaderCost, renderFactLine, renderPageLine } from '../src/core/context/turn-context.ts';
 import {
   getSessionContextState,
   upsertSessionContextState,
@@ -821,6 +821,39 @@ describe('budget packing + drop footer', () => {
       (full.threads as Array<{ text: string }>).map((t) => t.text),
     );
     expect((r2.facts as unknown[]).length).toBe((full.facts as unknown[]).length);
+    expect(r2.has_more).toBe(false);
+  });
+
+  test('budget-dropped facts drain OLDEST-first across wakes: disjoint, complete, has_more ends false (pre-landing review r2)', async () => {
+    const local = ctxFor({ remote: false });
+    await new Promise((r) => setTimeout(r, 5));
+    const since = new Date().toISOString();
+    const base = Date.parse(since);
+    // Four facts recorded strictly after `since`, one second apart, tagged so
+    // the delivery order is observable from the response alone.
+    for (let i = 1; i <= 4; i++) {
+      await call(remember, local, { fact: `ofo-${i} ${'z'.repeat(120)}`, provenance: 'test', visibility: 'world' });
+      const at = new Date(base + i * 1000).toISOString();
+      await engine.executeRaw(`UPDATE facts SET created_at = '${at}', valid_from = '${at}' WHERE fact LIKE 'ofo-${i} %'`);
+    }
+    __resetHotMemoryCacheForTests();
+    const tag = (r: VerbResult) => (r.facts as Array<{ fact: string }>).map((f) => f.fact.split(' ')[0]);
+    const full = await call(del, local, { since });
+    expect(tag(full)).toEqual(['ofo-1', 'ofo-2', 'ofo-3', 'ofo-4']);
+    expect(full.pages).toEqual([]);
+    // Budget = envelope/headers + the two oldest fact lines + a sliver.
+    const twoLines = (full.facts as Parameters<typeof renderFactLine>[0][])
+      .slice(0, 2)
+      .reduce((n, f) => n + estimateTokens(renderFactLine(f) + '\n'), 0);
+    const r1 = await call(del, local, { since, budget_tokens: deltaHeaderCost(since) + twoLines + 3 });
+    expect(tag(r1)).toEqual(['ofo-1', 'ofo-2']);
+    expect(r1.has_more).toBe(true);
+    const r2 = await call(del, local, {
+      since: r1.next_cursor.since,
+      since_slug: r1.next_cursor.slug,
+      budget_tokens: 4000,
+    });
+    expect(tag(r2)).toEqual(['ofo-3', 'ofo-4']);
     expect(r2.has_more).toBe(false);
   });
 
