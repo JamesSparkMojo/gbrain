@@ -105,6 +105,22 @@ describe('runMigrations self-heal (#4613)', () => {
     expect(parseInt(n[0].n, 10)).toBe(1);
     expect((await constraintRow())?.def).toContain(LINK_SOURCE_KEBAB_RE);
   });
+
+  test('ledger below v114: the self-heal is skipped and v114 itself installs the gate (no double rewrite)', async () => {
+    // A pre-v114 brain has the v113 allowlist legitimately — the pending loop
+    // replays v114. Running the repair first would rewrite the constraint
+    // twice (and on a pre-v11 brain with no link_source column, print a
+    // spurious self-heal error).
+    await engine.setConfig('version', '113');
+    await driftToV113();
+    const rec = recordingEngine(engine);
+    const out = await runMigrations(rec.engine);
+    expect(out.applied).toBeGreaterThan(0);
+    expect(rec.calls.filter(c => c.includes(`conname = 'links_link_source_check'`))).toEqual([]);
+    const row = await constraintRow();
+    expect(row?.def).toContain(LINK_SOURCE_KEBAB_RE);
+    expect(row?.convalidated).toBe(true);
+  });
 });
 
 describe('checkLinkSourceCheck / repairLinkSourceCheck (#4613)', () => {
