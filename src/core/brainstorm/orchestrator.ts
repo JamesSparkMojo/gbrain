@@ -199,6 +199,13 @@ export interface BrainstormOptions {
    * A5: bypass the 7-day staleness gate when --resume is set.
    */
   forceResume?: boolean;
+  /**
+   * Slug the caller will save the result page under. Recorded in the
+   * checkpoint on the first run and echoed back as `BrainstormResult.idea_slug`
+   * on `--resume`, so the re-scored page overwrites the one the failed run
+   * saved instead of landing under a fresh nonce.
+   */
+  ideaSlug?: string;
 }
 
 /** One idea emitted to the user, with citation transparency (D6). */
@@ -238,6 +245,11 @@ export interface BrainstormResult {
   short_of_target: boolean;
   /** True iff judge phase failed and ideas were saved unscored (D12). */
   judge_failed: boolean;
+  /**
+   * Slug to save this run's page under: the checkpoint's recorded slug when
+   * resuming a run that already saved one, else the caller's `ideaSlug`.
+   */
+  idea_slug?: string;
   /** Cost actuals (codex r2 #10). */
   cost: {
     estimated_usd: number;
@@ -753,6 +765,7 @@ async function _runBrainstormInner(
     completed_crosses: prevCheckpoint?.completed_crosses.slice() ?? [],
     failed_crosses: prevCheckpoint?.failed_crosses.slice() ?? [],
     judge_done: false,
+    idea_slug: prevCheckpoint?.idea_slug ?? opts.ideaSlug,
   };
   let crossesSinceFlush = 0;
   const flush = (): void => {
@@ -967,6 +980,7 @@ async function _runBrainstormInner(
     active_bias_tags: activeBiasTags,
     short_of_target: farResult.short_of_target,
     judge_failed: judgeFailed,
+    idea_slug: liveCheckpoint.idea_slug,
     cost: {
       estimated_usd: estimate,
       actual_usd: actual,

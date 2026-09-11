@@ -33,6 +33,8 @@ import {
   loadCheckpoint,
 } from '../../src/core/brainstorm/checkpoint.ts';
 import type { ChatOpts, ChatResult } from '../../src/core/ai/gateway.ts';
+import { persistSavedIdea } from '../../src/commands/brainstorm.ts';
+import { serializeMarkdown } from '../../src/core/markdown.ts';
 
 let engine: PGLiteEngine;
 let tmp: string;
@@ -409,5 +411,67 @@ describe('brainstorm judge failure keeps the checkpoint; --resume re-scores (#47
     expect(result.ideas.every((i) => i.judge !== undefined)).toBe(true);
     // Clean completion clears the checkpoint as before.
     expect(readdirSync(dir).filter((f) => f.endsWith('.json')).length).toBe(0);
+  });
+
+  // Pre-landing review: the CLI's save slug carries a random nonce, so a
+  // `--resume` after a judge failure saved a SECOND idea page under a fresh
+  // slug (and the saved-page comment promised a re-score path that did not
+  // exist). The slug now rides in the checkpoint (`ideaSlug` in → `idea_slug`
+  // out) so the re-scored run overwrites the page the failed run saved.
+  test('resume returns the idea_slug the judge-failed run saved under, so exactly ONE idea page exists after re-score', async () => {
+    const question = 'judge failure slug question';
+    const pageFor = (slug: string) =>
+      serializeMarkdown({ mode: 'brainstorm', question, saved_as: slug }, `# Brainstorm: ${question}\n\nbody`, '', {
+        type: 'note',
+        title: `Brainstorm: ${question}`,
+        tags: [],
+      });
+    const firstSlug = 'wiki/ideas/2026-01-01-brainstorm-judge-failure-slug-question-aaaaaa';
+    const bad = makeChatFnMixed(99999, { garbage: true });
+    const first = await runBrainstorm(engine, {}, {
+      question,
+      profile: tinyProfile,
+      skipCostPreview: true,
+      maxCostUsd: 100,
+      chatFn: bad.fn,
+      embedQueryFn: async () => basisEmbedding(0),
+      stderrWrite: () => {},
+      ideaSlug: firstSlug,
+    });
+    expect(first.judge_failed).toBe(true);
+    expect(first.idea_slug).toBe(firstSlug);
+    const dir = join(tmp, '.gbrain', 'brainstorm');
+    const runId = readdirSync(dir).filter((f) => f.endsWith('.json'))[0]!.replace(/\.json$/, '');
+    expect(loadCheckpoint(runId)?.idea_slug).toBe(firstSlug);
+
+    // The CLI mints a fresh (random-nonce, next-day) slug on every invocation;
+    // the checkpoint's slug must win over it.
+    const secondSlug = 'wiki/ideas/2026-01-02-brainstorm-judge-failure-slug-question-bbbbbb';
+    const good = makeChatFnMixed(99999);
+    const second = await runBrainstorm(engine, {}, {
+      question,
+      profile: tinyProfile,
+      skipCostPreview: true,
+      maxCostUsd: 100,
+      chatFn: good.fn,
+      embedQueryFn: async () => basisEmbedding(0),
+      stderrWrite: () => {},
+      resumeRunId: runId,
+      ideaSlug: secondSlug,
+    });
+    expect(second.judge_failed).toBe(false);
+    expect(second.idea_slug).toBe(firstSlug);
+
+    // What the CLI does with each result: save it under `result.idea_slug ??
+    // <fresh slug>`. Both saves run after the two brainstorms so the saved
+    // page does not join the close/far candidate pool and shift the run_id.
+    await persistSavedIdea(engine, { slug: first.idea_slug ?? firstSlug, content: pageFor(firstSlug), provenanceVia: 'brainstorm' });
+    await persistSavedIdea(engine, { slug: second.idea_slug ?? secondSlug, content: pageFor(secondSlug), provenanceVia: 'brainstorm' });
+    try {
+      const ideaPages = (await engine.listPages()).filter((p) => p.slug.startsWith('wiki/ideas/'));
+      expect(ideaPages.map((p) => p.slug)).toEqual([firstSlug]);
+    } finally {
+      for (const slug of [firstSlug, secondSlug]) await engine.deletePage(slug).catch(() => {});
+    }
   });
 });
