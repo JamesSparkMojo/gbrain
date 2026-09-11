@@ -131,6 +131,26 @@ describe('parseTranscript on the fixture [G3, A6]', () => {
     expect(r.genuineUserTurnIndexes).toEqual([0, 3]);
   });
 
+  test('slash-command bookkeeping records are not genuine user turns (writeback lane)', () => {
+    // Claude Code writes `/clear`-style commands and their stdout as `user`
+    // records whose content is ONLY harness tags. Nobody said that; feeding
+    // it to the writeback lane as the "user prompt" banks junk.
+    const dir = tdir();
+    const p = join(dir, 'commands.jsonl');
+    const line = (o: unknown) => JSON.stringify(o);
+    writeFileSync(p, [
+      line({ type: 'user', message: { role: 'user', content: 'Please remember I take my coffee black.' } }),
+      line({ type: 'user', message: { role: 'user', content: '<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>' } }),
+      line({ type: 'user', message: { role: 'user', content: '<local-command-stdout>Cleared 3 files</local-command-stdout>' } }),
+      line({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '<local-command-stdout>ok</local-command-stdout>' }] } }),
+      line({ type: 'user', message: { role: 'user', content: '<command-name>/foo</command-name> and also: switch me to dark mode everywhere.' } }),
+    ].join('\n') + '\n');
+
+    const r = parseTranscript(p);
+    expect(r.turns).toHaveLength(5); // archival: the records stay in the window
+    expect(r.genuineUserTurnIndexes).toEqual([0, 4]);
+  });
+
   test('defaults exist and are sane', () => {
     expect(TRANSCRIPT_MAX_BYTES_DEFAULT).toBeGreaterThan(1024 * 1024);
     expect(TRANSCRIPT_HARD_CAP_BYTES).toBeGreaterThan(TRANSCRIPT_MAX_BYTES_DEFAULT);

@@ -366,6 +366,17 @@ function entryToInjectedBlock(entry: unknown): string | null {
   return GBRAIN_BLOCK_MARKERS.some((m) => text.includes(m)) ? text : null;
 }
 
+/**
+ * Claude Code writes slash-command bookkeeping (`/clear`, its stdout) as
+ * `user` records whose content is ONLY harness tags. They stay in the window
+ * (archival) but are not something the human said, so they never count as a
+ * genuine user prompt for the writeback lane.
+ */
+const HARNESS_TAG_RE = /<(local-command-stdout|local-command-stderr|command-name|command-message|command-args)>[\s\S]*?<\/\1>/g;
+function isGenuineUserText(text: string): boolean {
+  return text.replace(HARNESS_TAG_RE, '').trim().length > 0;
+}
+
 /** One transcript line → a turn plus its structural human-prompt origin. */
 function entryToTurn(entry: unknown): { turn: WindowTurn; genuineUser: boolean } | null {
   if (typeof entry !== 'object' || entry === null) return null;
@@ -384,7 +395,7 @@ function entryToTurn(entry: unknown): { turn: WindowTurn; genuineUser: boolean }
   let hasGenuineText = false;
   if (typeof content === 'string') {
     text = content;
-    hasGenuineText = content.trim().length > 0;
+    hasGenuineText = isGenuineUserText(content);
   } else if (Array.isArray(content)) {
     const parts: string[] = [];
     for (const block of content) {
@@ -394,7 +405,7 @@ function entryToTurn(entry: unknown): { turn: WindowTurn; genuineUser: boolean }
         case 'text':
           if (typeof b.text === 'string' && b.text.trim()) {
             parts.push(b.text);
-            hasGenuineText = true;
+            if (isGenuineUserText(b.text)) hasGenuineText = true;
           }
           break;
         case 'tool_use':
