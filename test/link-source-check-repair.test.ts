@@ -23,6 +23,7 @@ import {
   repairLinkSourceCheck,
 } from '../src/core/link-source-check-repair.ts';
 import { linkSourceCheckConstraintCheck } from '../src/commands/doctor/checks/core-health.ts';
+import { recordingEngine } from './helpers/recording-engine.ts';
 
 let engine: PGLiteEngine;
 
@@ -30,6 +31,13 @@ let engine: PGLiteEngine;
 const V113_ALLOWLIST_DDL =
   `ALTER TABLE links ADD CONSTRAINT links_link_source_check ` +
   `CHECK (link_source IS NULL OR link_source IN ('markdown', 'frontmatter', 'manual', 'mentions', 'wikilink-resolved'))`;
+
+/** v114's definition left NOT VALID (an interrupted two-phase Postgres migration). */
+const V114_NOT_VALID_DDL =
+  `ALTER TABLE links ADD CONSTRAINT links_link_source_check ` +
+  `CHECK (link_source IS NULL OR (link_source ~ '${LINK_SOURCE_KEBAB_RE}' AND char_length(link_source) <= 64)) NOT VALID`;
+
+const isDdl = (call: string) => /^(transaction:|runMigration:)|ALTER TABLE/.test(call);
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
@@ -140,18 +148,38 @@ describe('checkLinkSourceCheck / repairLinkSourceCheck (#4613)', () => {
     expect((await constraintRow())?.def).toContain(LINK_SOURCE_KEBAB_RE);
   });
 
-  test('pre-existing violating rows: repair refuses loudly, rolls back, never half-applies', async () => {
+  test('v114 def left NOT VALID → drift not_validated → restored + validated', async () => {
+    await dropConstraint();
+    await engine.executeRaw(V114_NOT_VALID_DDL);
+    const status = await checkLinkSourceCheck(engine);
+    expect(status.drift).toBe('not_validated');
+    expect(status.needsRepair).toBe(true);
+
+    const r = await repairLinkSourceCheck(engine);
+    expect(r.reason).toBe('restored');
+    expect(r.repaired).toBe(true);
+    const row = await constraintRow();
+    expect(row?.def).toContain(LINK_SOURCE_KEBAB_RE);
+    expect(row?.convalidated).toBe(true);
+    expect((await checkLinkSourceCheck(engine)).needsRepair).toBe(false);
+  });
+
+  test('pre-existing violating rows: repair refuses loudly WITHOUT attempting any DDL', async () => {
     await dropConstraint();
     await engine.executeRaw(
       `INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source)
        SELECT a.id, b.id, '', '', 'BAD_TAG' FROM pages a, pages b
         WHERE a.slug = 'notes/alpha-example' AND b.slug = 'notes/beta-example'`,
     );
-    const r = await repairLinkSourceCheck(engine);
+    const rec = recordingEngine(engine);
+    const r = await repairLinkSourceCheck(rec.engine);
     expect(r.reason).toBe('violations');
     expect(r.repaired).toBe(false);
     expect(r.violations).toBe(1);
-    // Atomic: no NOT VALID remnant, no half-added constraint.
+    // Violators are probed FIRST: no transaction, no ALTER TABLE — on Postgres
+    // a failing ADD would otherwise take ACCESS EXCLUSIVE + a full scan on
+    // every engine open until a human edits rows.
+    expect(rec.calls.filter(isDdl)).toEqual([]);
     expect(await constraintRow()).toBeUndefined();
     expect((await checkLinkSourceCheck(engine)).drift).toBe('absent');
   });
@@ -178,6 +206,15 @@ describe('doctor links_link_source_check (#4613)', () => {
     expect(check.status).toBe('warn');
     expect(check.message).toContain('absent');
     await addKebabLink(); // no gate → the write goes through
+  });
+
+  test('warn (not fail) when the constraint is NOT VALID — the gate is live, only old rows are unchecked', async () => {
+    await dropConstraint();
+    await engine.executeRaw(V114_NOT_VALID_DDL);
+    const check = await linkSourceCheckConstraintCheck(engine);
+    expect(check.status).toBe('warn');
+    expect(check.message).toContain('NOT VALID');
+    await addKebabLink(); // the kebab gate accepts kebab writes even while NOT VALID
   });
 
   test('warn on a probe error, never a false ok', async () => {

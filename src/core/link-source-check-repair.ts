@@ -11,16 +11,20 @@
  *
  * Third instance of the #2038 / #550 pattern: key the check off the actual
  * constraint SHAPE in pg_constraint (not the ledger), run the repair on every
- * migrate pass, refuse loudly instead of half-applying. The repair only ever
- * restores the migration-declared definition — it never touches rows. When
- * existing rows violate the gate, the DROP+ADD transaction rolls back as a
- * whole (the old constraint, if any, stays in place) and the violator count
- * is reported for manual resolution.
+ * migrate pass once the ledger has reached v114, refuse loudly instead of
+ * half-applying. The repair only ever restores the migration-declared
+ * definition — it never touches rows. Violating rows are probed BEFORE any
+ * DDL: when present, nothing is altered (the old constraint, if any, stays in
+ * place) and the count is reported for manual resolution — so a brain with a
+ * bad row never pays for a failing ALTER on every engine open.
  */
 
 import type { BrainEngine } from './engine.ts';
 
 const CONSTRAINT_NAME = 'links_link_source_check';
+
+/** The migration that introduced the kebab gate; `runMigrations` skips the self-heal below this ledger. */
+export const LINK_SOURCE_GATE_MIGRATION_VERSION = 114;
 
 /**
  * Kebab provenance-tag format gate (migration v114 / #1941). ONE copy here;
@@ -31,12 +35,9 @@ export const LINK_SOURCE_KEBAB_RE = '^[a-z][a-z0-9]*(-[a-z0-9]+)*$';
 
 const GATE_PREDICATE = `(link_source ~ '${LINK_SOURCE_KEBAB_RE}' AND char_length(link_source) <= 64)`;
 
-/** v114's PGLite branch verbatim: plain DROP + ADD (validates existing rows inline). */
-const RESTORE_DDL = `
-  ALTER TABLE links DROP CONSTRAINT IF EXISTS ${CONSTRAINT_NAME};
-  ALTER TABLE links ADD CONSTRAINT ${CONSTRAINT_NAME}
-    CHECK (link_source IS NULL OR ${GATE_PREDICATE});
-`;
+const DROP_DDL = `ALTER TABLE links DROP CONSTRAINT IF EXISTS ${CONSTRAINT_NAME};`;
+const ADD_DDL = `ALTER TABLE links ADD CONSTRAINT ${CONSTRAINT_NAME} CHECK (link_source IS NULL OR ${GATE_PREDICATE})`;
+const VALIDATE_DDL = `ALTER TABLE links VALIDATE CONSTRAINT ${CONSTRAINT_NAME}`;
 
 export type LinkSourceCheckDrift = 'absent' | 'wrong_def' | 'not_validated';
 
@@ -80,33 +81,44 @@ export interface LinkSourceCheckRepairResult {
   reason: 'already_correct' | 'no_table' | 'violations' | 'restored';
 }
 
+async function countViolations(engine: BrainEngine): Promise<number> {
+  const bad = await engine.executeRaw<{ n: string }>(
+    `SELECT COUNT(*)::text AS n FROM links WHERE link_source IS NOT NULL AND NOT ${GATE_PREDICATE}`,
+  );
+  return parseInt(bad[0]?.n ?? '0', 10);
+}
+
 /**
- * Restore the v114 definition when the live shape drifted. Atomic on both
- * engines: DROP + ADD run in one transaction (same shape as the migration
- * runner's transaction branch), and ADD validates existing rows inline, so a
- * violating row aborts the whole thing — no NOT VALID remnant, the prior
- * constraint (if any) survives untouched.
+ * Restore the v114 definition when the live shape drifted. Mirrors v114's
+ * engine split: on Postgres a plain `ADD CONSTRAINT ... CHECK` takes ACCESS
+ * EXCLUSIVE + a full validation scan on `links`, so the repair does DROP +
+ * `ADD ... NOT VALID` in one transaction (atomic, no scan) and then `VALIDATE
+ * CONSTRAINT` outside it (SHARE UPDATE EXCLUSIVE, doesn't block reads or
+ * writes); a `not_validated` drift only needs the VALIDATE. PGLite
+ * (single-writer WASM, no lock concern) keeps the one-shot DROP + ADD in one
+ * transaction. Violating rows are counted BEFORE any DDL, so a brain with a
+ * bad row never pays for a failing ALTER at every engine open; the post-DDL
+ * count only classifies a row written between the probe and the ALTER.
  */
 export async function repairLinkSourceCheck(engine: BrainEngine): Promise<LinkSourceCheckRepairResult> {
   const status = await checkLinkSourceCheck(engine);
   if (!status.tablePresent) return { repaired: false, violations: 0, reason: 'no_table' };
   if (!status.needsRepair) return { repaired: false, violations: 0, reason: 'already_correct' };
+  const violations = await countViolations(engine);
+  if (violations > 0) return { repaired: false, violations, reason: 'violations' };
   try {
-    await engine.transaction(async (tx) => {
-      if (engine.kind === 'postgres') {
-        try {
-          await tx.runMigration(0, "SET LOCAL statement_timeout = '600000'");
-        } catch { /* older Postgres without SET LOCAL support */ }
+    if (engine.kind === 'postgres') {
+      if (status.drift !== 'not_validated') {
+        await engine.transaction((tx) => tx.runMigration(0, `${DROP_DDL} ${ADD_DDL} NOT VALID;`));
       }
-      await tx.runMigration(0, RESTORE_DDL);
-    });
+      await engine.runMigration(0, VALIDATE_DDL);
+    } else {
+      await engine.transaction((tx) => tx.runMigration(0, `${DROP_DDL} ${ADD_DDL};`));
+    }
   } catch (e) {
-    const bad = await engine.executeRaw<{ n: string }>(
-      `SELECT COUNT(*)::text AS n FROM links WHERE link_source IS NOT NULL AND NOT ${GATE_PREDICATE}`,
-    );
-    const violations = parseInt(bad[0]?.n ?? '0', 10);
-    if (violations === 0) throw e; // not a data problem — surface the real error
-    return { repaired: false, violations, reason: 'violations' };
+    const late = await countViolations(engine);
+    if (late === 0) throw e; // not a data problem — surface the real error
+    return { repaired: false, violations: late, reason: 'violations' };
   }
   return { repaired: true, violations: 0, reason: 'restored' };
 }
