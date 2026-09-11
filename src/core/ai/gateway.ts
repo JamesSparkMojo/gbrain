@@ -58,7 +58,7 @@ import { parseLlmJson } from '../llm-json.ts';
 import type { BrainEngine } from '../engine.ts';
 import { dimsProviderOptions } from './dims.ts';
 import { hasAnthropicKey, stashGatewayAnthropicKeyFromEnv } from './anthropic-key.ts';
-import { AIConfigError, AITransientError, normalizeAIError } from './errors.ts';
+import { AIConfigError, AITransientError, isStructuredOutputRejection, normalizeAIError } from './errors.ts';
 import { getProviderCapabilities } from './capabilities.ts';
 import { runGuardrails, hasGuardrails, type GuardrailHook } from '../guardrails.ts';
 import { loadConfig } from '../config.ts';
@@ -4101,27 +4101,47 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
   // would reject the schema is never sent one; a declared backend that
   // ignores it just returns unconstrained text, which the caller's parse
   // lane already handles. Native + claude-cli lanes never see the field.
+  // A declared backend that REJECTS it at call time (older Ollama build,
+  // strict proxy) gets one schemaless retry below and is remembered in
+  // `_structuredOutputRejectedRecipes` — the same process-lifetime memory
+  // expand() keeps — so the caller's own retry lanes don't re-pay the
+  // rejection and turn every call into a permanent provider_error.
   const output = opts.responseSchema
     && recipe.implementation === 'openai-compatible'
     && recipeSupportsStructuredOutputs(recipe)
+    && !_structuredOutputRejectedRecipes.has(recipe.id)
     ? jsonSchemaOutput(opts.responseSchema)
     : undefined;
 
+  const generate = (out: typeof output) => guardedGeneration(modelStr, _generateTextTransport, {
+    model,
+    system: systemParam,
+    messages: toModelMessages(repairToolPairing(opts.messages)) as any,
+    tools: opts.tools && opts.tools.length > 0 ? tools : undefined,
+    maxOutputTokens: opts.maxTokens ?? defaultMaxOutputTokens(modelStr),
+    ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+    output: out,
+    // v0.42.20.0 — default a chat timeout (composes with the caller's signal,
+    // shorter wins). Covers native-anthropic (the default provider + facts Haiku).
+    // Fresh signal per attempt so the schemaless retry gets its own timeout.
+    abortSignal: withDefaultTimeout(opts.abortSignal, AI_CHAT_TIMEOUT_MS),
+    providerOptions: Object.keys(providerOptions).length > 0 ? providerOptions : undefined,
+    ...(requestHeaders ? { headers: requestHeaders } : {}),
+  });
+
   try {
-    const result = await guardedGeneration(modelStr, _generateTextTransport, {
-      model,
-      system: systemParam,
-      messages: toModelMessages(repairToolPairing(opts.messages)) as any,
-      tools: opts.tools && opts.tools.length > 0 ? tools : undefined,
-      maxOutputTokens: opts.maxTokens ?? defaultMaxOutputTokens(modelStr),
-      ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
-      output,
-      // v0.42.20.0 — default a chat timeout (composes with the caller's signal,
-      // shorter wins). Covers native-anthropic (the default provider + facts Haiku).
-      abortSignal: withDefaultTimeout(opts.abortSignal, AI_CHAT_TIMEOUT_MS),
-      providerOptions: Object.keys(providerOptions).length > 0 ? providerOptions : undefined,
-      ...(requestHeaders ? { headers: requestHeaders } : {}),
-    });
+    let result: Awaited<ReturnType<GenerateTextFn>>;
+    try {
+      result = await generate(output);
+    } catch (err) {
+      if (!output || isAIInvocationPolicyError(err) || !isStructuredOutputRejection(err)) throw err;
+      _structuredOutputRejectedRecipes.add(recipe.id);
+      console.warn(
+        `[ai.gateway] ${recipe.id} rejected response_format json_schema; retrying without a schema ` +
+        `and skipping it for the rest of this process: ${(err as Error)?.message ?? String(err)}`,
+      );
+      result = await generate(undefined);
+    }
 
     // Normalize blocks. Vercel SDK gives us `result.content` (an array of typed
     // parts) for v6+; fall back to text + toolCalls for older shapes.

@@ -335,11 +335,14 @@ const MAX_TURN_TEXT_CHARS = 8000;
  * every chat() call. Only openai-compatible recipes that declare
  * `supports_structured_outputs` (Ollama: server-side grammar-constrained
  * decoding) receive it; every other lane ignores it. Mirrors RawExtracted:
- * fact + kind required, the rest optional/nullable. `parseExtractorJsonDetailed`
+ * fact + kind carry data, the rest are nullable. `parseExtractorJsonDetailed`
  * still validates the text — the schema removes the malformed-JSON class on
- * small local models, it does not replace the parser. Nullable fields stay
- * out of `required` on purpose: Ollama accepts that, the parser tolerates
- * absence, and OpenAI-strict (which would demand it) never sees this schema.
+ * small local models, it does not replace the parser. OpenAI-strict-safe:
+ * `@ai-sdk/openai-compatible` sends `strict: true` by default, and strict
+ * mode demands every property in `required` (nullable via type unions) plus
+ * `additionalProperties: false` on each object — so a proxied backend that
+ * honors strict accepts this schema instead of 400ing on it. The parser
+ * still tolerates absent keys for backends that ignore the schema.
  */
 const FACTS_EXTRACTION_SCHEMA: Record<string, unknown> = {
   type: 'object',
@@ -359,7 +362,7 @@ const FACTS_EXTRACTION_SCHEMA: Record<string, unknown> = {
           unit: { type: ['string', 'null'] },
           period: { type: ['string', 'null'] },
         },
-        required: ['fact', 'kind'],
+        required: ['fact', 'kind', 'entity', 'confidence', 'notability', 'metric', 'value', 'unit', 'period'],
         additionalProperties: false,
       },
     },

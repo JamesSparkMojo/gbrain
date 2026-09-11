@@ -79,7 +79,10 @@ describe('facts extraction — structured output on ollama (#4863)', () => {
     expect(rf.schema.required).toEqual(['facts']);
     expect(rf.schema.additionalProperties).toBe(false);
     const item = rf.schema.properties.facts.items;
-    expect(item.required).toEqual(['fact', 'kind']);
+    // Strict-safe: every listed property is required (nullable via type unions), so an
+    // openai-compatible proxy that honors `strict: true` (the SDK default) accepts it too.
+    expect(item.required).toEqual(Object.keys(item.properties));
+    expect(rf.schema.required).toEqual(Object.keys(rf.schema.properties));
     expect(item.additionalProperties).toBe(false);
     expect(item.properties.kind.enum).toContain('commitment');
     expect(item.properties.notability.enum).toEqual(['high', 'medium', 'low']);
@@ -154,5 +157,95 @@ describe('facts extraction — every other lane is unchanged', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].output).toBeUndefined();
     expect(outcome.ok).toBe(true);
+  });
+});
+
+// Pre-landing review (#4968 adoption): a recipe that DECLARES structured
+// outputs but whose backend rejects `response_format: json_schema` at call
+// time (an older Ollama build, a strict proxy) must not turn every facts
+// extraction into a permanent provider_error. chat() retries ONCE without the
+// schema and remembers the recipe for the process lifetime — the same
+// `_structuredOutputRejectedRecipes` memory expand() already keeps.
+describe('facts extraction — json_schema rejected at call time falls back schemaless', () => {
+  function apiError(statusCode: number, message: string): Error {
+    return Object.assign(new Error(message), {
+      name: 'AI_APICallError',
+      statusCode,
+      responseBody: JSON.stringify({ error: { message, type: 'invalid_request_error' } }),
+    });
+  }
+
+  let warns: string[] = [];
+  const origWarn = console.warn;
+  beforeEach(() => {
+    warns = [];
+    console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(' ')); };
+  });
+  afterEach(() => { console.warn = origWarn; });
+
+  test('a 400 naming json_schema → one schemaless retry succeeds; later extractions skip the schema with no failing call', async () => {
+    configureGateway({ chat_model: OLLAMA, env: {} });
+    const calls: any[] = [];
+    __setGenerateTextTransportForTests(async (args: any) => {
+      calls.push(args);
+      if (args.output) throw apiError(400, 'response_format json_schema is not supported by this model');
+      return sdkResult(GOOD_JSON);
+    });
+
+    const first = await extract(OLLAMA);
+
+    expect(first.ok).toBe(true);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].output).toBeDefined();
+    expect(calls[1].output).toBeUndefined();
+    expect(warns.filter(w => /json_schema/.test(w))).toHaveLength(1);
+
+    const second = await extract(OLLAMA);
+
+    expect(second.ok).toBe(true);
+    expect(calls).toHaveLength(3);
+    expect(calls[2].output).toBeUndefined();
+    expect(warns.filter(w => /json_schema/.test(w))).toHaveLength(1); // remembered: no second rejection, no second warn
+  });
+
+  test('an unrelated 500 is NOT a schema rejection: no retry, provider_error, schema still sent next time', async () => {
+    configureGateway({ chat_model: OLLAMA, env: {} });
+    const calls: any[] = [];
+    let failing = true;
+    __setGenerateTextTransportForTests(async (args: any) => {
+      calls.push(args);
+      if (failing) throw apiError(500, 'internal server error: upstream timeout');
+      return sdkResult(GOOD_JSON);
+    });
+
+    const failed = await extract(OLLAMA);
+
+    expect(failed.ok).toBe(false);
+    if (!failed.ok) expect(failed.reason).toBe('provider_error');
+    expect(calls).toHaveLength(1);
+
+    failing = false;
+    const recovered = await extract(OLLAMA);
+
+    expect(recovered.ok).toBe(true);
+    expect(calls).toHaveLength(2);
+    expect(calls[1].output).toBeDefined();
+    expect(warns.filter(w => /json_schema/.test(w))).toHaveLength(0);
+  });
+
+  test('a 400 that does not name the schema (context length) is NOT a schema rejection', async () => {
+    configureGateway({ chat_model: OLLAMA, env: {} });
+    const calls: any[] = [];
+    __setGenerateTextTransportForTests(async (args: any) => {
+      calls.push(args);
+      throw apiError(400, "this model's maximum context length is 8192 tokens");
+    });
+
+    const failed = await extract(OLLAMA);
+
+    expect(failed.ok).toBe(false);
+    if (!failed.ok) expect(failed.reason).toBe('provider_error');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].output).toBeDefined();
   });
 });
