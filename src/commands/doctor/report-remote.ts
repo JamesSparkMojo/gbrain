@@ -452,7 +452,7 @@ export async function doctorReportRemote(
   //   - chunker_version drift (pre-v40 pages not yet re-embedded)
   //   - contextual_retrieval_mode IS NULL (mode never evaluated)
   //   - synopsis-failures audit JSONL entries from the last 7 days
-  checks.push(await checkContextualRetrievalCoverage(engine));
+  checks.push(await checkContextualRetrievalCoverage(engine, { sourceIds: opts.sourceIds }));
 
   // issue #1777 — hidden_by_search_policy: chunked pages withheld from default
   // search by the hard-exclude prefix policy. Pure SQL COUNT, safe on the

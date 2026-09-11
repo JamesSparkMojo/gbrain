@@ -50,7 +50,13 @@ import type { Check } from '../../doctor.ts';
  * `src/core/audit-synopsis.ts`. Failure-only audit means low write
  * volume on healthy brains.
  */
-export async function checkContextualRetrievalCoverage(engine: BrainEngine): Promise<Check> {
+export async function checkContextualRetrievalCoverage(
+  engine: BrainEngine,
+  // Source isolation (#4592 class): the remote report threads the caller's
+  // resolved grant here so a source-bound token never reads brain-wide
+  // page counts. Unset = brain-wide (trusted/unrestricted).
+  opts: { sourceIds?: string[] } = {},
+): Promise<Check> {
   try {
     const { MARKDOWN_CHUNKER_VERSION } = await import('../../../core/chunkers/recursive.ts');
     const rows = await engine.executeRaw<{ chunker_drift: number; unsealed: number; mode_null: number }>(
@@ -66,8 +72,9 @@ export async function checkContextualRetrievalCoverage(engine: BrainEngine): Pro
          COUNT(*) FILTER (WHERE contextual_retrieval_mode IS NULL AND type <> 'extract_receipt')::int AS mode_null
        FROM pages
        WHERE page_kind = 'markdown'
-         AND deleted_at IS NULL`,
-      [MARKDOWN_CHUNKER_VERSION],
+         AND deleted_at IS NULL
+         ${opts.sourceIds ? 'AND source_id = ANY($2::text[])' : ''}`,
+      opts.sourceIds ? [MARKDOWN_CHUNKER_VERSION, opts.sourceIds] : [MARKDOWN_CHUNKER_VERSION],
     );
     const chunkerDrift = rows[0]?.chunker_drift ?? 0;
     const unsealed = rows[0]?.unsealed ?? 0;
