@@ -154,9 +154,13 @@ All notable changes to GBrain will be documented in this file.
 
 ### Pre-landing review hardening (found while composing the wave)
 
+- The CLI flag registry no longer legalises flags that only appeared in code comments (the generator strips comments at every scan depth): `gbrain reindex --code` — a flag `reindex` never parsed — now fails loud as an unknown flag; run `gbrain reindex-code` (the three docs that still said `reindex --code` were corrected).
+- `install-hook` also leaves `core.hooksPath` unset when the host repo's `.git/hooks` already holds active hooks (reported as `installed_unwired`), so wiring `.githooks/` can never silently disable them.
+- `gbrain reindex-search-vector` clears its in-progress marker when the very first DDL statement fails on a fresh run, and preserves a marker left by an earlier interrupted run when a resume fails — `gbrain doctor` keeps reporting a genuinely split index and stops reporting one that never started.
+- A `server.close()` error that arrives after the 5s shutdown deadline is logged instead of being dropped.
 - `gbrain brainstorm --resume` / `gbrain lsd --resume` now re-score into the same saved idea page the failed run wrote (the slug rides in the run checkpoint) instead of saving a second page under a new slug.
 - `gbrain serve --http` shutdown is now bounded: if `server.close()` has not returned after 5s (a connection the socket tracker could no longer reach), the daemon logs one line and finishes shutting down instead of hanging.
-- Delta: the session/stateless cursor no longer advances past a budget-dropped fact or open thread — it holds just before the oldest undelivered one, so the next wake (e.g. with a larger budget) delivers it instead of returning has_more:true followed by an empty response.
+- `delta` never budget-drops open threads: every thread is rendered whole and only pages and facts count toward `budget_tokens` (`budget_used` exceeds the budget only when the envelope plus the threads alone do); cursor semantics are unchanged from v1 — the page keyset, no hold or skip state.
 - Inline link/timeline extraction again covers pages sync admits but the markdown walker skips (`_`-prefixed files, dot-dirs waived via `sync.include_hidden`): a slug the walk index cannot resolve now falls back to its legacy `slug + '.md'` path before being treated as deleted, so those pages import with their edges and are stamped fresh.
 - `gbrain files upload-raw` no longer clears a file's stored metadata `type` when the same file is re-uploaded without `--type`.
 - Facts extraction on an openai-compatible backend that rejects `response_format: json_schema` at call time (an older Ollama build, a strict proxy) now retries once without the schema and remembers the backend for the rest of the process instead of failing every extraction; the facts schema is OpenAI-strict-safe (every property required, optional ones nullable).
