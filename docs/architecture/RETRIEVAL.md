@@ -371,7 +371,10 @@ Markdown chunk creation applies the strict protected-body sanitizer before
 splitting text. For remote reads, all existing chunks are withheld until a
 successful rebuild records the current chunker version. Public pages require
 this rebuild too; trusted local chunk reads remain available. Body or chunk changes
-invalidate that record until the next successful rebuild. Direct page reads
+invalidate that record until the next successful rebuild. While pages are withheld,
+remote `search` / `query` report `degraded: [safe_index_pending]` (the MCP
+empty-result block names it) instead of a clean miss, and `gbrain doctor` counts
+the withheld pages and points at the `gbrain reindex --markdown` fix. Direct page reads
 continue to use current source and visibility policy plus body sanitization.
 
 Run rebuild commands from a local installation on the brain host; thin clients

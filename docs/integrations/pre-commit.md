@@ -66,9 +66,12 @@ prints the reason plus the manual wiring step when:
   into `.githooks/`, then run the same command.
 
 A source is skipped only when it sits outside any git repo (`skipped, Not
-inside a git repository: …`) or its path contains a line terminator, which
+inside a git repository: …`), its path contains a line terminator, which
 the generated shell script could not carry safely (`skipped, source path
-contains a line terminator; refusing to install hook`).
+contains a line terminator; refusing to install hook`), or `.githooks/` /
+`.githooks/pre-commit` is a symlink (`Refusing to write through a symlink: …`
+— the installer never writes or removes through the link; the other sources
+still install).
 
 ## Bypass
 
