@@ -194,10 +194,12 @@ export async function runFrontmatterInstallHook(args: string[]): Promise<void> {
         continue;
       }
       if (result === 'installed') {
+        // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- target.root is the git root discovered with `git rev-parse` for a registered source path; the tail is a fixed literal
         const where = join(target.root, '.githooks', 'pre-commit');
         console.log(`[${src.id}] hook installed at ${where}${target.scope ? ` (scoped to ${target.scope})` : ''}`);
         installed++;
       } else if (result === 'installed_unwired') {
+        // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- target.root is the discovered git root of a registered source; fixed literal tail
         const where = join(target.root, '.githooks', 'pre-commit');
         console.log(`[${src.id}] hook written at ${where}; core.hooksPath left unset — ${hooksPathBlocker(target.root)}`);
         installed++;
@@ -281,6 +283,7 @@ type InstallResult = 'installed' | 'installed_unwired' | 'skipped_existing' | 'u
  * wherever it points (lstat, so a dangling link is refused too).
  */
 function hookPaths(root: string): { hooksDir: string; hookPath: string } {
+  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- root is the discovered git root of a registered source; fixed literal tail
   const hooksDir = join(root, '.githooks');
   const hookPath = join(hooksDir, 'pre-commit');
   for (const p of [hooksDir, hookPath]) {
@@ -300,9 +303,11 @@ function hookPaths(root: string): { hooksDir: string; hookPath: string } {
  * hooksPath it would list the FOREIGN dir instead of the one wiring sidelines.
  */
 export function activeGitHooks(root: string): string[] {
+  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- root is the discovered git root; fixed literal tail
   let dir = join(root, '.git', 'hooks');
   try {
     const p = git(root, ['rev-parse', '--git-common-dir']);
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- p is `git rev-parse --git-path hooks` output for that same root (the operator's own repo layout), not caller input
     if (p) dir = join(isAbsolute(p) ? p : join(root, p), 'hooks');
   } catch { /* classic layout fallback */ }
   return executableHooks(dir);
@@ -314,6 +319,7 @@ function executableHooks(dir: string): string[] {
   return readdirSync(dir).filter((f) => {
     if (f.endsWith('.sample')) return false;
     try {
+      // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- dir is the resolved hooks directory above and f is a directory entry read from it
       const st = statSync(join(dir, f));
       return st.isFile() && (st.mode & 0o111) !== 0;
     } catch { return false; }
@@ -328,6 +334,7 @@ function executableHooks(dir: string): string[] {
 function currentHooksPath(root: string): string {
   try {
     const p = git(root, ['config', '--type=path', '--get', 'core.hooksPath']);
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- p is the repo's own core.hooksPath config value, resolved against its git root to compare with `.githooks`
     return p ? resolve(root, p) : '';
   } catch {
     return ''; // git config exits non-zero when the key is unset — the normal case.
@@ -350,10 +357,12 @@ const samePath = (a: string, b: string): boolean => {
 export function hooksPathBlocker(root: string): string | null {
   const current = currentHooksPath(root);
   if (current) {
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- fixed literal tail under the discovered git root
     if (samePath(current, join(root, '.githooks'))) return null;
     return `core.hooksPath already points at ${current} (git reads hooks only from there); copy .githooks/pre-commit into it, or run: git -C ${root} config core.hooksPath .githooks`;
   }
   const wire = `then run: git -C ${root} config core.hooksPath .githooks`;
+  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- fixed literal tail under the discovered git root
   const foreign = executableHooks(join(root, '.githooks')).filter((f) => f !== 'pre-commit');
   if (foreign.length > 0) return `.githooks/ holds other hook scripts git would start running (${foreign.join(', ')}); review them, ${wire}`;
   const live = activeGitHooks(root);

@@ -425,6 +425,7 @@ export function resolveSlugRelPath(
   const indexed = slugToPath.get(slug);
   if (indexed !== undefined) return indexed;
   const legacy = `${slug}.md`;
+  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- legacy is `slug + '.md'` for a slug read from the pages table; every stored slug passed validateSlug (no `..` segments, no leading `/`), and repoPath is the registered source root
   return existsSync(join(repoPath, legacy)) ? legacy : undefined;
 }
 
@@ -1722,6 +1723,7 @@ export async function extractLinksForSlugs(
   for (const slug of slugs) {
     const relPath = resolveSlugRelPath(slugToPath, repoPath, slug);
     if (relPath === undefined) continue;
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- relPath comes from the slug→path index built by walkMarkdownFiles(repoPath) (repo-relative entries of that walk) or the validated-slug legacy fallback, never from a caller
     const filePath = join(repoPath, relPath);
     try {
       const content = readFileSync(filePath, 'utf-8');
@@ -1752,6 +1754,7 @@ export async function extractTimelineForSlugs(
   for (const slug of slugs) {
     const relPath = resolveSlugRelPath(slugToPath, repoPath, slug);
     if (relPath === undefined) continue;
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- relPath comes from the walkMarkdownFiles(repoPath) index or the validated-slug legacy fallback, never from a caller
     const filePath = join(repoPath, relPath);
     try {
       const content = readFileSync(filePath, 'utf-8');
