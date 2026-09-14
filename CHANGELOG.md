@@ -2,7 +2,7 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.50.1.0] - 2026-09-11
+## [0.50.1.0] - 2026-09-14
 
 **The community fix wave, rebased onto 0.50.0.0: 21 contributor pull requests adopted or reworked with credit, 35 verified open issues fixed directly, and a hostile review pass over the whole set.** Every adopted fix carries a regression test proven red before the fix; the composed collector ran the full unit suite, `verify`, and the e2e lane.
 
