@@ -154,6 +154,25 @@ not rewrite an accepted mutation's authority snapshot.
 
 ## Local registrations and canonical ownership
 
+For a coordinated upgrade, update and stop older writers on every host first.
+Claim each filesystem source on its canonical host, then inspect writer status
+and existing locks. Activation is explicit:
+
+```bash
+gbrain sources writer status --probe --json
+gbrain sources writer activate --confirm-quiesced --dry-run --json
+gbrain sources writer activate --confirm-quiesced --json
+```
+
+The flag asserts that older binaries, external editors and maintenance writers
+have been quiesced on every host. Activation verifies all owner bindings and
+native locking, rejects outstanding legacy leases and unfinished publications,
+and makes local refusal records durable before enabling managed writes. Even an
+expired lease needs explicit inspection and removal; elapsed time does not prove
+its writer stopped. A failed activation leaves managed mode disabled. Status
+reports `enabled: false` until activation commits. Run an ordinary write and
+read its receipt and revision before resuming writers on the upgraded hosts.
+
 CLI and stdio registrations are durable, separate principals. The CLI lane is
 trusted local administration; stdio remains an untrusted memory caller.
 Revocation survives restart. Losing a credential file or receiving a denied

@@ -15,11 +15,15 @@ import { reportPersistenceCliError } from './persistence-delegate.ts';
 export const WRITER_HELP = `Usage:
   gbrain sources writer status [<source>] [--probe] [--json]
   gbrain sources writer claim <source> --path <directory> [--dry-run] [--json]
+  gbrain sources writer activate --confirm-quiesced [--dry-run] [--json]
   gbrain sources writer transfer prepare <source> [--dry-run] [--json]
   gbrain sources writer transfer accept <source> --path <worktree-root> --expected-epoch <n> --manifest <sha256> [--dry-run] [--json]
 
 Use --brain <id> to select a database. Prepare drains the current owner and records
 an exact manifest; accept requires that epoch and matching bytes on the successor.
+Before activation, upgrade and stop older writers on every host, claim every
+filesystem source, and inspect/release remaining legacy locks. --confirm-quiesced
+records that operator intent; --dry-run performs the same checks without enabling.
 No command takes over an owner based on a stale heartbeat.`;
 
 export const LOCAL_WRITER_HELP = `Usage:
@@ -56,7 +60,7 @@ export function parsePersistenceAdminArgs(group: Group, args: string[]): {
     const flag = equal < 0 ? token : token.slice(0, equal);
     if (seen.has(flag)) throw new OperationError('invalid_params', `Duplicate option ${flag}.`);
     seen.add(flag);
-    if (['--json', '--dry-run', '--replace', '--probe'].includes(flag)) {
+    if (['--json', '--dry-run', '--replace', '--probe', '--confirm-quiesced'].includes(flag)) {
       if (equal >= 0) throw new OperationError('invalid_params', `${flag} does not accept a value.`);
       if (flag === '--json') json = true;
       else params[flag.slice(2).replaceAll('-', '_')] = true;
@@ -75,11 +79,12 @@ export function parsePersistenceAdminArgs(group: Group, args: string[]): {
     const verb = positional.shift();
     if (verb === 'status') operation = 'writer_status';
     else if (verb === 'claim') operation = 'writer_claim';
+    else if (verb === 'activate') operation = 'writer_activate';
     else if (verb === 'transfer') {
       const phase = positional.shift();
       if (phase !== 'prepare' && phase !== 'accept') throw new OperationError('invalid_params', 'Transfer requires prepare or accept.');
       operation = phase === 'prepare' ? 'writer_transfer_prepare' : 'writer_transfer_accept';
-    } else throw new OperationError('invalid_params', 'Writer administration requires status, claim, or transfer.');
+    } else throw new OperationError('invalid_params', 'Writer administration requires status, claim, activate, or transfer.');
     const source = positional.shift();
     if (source !== undefined) {
       if (params.source_id !== undefined) throw new OperationError('invalid_params', 'Specify the source once.');

@@ -82,6 +82,13 @@ export async function runPersistenceAdministration(engine: BrainEngine, operatio
     if (params.dry_run) return { dry_run: true, action: operation, source_id: sourceId, path: root, current: await getWorktreeBinding(engine, sourceId) };
     return { claimed: true, binding: await claimWorktree(engine, sourceId, root) };
   }
+  if (operation === 'writer_activate') {
+    keys(params, ['confirm_quiesced', 'dry_run']);
+    if (params.confirm_quiesced !== true) throw invalid('Activation requires --confirm-quiesced after upgrading and stopping older writers on every host.');
+    const { activatePersistence } = await import('./activation.ts');
+    return { ...await activatePersistence(engine, { confirmQuiesced: true, dryRun: params.dry_run === true }),
+      ...(params.dry_run ? { dry_run: true, action: operation } : {}) };
+  }
   if (operation === 'writer_transfer_prepare') {
     keys(params, ['source_id', 'dry_run']);
     const sourceId = source(params.source_id);

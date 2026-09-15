@@ -1883,7 +1883,7 @@ Subcommands:
                                     Register a new source. --path must be a git repo
                                     with committed files; --force skips that check.
   list [--json]                     List registered sources with page counts.
-  writer status|claim|transfer      Inspect or explicitly transfer canonical ownership (see writer --help).
+  writer status|claim|activate|transfer  Inspect, activate or transfer canonical ownership (see writer --help).
   remove <id> [--confirm-destructive] [--dry-run]
                                     Permanently delete a source and all its data.
                                     Shows impact preview. Requires --confirm-destructive

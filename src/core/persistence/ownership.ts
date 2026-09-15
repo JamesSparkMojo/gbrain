@@ -5,10 +5,10 @@ import type { BrainEngine } from '../engine.ts';
 import { OperationError } from '../ops/contract.ts';
 import { discoverGitRoot } from '../sync-git.ts';
 import { digest, sha256 } from './digest.ts';
-import { localHostId, persistenceHome, registerLocalWriter } from './identity.ts';
+import { localHostId, persistenceHome } from './identity.ts';
 import type { SqlEngine, WriteRequest } from './model.ts';
 import { acquireNativeLock, tryAcquireNativeLock, type NativeLockHandle } from './native-lock.ts';
-import { refreshManagedFilesystemRoots } from './filesystem-guard.ts';
+import { managedFilesystemDatastorePath, refreshManagedFilesystemRoots } from './filesystem-guard.ts';
 
 export interface WorktreeBinding {
   worktree_id: string;
@@ -59,6 +59,7 @@ export async function claimWorktree(engine: BrainEngine, sourceId: string, path:
       if (current.source_incarnation !== source.incarnation || current.owner_host_id !== hostId || current.local_path !== root) {
         throw new OperationError('writer_transfer_required', 'This source already has an owner or a different binding.', 'Use a verified source writer transfer.');
       }
+      await refreshManagedFilesystemRoots(tx, managedFilesystemDatastorePath(engine));
       return;
     }
     const local = await tx.executeRaw<{ worktree_id: string; local_path: string; coordination_path: string; owner_host_id: string | null }>(
@@ -75,6 +76,7 @@ export async function claimWorktree(engine: BrainEngine, sourceId: string, path:
     }
     await tx.executeRaw(`INSERT INTO persistence_source_bindings(source_id,source_incarnation,worktree_id,relative_path)
       VALUES($1,$2::uuid,$3::uuid,$4)`, [sourceId, source.incarnation, id, relative(root, sourceRoot).split(sep).join('/')]);
+    await refreshManagedFilesystemRoots(tx, managedFilesystemDatastorePath(engine));
   });
   return (await getWorktreeBinding(engine, sourceId, hostId))!;
 }
@@ -94,21 +96,9 @@ export async function guardOwnership(tx: SqlEngine, row: WriteRequest, hostId: s
   }
   return binding;
 }
-export async function activateManagedPersistence(engine: BrainEngine, opts: { pglite?: boolean } = {}): Promise<void> {
-  await registerLocalWriter(engine, 'cli');
-  await registerLocalWriter(engine, 'stdio');
-  const sources = await engine.executeRaw<{ id: string; local_path: string | null }>('SELECT id,local_path FROM sources WHERE archived=false ORDER BY id');
-  const fallback = await engine.getConfig('sync.repo_path');
-  for (const source of sources) {
-    const path = source.local_path || (source.id === 'default' ? fallback : null);
-    if (!path) continue;
-    if (!await getWorktreeBinding(engine, source.id)) {
-      if (!opts.pglite) throw new OperationError('writer_registration_required', `Source '${source.id}' requires explicit canonical owner registration.`, 'Run sources writer claim on its canonical host before activation.');
-      await claimWorktree(engine, source.id, path);
-    }
-  }
-  await engine.executeRaw('UPDATE persistence_brain SET enabled=true,activated_at=COALESCE(activated_at,now()) WHERE singleton=1');
-  await refreshManagedFilesystemRoots(engine);
+export async function activateManagedPersistence(engine: BrainEngine, opts: { confirmQuiesced?: boolean } = {}): Promise<void> {
+  const { activatePersistence } = await import('./activation.ts');
+  await activatePersistence(engine, opts);
 }
 
 /** Deterministic content manifest includes deletions by exact path-set equality. */
@@ -165,6 +155,7 @@ export async function acceptWriterTransfer(engine: BrainEngine, sourceId: string
       await tx.executeRaw(`INSERT INTO persistence_host_bindings(worktree_id,host_id,local_path,coordination_path)
         VALUES($1::uuid,$2::uuid,$3,$4) ON CONFLICT(worktree_id,host_id) DO UPDATE SET local_path=EXCLUDED.local_path,coordination_path=EXCLUDED.coordination_path`, [binding.worktree_id, hostId, root, coordination]);
       await tx.executeRaw(`UPDATE persistence_worktrees SET owner_host_id=$2::uuid,owner_epoch=owner_epoch+1,state='active',heartbeat_at=now() WHERE id=$1::uuid`, [binding.worktree_id, hostId]);
+      await refreshManagedFilesystemRoots(tx, managedFilesystemDatastorePath(engine));
     });
   } finally { await lock.release(); }
 }
