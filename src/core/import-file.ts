@@ -299,6 +299,8 @@ export async function importFromContent(
   opts: {
     /** Coordinator seam: prepare without publishing, then commit under its guarded transaction. */
     prepare?: (prepared: import('./persistence/prepared-import.ts').PreparedContentImport) => Promise<ImportResult>;
+    /** Internal canonical metadata, after protected-body overlays and before hashing. */
+    prepareFrontmatter?: (page: ParsedPage) => void;
     noEmbed?: boolean;
     sourceId?: string;
     /**
@@ -394,7 +396,6 @@ export async function importFromContent(
       error: `Content too large (${byteLength} bytes, max ${MAX_FILE_SIZE}). Split the content into smaller files or remove large embedded assets.`,
     };
   }
-
   const parsed = parseMarkdown(content, slug + '.md', {
     validate: true,
     ...(opts.activePack ? { activePack: opts.activePack } : {}),
@@ -403,9 +404,7 @@ export async function importFromContent(
   if (frontmatterError) {
     return { slug, status: 'error', chunks: 0, error: frontmatterError };
   }
-
   if (!opts.prepare) await assertUnmanagedCanonicalWriter(engine, 'direct content import');
-
   // Canonicalize only free-prose fields before protected-fence parsing, hidden
   // row merging, hashing and indexing. Frontmatter identities stay untouched.
   parsed.title = sanitizeText(parsed.title);
@@ -717,6 +716,7 @@ export async function importFromContent(
   // formula (byte-parity pinned by test/content-hash-parity-3694.test.ts).
   // Sort tags in place first to preserve the pre-#3694 downstream behavior
   // (parsedPage.tags was sorted by the old inline `.sort()` mutation).
+  if (opts.prepare) opts.prepareFrontmatter?.(parsed);
   parsed.tags.sort();
   const hash = contentHash({
     title: parsed.title,

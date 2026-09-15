@@ -39,7 +39,7 @@ import { join } from 'path';
 let engine: PGLiteEngine;
 const get_page = operations.find(o => o.name === 'get_page')!;
 const home = mkdtempSync(join(tmpdir(), 'gbrain-page-sources-'));
-const betaRoot = join(home, 'beta');
+let betaRoot: string;
 let legacyTokenId: string;
 function localMutation(name: string) {
   const op = operations.find(o => o.name === name)!;
@@ -91,7 +91,10 @@ afterAll(async () => {
 beforeEach(async () => {
   await disposePersistenceConsumer(engine);
   await resetPgliteState(engine);
-  mkdirSync(betaRoot, { recursive: true });
+  // Reset creates a new brain identity; give it a fresh physical checkout.
+  // Ownership reservations intentionally survive source deletion and cannot
+  // be recycled across different brains.
+  betaRoot = mkdtempSync(join(home, 'beta-'));
   await engine.executeRaw(`INSERT INTO sources (id, name, local_path) VALUES ('beta', 'beta', $1)`, [betaRoot]);
   for (const sourceId of ['default', 'beta']) await engine.executeRaw(`INSERT INTO oauth_clients(client_id,client_name,scope,source_id,federated_read) VALUES($1,'Source fixture','read write',$2,$3)`, [`source-client-${sourceId}`, sourceId, ['default', 'beta']]);
   const [legacy] = await engine.executeRaw<{ id: string }>(`INSERT INTO access_tokens(name,token_hash,permissions) VALUES('Legacy source fixture','source-fixture-token','{"source_id":"beta"}'::jsonb) RETURNING id`);

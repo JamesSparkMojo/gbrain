@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
 import type { Page, PageVersion } from '../types.ts';
-import { importFromContent } from '../import-file.ts';
+import { importFromContent, type ParsedPage } from '../import-file.ts';
 import { parseMarkdown, serializePageToMarkdown, resolveSourceLocalFilePath } from '../markdown.ts';
 import { OperationError } from '../ops/contract.ts';
 import { assertPageRevision, type PageSnapshot } from '../page-state/types.ts';
@@ -29,6 +29,32 @@ import { preparePageAdvisories, remoteLinkHint, pageNoopAdvisories } from './pag
 function canonical(page: Pick<Page, 'type' | 'title' | 'compiled_truth' | 'timeline' | 'frontmatter'>, tags: string[]) {
   return { type: page.type, title: page.title, compiled_truth: page.compiled_truth, timeline: page.timeline ?? '',
     frontmatter: page.frontmatter, tags: [...new Set(tags)].sort() };
+}
+interface CanonicalProvenance { source_kind: string; ingested_via: string; ingested_at: string; }
+/** Canonical stamps belong to the first write, never to a later preparation attempt. */
+function putProvenance(row: WriteRequest, snapshot: PageSnapshot | null, parsed: ParsedPage): CanonicalProvenance | undefined {
+  if (row.operation !== 'put_page' || !row.worktree_id) return undefined;
+  const keys = ['source_kind', 'ingested_via', 'ingested_at'] as const;
+  for (const key of keys) {
+    delete parsed.frontmatter[key];
+    if (snapshot?.page.frontmatter[key] !== undefined) parsed.frontmatter[key] = snapshot.page.frontmatter[key];
+  }
+  const tags = [...new Set([...(snapshot?.tags ?? []), ...parsed.tags])].sort();
+  if (snapshot && !snapshot.page.deleted_at && digest(canonical(snapshot.page, snapshot.tags)) === digest(canonical(parsed, tags))) {
+    return undefined;
+  }
+  const string = (value: unknown) => typeof value === 'string' && value ? value : undefined;
+  const first = snapshot?.page;
+  const via = row.authority.remote ? 'mcp:put_page' : 'put_page';
+  // Historical frontmatter was caller-controlled. Only trusted provenance
+  // columns may supply a prior channel or timestamp for the first-write record.
+  const stamp: CanonicalProvenance = {
+    source_kind: string(first?.source_kind) ?? string(row.intent?.source_kind) ?? via,
+    ingested_via: string(first?.ingested_via) ?? string(row.intent?.ingested_via) ?? via,
+    ingested_at: new Date(first?.ingested_at ?? row.created_at).toISOString(),
+  };
+  Object.assign(parsed.frontmatter, stamp);
+  return stamp;
 }
 export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequest, 'source_id' | 'worktree_id' | 'slug'>, snapshot: PageSnapshot | null,
   content: string | null, hostId?: string, options: { allowMissing?: boolean } = {}): Promise<PreparedMutation['file']> {
@@ -131,6 +157,7 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
     }
   }
   let prepared: PreparedContentImport | undefined;
+  let provenance: CanonicalProvenance | undefined;
   const result = await importFromContent(engine, row.slug, content, {
     ...source, noEmbed: true, remote: row.authority.remote,
     forceRechunk: row.operation === 'restore_page' || row.operation === 'revert_version',
@@ -138,6 +165,7 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
     source_kind: typeof p.source_kind === 'string' ? p.source_kind : null,
     source_uri: typeof p.source_uri === 'string' ? p.source_uri : null,
     ingested_via: typeof p.ingested_via === 'string' ? p.ingested_via : null,
+    prepareFrontmatter: page => { provenance = putProvenance(row, snapshot, page); },
     prepare: async value => { prepared = value; return value.result; },
   });
   if (!prepared) {
@@ -175,6 +203,8 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
     let autoLinks: Awaited<ReturnType<NonNullable<typeof links>['apply']>> | undefined;
     if (!noop) {
       await ready.apply(tx);
+      if (provenance) await tx.executeRaw(`UPDATE pages SET source_kind=$3,ingested_via=$4,ingested_at=$5::timestamptz
+        WHERE source_id=$1 AND slug=$2`, [row.source_id, row.slug, provenance.source_kind, provenance.ingested_via, provenance.ingested_at]);
       if (row.operation === 'restore_page') await tx.restorePage(row.slug, source);
       if (versionTags) {
         for (const tag of snapshot!.tags) if (!versionTags.includes(tag)) await tx.removeTag(row.slug, tag, source);

@@ -47,8 +47,14 @@ export async function claimWorktree(engine: BrainEngine, sourceId: string, path:
     await runManagedSourceLifecycle(engine,{operation:'claim',sourceId,path});
     return (await getWorktreeBinding(engine,sourceId,hostId))!;
   }
-  const sourceRoot = realpathSync(resolve(path));
-  if (!statSync(sourceRoot).isDirectory()) throw new OperationError('storage_error', 'Configured canonical source root is not a directory.');
+  let sourceRoot: string;
+  try {
+    sourceRoot = realpathSync(resolve(path));
+    if (!statSync(sourceRoot).isDirectory()) throw new Error('not a directory');
+  } catch {
+    throw new OperationError('storage_error', 'Configured canonical source root is unavailable or is not a directory.',
+      'Restore access to the configured source directory before retrying.');
+  }
   let root = sourceRoot;
   try { root = realpathSync(discoverGitRoot(root)); } catch { /* ordinary directory source */ }
   // Probe the native capability before recording ownership. Stable lock lives
