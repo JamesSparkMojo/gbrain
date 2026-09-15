@@ -11,7 +11,11 @@ import type { RuntimeCase } from './matrix-cases.ts';
 export async function runRuntimeMatrix(options: { directUrl: string; pooledUrl: string; manifest?: string }) {
   assertSafeE2eDatabaseUrl(options.directUrl); assertSafeE2eDatabaseUrl(options.pooledUrl);
   const scratch = mkdtempSync(join(tmpdir(), 'gbrain-persistence-matrix-')); const home = join(scratch, 'home'); mkdirSync(home);
-  const admin = postgres(options.directUrl, { max: 1, onnotice() {} });
+  // Other E2E shards disconnect clients of their shared test database between
+  // files. Keep only CREATE/DROP DATABASE/ROLE control on the maintenance DB;
+  // all engine activity uses the fresh test databases recorded below.
+  const controlUrl = new URL(options.directUrl); controlUrl.pathname = '/postgres';
+  const admin = postgres(controlUrl.toString(), { max: 1, onnotice() {} });
   const databases: string[] = []; const roles: string[] = []; const children: ReturnType<typeof spawnWorker>[] = [];
   const manifest: Record<string, any> = { version: 1, runtime: `bun-${Bun.version}`, platform: process.platform,
     architecture: process.arch, managed_persistence: true, started_at: new Date().toISOString(), status: 'running', cases: [], ownership: null };

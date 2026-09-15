@@ -93,7 +93,12 @@ recovery, allowing the next request for that root to proceed.
 
 The same workflow executes `scripts/persistence/matrix.ts`, requiring both
 `DATABASE_URL` (direct test connection) and `GBRAIN_PGBOUNCER_URL` (a real
-transaction-mode pooler with wildcard database routing). Its 24 cells cover
+transaction-mode pooler with wildcard database routing).
+Both supplied database names must pass the test-safety guard. Administrative
+CREATE/DROP statements use the direct server's `postgres` maintenance database,
+so another E2E shard resetting the shared test database cannot terminate this
+connection. Every engine connection still uses a fresh generated test database.
+The 24 cells cover
 direct/pooler transport, RLS on/off under a non-superuser role, ordinary pools
 1/2/3 and shared pools versus a separate direct pool of size one. Each cell
 proves short control progress while the production bulk reservation API
