@@ -56,6 +56,7 @@ async function registrationGrant(engine: BrainEngine, params: Record<string, unk
 
 export async function runPersistenceAdministration(engine: BrainEngine, operation: PersistenceAdminOperation,
   params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (operation === 'writer_sync') return (await import('./sync-administration.ts')).runAuthenticatedSyncSlice(engine, params);
   if (operation === 'writer_status') {
     keys(params, ['source_id', 'probe']);
     if (params.probe !== undefined && typeof params.probe !== 'boolean') throw invalid('probe must be a boolean.');

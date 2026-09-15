@@ -53,7 +53,7 @@ export async function maybeDelegateLocalAdministration(
 ): Promise<LocalDelegationResult> {
   if (config.engine !== 'pglite' || !config.database_path || config.database_url) return { handled: false };
   const holder = inspectLockHolder(config.database_path);
-  if (!holder.held || !holder.serve) return { handled: false };
+  if (!holder.held) return { handled: false };
   const socketPath = persistenceSocketPathForConfig(config);
   if (!socketPath) throw new OperationError('owner_unavailable', 'The PGLite owner has no persistence discovery path.');
   const capability = await requestPersistenceCapabilities(socketPath);
@@ -68,8 +68,8 @@ export async function maybeDelegateLocalAdministration(
 
 /**
  * Mutates params only to retain a generated request ID across local/IPC paths.
- * False means no live serve owns this selected brain; the normal engine path
- * may connect. Once a live serve is observed, every failure is final here:
+ * False means no resident process owns this selected brain; the normal engine path
+ * may connect. Once a resident owner is observed, every failure is final here:
  * never fall through after an unavailable socket or a lost acknowledgment.
  */
 export async function maybeDelegateLocalOperation(
@@ -87,7 +87,7 @@ export async function maybeDelegateLocalOperation(
   const config = persistenceConfigForBrain(hostConfig, brainId, brainId === 'host' ? [] : loadMounts());
   if (config?.engine !== 'pglite' || !config.database_path || config.database_url) return { handled: false };
   const holder = inspectLockHolder(config.database_path);
-  if (!holder.held || !holder.serve) return { handled: false };
+  if (!holder.held) return { handled: false };
   const socketPath = persistenceSocketPathForConfig(config);
   if (!socketPath) throw new OperationError('owner_unavailable', 'The selected PGLite owner has no persistence discovery path.');
 

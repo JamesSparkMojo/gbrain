@@ -66,8 +66,10 @@ CREATE TABLE IF NOT EXISTS sources (
 -- Pre-existing sync.repo_path / sync.last_commit are copied in by the v16
 -- migration, not here; fresh installs have no local_path until \`sources add\`
 -- or the first \`sync\`.
+-- Avoid firing managed BEFORE INSERT guards for an existing seed on restart.
 INSERT INTO sources (id, name, config)
-  VALUES ('default', 'default', '{"federated": true}'::jsonb)
+  SELECT 'default', 'default', '{"federated": true}'::jsonb
+  WHERE NOT EXISTS (SELECT 1 FROM sources WHERE id = 'default')
   ON CONFLICT (id) DO NOTHING;
 
 -- v0.40 Federated Sync v2: partial expression index on config->>'github_repo'

@@ -41,13 +41,21 @@ A durable cursor uses a singleton JSON-array envelope under the private
 `managed-sync` operation in `op_checkpoints`; the immutable manifest is stored
 separately so advancing one page never rewrites the entire discovered file list. Only one page is admitted ahead of
 the scan, and the scan yields after at most 25 pages or 250 milliseconds between
-page publications. Foreground requests on the same root are serviced before the
-next admission. Interruption or a pending owner leaves the cursor and source
+page publications. Foreground requests on the same root receive service first;
+after 25 foreground commits or one second of continuous foreground service, sync
+earns a bounded batch even while new interactive requests continue arriving. Interruption or a pending owner leaves the cursor and source
 checkpoint intact. A later invocation resumes the frozen target; a newer Git
 HEAD is a separate subsequent sync. A revision/file conflict blocks the cursor.
 After inspecting the conflict, `--retry-failed` can start a fresh discovery once
 all earlier admitted requests are terminal. `--skip-failed` cannot advance a
 managed checkpoint past failed receipts.
+
+When PGLite already has a resident owner, the CLI authenticates before opening
+the datastore, including when the owner serves stdio MCP. Sync uses the private
+CLI registration and a strict options envelope; stdio credentials and legacy
+shared-secret sync cannot acquire that authority. The client advances bounded
+RPC slices. If the client exits, accepted page requests can finish, and repeating
+the same options resumes the remaining durable cursor.
 
 The source checkpoint commits only after the entire selected cursor is exhausted
 and every admitted page has a committed receipt. It takes the source-exclusive

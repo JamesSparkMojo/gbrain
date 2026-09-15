@@ -6,7 +6,7 @@ import { OperationError } from '../ops/contract.ts';
 import { currentJobSignal } from '../minions/submission-authority.ts';
 import { digest } from './digest.ts';
 import { getWriteRequest, admitWrite } from './journal.ts';
-import { assertPersistenceAccepting, startPersistenceConsumer, waitForWrite } from './service.ts';
+import { assertPersistenceAccepting, foregroundWriteCompletions, startPersistenceConsumer, waitForWrite } from './service.ts';
 import { discoverManagedSync, readSyncContent, syncRawHash, type SyncDiscovery } from './sync-discovery.ts';
 import { managedSyncAuthority, validateSyncAuthority, validateManagedSyncOptions, type SyncAuthority } from './sync-authority.ts';
 import type { SyncIntent } from './sync-prepare.ts';
@@ -72,7 +72,7 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string): Pr
 }
 
 /** One immutable page is admitted at a time; foreground writes can never sit behind a whole scan. */
-export async function performManagedSync(engine: BrainEngine, opts: SyncOpts): Promise<SyncResult> {
+export async function performManagedSync(engine: BrainEngine, opts: SyncOpts, slice?: { maxPages: number; maxMs: number }): Promise<SyncResult> {
   assertPersistenceAccepting(engine);
   validateManagedSyncOptions(opts);
   const discovery = await discoverManagedSync(engine, opts);
@@ -108,20 +108,30 @@ export async function performManagedSync(engine: BrainEngine, opts: SyncOpts): P
   if (opts.dryRun) return result(cursor, 'dry_run');
   const config = loadConfig() ?? { engine: engine.kind };
   const signal = opts.signal && currentJobSignal() ? AbortSignal.any([opts.signal, currentJobSignal()!]) : opts.signal ?? currentJobSignal();
-  let batchStart = performance.now(), batchPages = 0, foregroundWaitStart = 0;
+  let batchStart = performance.now(), batchPages = 0, foregroundWaitStart = 0, foregroundBaseline = 0;
+  let creditedPages = 0, creditStarted = 0;
+  const sliceStarted = performance.now(), sliceFirstIndex = cursor.index;
   while (!cursor.done) {
+    assertPersistenceAccepting(engine);
     if (signal?.aborted) return result(cursor, 'partial', 'timeout');
     if (!cursor.pending) {
-      // FIFO admission plus this explicit foreground gate guarantees bounded
-      // service to accepted interactive requests even during an enormous sync.
+      // A source remains fair in both directions: foreground gets service,
+      // then sync earns one bounded batch even if new interactive work keeps arriving.
+      if (creditedPages && performance.now() - creditStarted >= 250) creditedPages = 0;
       const [foreground] = await engine.executeRaw(`SELECT id FROM persistence_requests WHERE worktree_id=$1::uuid
         AND state IN ('queued','running','recovering') AND NOT(COALESCE(intent->>'kind','') LIKE 'managed_sync_%') LIMIT 1`, [cursor.binding.worktree_id]);
-      if (foreground) {
-        foregroundWaitStart ||= performance.now();
-        if (performance.now() - foregroundWaitStart > 5000) return result(cursor, 'partial', 'writer_pending');
+      if (foreground && creditedPages === 0) {
         startPersistenceConsumer(engine, config);
-        await new Promise(resolve => setTimeout(resolve, 25));
-        continue;
+        if (!foregroundWaitStart) {
+          foregroundWaitStart = performance.now();
+          foregroundBaseline = foregroundWriteCompletions(engine, cursor.binding.worktree_id);
+        }
+        const completed = foregroundWriteCompletions(engine, cursor.binding.worktree_id) - foregroundBaseline;
+        if (completed < 25 && performance.now() - foregroundWaitStart < 1000) {
+          await new Promise(resolve => setTimeout(resolve, 25));
+          continue;
+        }
+        creditedPages = 25; creditStarted = performance.now();
       }
       foregroundWaitStart = 0;
       cursor = await saveCursor(engine, key, cursor, { ...cursor, pending: await freezeEntry(engine, cursor, key) });
@@ -153,7 +163,9 @@ export async function performManagedSync(engine: BrainEngine, opts: SyncOpts): P
     next.counts.chunks += Number(done.outcome?.chunks ?? 0);
     cursor = await saveCursor(engine, key, cursor, next);
     opts.onProgress?.({ phase: 'managed_sync.page_committed', bankedFiles: cursor.index });
+    if (slice && (cursor.index - sliceFirstIndex >= slice.maxPages || performance.now() - sliceStarted >= slice.maxMs)) return result(cursor, 'partial', 'writer_yield');
     batchPages++;
+    if (creditedPages) creditedPages--;
     if (batchPages >= 25 || performance.now() - batchStart >= 250) {
       opts.onProgress?.({ phase: 'managed_sync.yield', bankedFiles: cursor.index });
       await new Promise(resolve => setTimeout(resolve, 0));

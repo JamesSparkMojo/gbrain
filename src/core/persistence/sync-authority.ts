@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { SyncOpts } from '../../commands/sync.ts';
 import type { BrainEngine } from '../engine.ts';
 import type { OperationContext } from '../ops/contract.ts';
@@ -8,8 +9,16 @@ import { submissionAuthority, authorizeWrite } from './authority.ts';
 import { currentVerifiedLocalWriter, registerLocalWriter } from './identity.ts';
 import type { WriteAuthority } from './model.ts';
 
+const legacyDelegation = new AsyncLocalStorage<boolean>();
+/** A shared-secret caller never gains durable CLI authority across activation. */
+export function withLegacySyncDelegation<T>(run: () => T): T { return legacyDelegation.run(true, run); }
+function assertDurableSyncCaller(): void {
+  if (legacyDelegation.getStore()) throw new OperationError('permission_denied', 'Managed sync requires a durable CLI registration; the shared-secret sync lane cannot supply it.');
+}
+
 export interface SyncAuthority { writer: WriteAuthority; remoteJob?: RemoteJobAuthority; remoteData?: Record<string, unknown>; }
 export async function managedSyncAuthority(engine: BrainEngine, sourceId: string, incarnation: string, repoPath: string): Promise<SyncAuthority> {
+  assertDurableSyncCaller();
   const current = currentSubmissionAuthority();
   if (current?.kind === 'remote_agent') throw new OperationError('permission_denied', 'Agent jobs cannot run bulk filesystem sync.');
   if (current?.kind === 'remote_generic') {
@@ -47,6 +56,7 @@ export async function validateSyncAuthority(engine: BrainEngine, authority: Sync
 
 /** Worker runtime fields are not an avenue to enlarge the accepted wire payload. */
 export function validateManagedSyncOptions(opts: SyncOpts): void {
+  assertDurableSyncCaller();
   const current = currentSubmissionAuthority();
   if (current?.kind !== 'remote_generic') return;
   const allowed = new Set(['repoPath','sourceId','noPull','noEmbed','noExtract','signal','concurrency','onProgress','auto_embed_backfill']);

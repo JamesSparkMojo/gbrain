@@ -16,6 +16,7 @@ export class PersistenceConsumer {
   private tickPromise: Promise<void> | undefined;
   private active = new Set<Promise<void>>();
   private activeRoots = new Set<string>();
+  private foregroundCounts = new Map<string, number>();
   private projectionWorker: Promise<unknown> | undefined;
   private effectsWorker: Promise<void> | undefined;
   private maintenanceWorker: Promise<unknown> | undefined;
@@ -83,6 +84,7 @@ export class PersistenceConsumer {
       this.active.add(task);
     }
   }
+  foregroundCompletions(worktreeId: string): number { return this.foregroundCounts.get(worktreeId) ?? 0; }
   status(): { accepting: boolean; active_preparations: number; active_worktrees: number; last_error?: { code: string; at: string } } {
     return { accepting: !this.stopping, active_preparations: this.active.size, active_worktrees: this.activeRoots.size,
       ...(this.lastError ? { last_error: { ...this.lastError } } : {}) };
@@ -106,7 +108,10 @@ export class PersistenceConsumer {
     try {
       const prepared = await this.prepare(this.engine, row, this.config);
       if (!claimLive || this.stopping) { await releaseUnpublishedClaim(this.engine, row, 'consumer_stopping'); return; }
-      await publishMutation(this.engine, row, prepared, this.hostId);
+      const done = await publishMutation(this.engine, row, prepared, this.hostId);
+      if (done.state === 'committed' && row.worktree_id && !String(row.intent?.kind).startsWith('managed_sync_')) {
+        this.foregroundCounts.set(row.worktree_id, this.foregroundCompletions(row.worktree_id) + 1);
+      }
     } catch (error) {
       const current = await getWriteRequestById(this.engine, row.id);
       if (current && !isTerminal(current) && current.execution_token === row.execution_token && !current.recovery) await finishUnpublishedFailure(this.engine, current, error);

@@ -43,6 +43,9 @@ export async function disposePersistenceConsumer(engine: BrainEngine): Promise<v
   await stopPersistenceConsumer(engine);
   services.delete(engine);
 }
+export function foregroundWriteCompletions(engine: BrainEngine, worktreeId: string): number {
+  return services.get(engine)?.consumer.foregroundCompletions(worktreeId) ?? 0;
+}
 export function persistenceConsumerStatus(engine: BrainEngine) {
   const service = services.get(engine);
   return service ? { state: service.stopping ? 'closing' : 'open', ...service.consumer.status() }

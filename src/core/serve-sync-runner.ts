@@ -40,6 +40,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { withLegacySyncDelegation } from './persistence/sync-authority.ts';
 import type { BrainEngine } from './engine.ts';
 import { registerBackgroundWorkDrainer } from './background-work.ts';
 import {
@@ -165,8 +166,9 @@ export function startDelegatedSync(
     deadlineTimer.unref?.();
   }
 
-  job.settled = (async () => {
+  job.settled = withLegacySyncDelegation(async () => {
     try {
+      await (await import('./persistence/maintenance.ts')).assertUnmanagedCanonicalWriter(engine, 'shared-secret sync delegation');
       const { performSync } = await import('../commands/sync.ts');
       let sourceId = job.sourceId;
       if (!sourceId) {
@@ -217,7 +219,7 @@ export function startDelegatedSync(
       if (deadlineTimer) clearTimeout(deadlineTimer);
       job.finishedAt = Date.now();
     }
-  })();
+  });
 
   return { ok: true, protocol: 2, jobId: job.id };
 }

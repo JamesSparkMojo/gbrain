@@ -52,6 +52,18 @@ afterAll(async () => {
   rmSync(home,{recursive:true,force:true});
 });
 
+test('managed schema restart preserves source and brain identities without triggering a seed write', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+  for (const engine of engines) {
+    const before = await engine.executeRaw('SELECT brain_id FROM persistence_brain WHERE singleton=1');
+    const source = await engine.executeRaw("SELECT incarnation FROM sources WHERE id='default'");
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+    await engine.initSchema();
+    expect(await engine.executeRaw('SELECT brain_id FROM persistence_brain WHERE singleton=1')).toEqual(before);
+    expect(await engine.executeRaw("SELECT incarnation FROM sources WHERE id='default'")).toEqual(source);
+    expect(await engine.executeRaw('SELECT enabled FROM persistence_brain WHERE singleton=1')).toEqual([{enabled:true}]);
+  }
+}),120_000);
+
 test('imports files without rewriting bytes and checkpoints only committed page receipts', async () => withEnv({ GBRAIN_HOME: home }, async () => {
   for (const engine of engines) {
     const bytes = '---\ntitle: Example note\n---\nA stable useful observation about the project.\n';
@@ -168,5 +180,51 @@ test('raw bytes changing after preparation conflict without publishing and the s
     expect(await engine.getPage('a',{sourceId:f.id})).toBeNull(); expect(readFileSync(join(f.root,'a.md'),'utf8')).toBe(newer);
     const replay=await admitWrite(engine,admission); expect(replay.id).toBe(accepted.id); expect(replay.state).toBe('conflict');
     expect((await getWriteRequest(engine,authority.writer.principal,requestId))?.intent).toEqual(intent);
+  }
+}),120_000);
+
+test('continuous foreground arrivals cannot starve a bounded sync batch', async () => withEnv({GBRAIN_HOME:home},async()=>{
+  const { registerMutationPreparer, startPersistenceConsumer, foregroundWriteCompletions } = await import('../src/core/persistence/service.ts');
+  registerMutationPreparer('test_sync_foreground',async()=>{
+    await new Promise(resolve=>setTimeout(resolve,40));
+    return {observedRevision:null,noop:true,apply:async()=>({status:'complete'})};
+  });
+  for(const engine of engines){
+    await disposePersistenceConsumer(engine);
+    const f=await fixture(engine,{'a.md':'A sync observation amid continuous interactive traffic.\n'});
+    const binding=(await getWorktreeBinding(engine,f.id))!;
+    const authority=await managedSyncAuthority(engine,f.id,binding.source_incarnation,f.root);
+    const consumer=startPersistenceConsumer(engine,{engine:engine.kind});
+    let submitted=0,stopping=false,pumping=false;
+    const admitted:Promise<unknown>[]=[];
+    const enqueue=async()=>{
+      const n=submitted++;
+      await admitWrite(engine,{operation:'test_sync_foreground',sourceId:f.id,sourceIncarnation:binding.source_incarnation,
+        slug:`foreground-${n}`,pageId:null,worktreeId:binding.worktree_id,topologyGeneration:binding.topology_generation,
+        principal:authority.writer.principal,authority:authority.writer,callerIntent:{n},intent:{n}});
+    };
+    for(let i=0;i<8;i++)await enqueue();
+    const timer=setInterval(()=>{
+      if(stopping||pumping)return;
+      pumping=true;
+      const work=(async()=>{while(!stopping&&submitted-foregroundWriteCompletions(engine,binding.worktree_id)<8)await enqueue();})()
+        .finally(()=>{pumping=false;});
+      admitted.push(work);
+    },10);
+    let queuedWhenSyncCommitted=0;
+    try{
+      // A loaded test runner may exhaust the per-call acknowledgment budget;
+      // resume the same durable cursor while the foreground producer keeps running.
+      const deadline=performance.now()+30000;
+      let result;
+      do {
+        result=await performManagedSync(engine,{sourceId:f.id,noPull:true,onProgress:p=>{
+          if(p.phase==='managed_sync.page_committed')queuedWhenSyncCommitted=submitted-consumer.foregroundCompletions(binding.worktree_id);
+        }});
+      } while(result.status==='partial'&&result.reason==='writer_pending'&&performance.now()<deadline);
+      expect(result).toMatchObject({status:'first_sync',added:1});
+      expect(queuedWhenSyncCommitted).toBeGreaterThan(0);
+      expect(consumer.foregroundCompletions(binding.worktree_id)).toBeGreaterThan(0);
+    }finally{stopping=true;clearInterval(timer);await Promise.all(admitted);await disposePersistenceConsumer(engine);}
   }
 }),120_000);
