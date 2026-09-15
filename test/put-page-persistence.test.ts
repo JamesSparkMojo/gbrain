@@ -261,7 +261,7 @@ describe('put_page persistence boundary', () => {
 
   test('successful MCP persistence never returns credentials from an embedding error', async () => {
     const slug = 'notes/embed-error-redaction';
-    const credentialUrl = 'https://fixture-user:fixture-password@embed.example/v1?token=fixture-private-token';
+    const credentialUrl = 'https://fixture-user:PLACEHOLDER@embed.example/v1?token=fixture-private-token';
     const bearer = 'Bearer fixture-private-bearer';
     configureGateway({ embedding_model: 'openai:text-embedding-3-small', embedding_dimensions: 1536, env: { OPENAI_API_KEY: 'sk-test' } });
     __setEmbedTransportForTests(async () => {
@@ -272,7 +272,7 @@ describe('put_page persistence boundary', () => {
     expect(result.payload.status).toBe('created_or_updated');
     expect(result.payload.embedding.status).toBe('failed');
     const responseText = JSON.stringify(result.response);
-    for (const sensitive of [credentialUrl, 'fixture-user', 'fixture-password', 'embed.example', 'fixture-private-token', bearer, 'fixture-private-bearer']) {
+    for (const sensitive of [credentialUrl, 'fixture-user', 'PLACEHOLDER', 'embed.example', 'fixture-private-token', bearer, 'fixture-private-bearer']) {
       expect(responseText.includes(sensitive)).toBe(false);
     }
     expect(result.payload.embedding.error).toBe('Page content was saved, but embedding failed. Check the embedding provider and database on the brain host, then run gbrain embed --stale --source <source-id>.');
