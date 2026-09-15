@@ -38,14 +38,17 @@ export async function runDelegatedCliOperation(
 }
 
 export async function runDeferredPersistenceCommand(
-  command: 'capture' | 'forget' | 'call',
+  command: 'capture' | 'forget' | 'call' | 'sources',
   args: string[],
   connect: () => Promise<BrainEngine>,
 ): Promise<void> {
   let connected: BrainEngine | null = null;
   const getEngine = async () => connected ??= await connect();
   try {
-    if (command === 'capture') {
+    if (command === 'sources') {
+      const { runPersistenceAdminCli } = await import('./persistence-admin.ts');
+      await runPersistenceAdminCli('writer', args.slice(1));
+    } else if (command === 'capture') {
       const { runCapture } = await import('./capture.ts');
       await runCapture(null, args, { getEngine });
     } else if (command === 'forget') {

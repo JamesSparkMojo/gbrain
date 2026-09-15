@@ -2889,7 +2889,7 @@ async function handleCliOnly(command: string, args: string[]) {
     }
   }
 
-  if (command === 'capture' || command === 'forget' || command === 'call') {
+  if (command === 'capture' || command === 'forget' || command === 'call' || command === 'sources' && args[0] === 'writer') {
     const { runDeferredPersistenceCommand } = await import('./commands/persistence-delegate.ts');
     await runDeferredPersistenceCommand(command, args, connectEngine);
     return;

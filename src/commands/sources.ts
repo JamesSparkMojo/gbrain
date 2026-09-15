@@ -1794,6 +1794,10 @@ async function runAudit(engine: BrainEngine, args: string[]): Promise<void> {
 export async function runSources(engine: BrainEngine, args: string[]): Promise<void> {
   const sub = args[0];
   const rest = args.slice(1);
+  if (sub === 'writer') {
+    const { runPersistenceAdminCli } = await import('./persistence-admin.ts');
+    return runPersistenceAdminCli('writer', rest, engine);
+  }
 
   // Help guards run BEFORE the subcommand switch below (mirrors jobs.ts
   // src/commands/jobs.ts:462-471 — help checked first-position, then any
@@ -1879,6 +1883,7 @@ Subcommands:
                                     Register a new source. --path must be a git repo
                                     with committed files; --force skips that check.
   list [--json]                     List registered sources with page counts.
+  writer status|claim|transfer      Inspect or explicitly transfer canonical ownership (see writer --help).
   remove <id> [--confirm-destructive] [--dry-run]
                                     Permanently delete a source and all its data.
                                     Shows impact preview. Requires --confirm-destructive

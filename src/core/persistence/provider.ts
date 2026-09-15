@@ -9,6 +9,7 @@ import { registerLocalWriter, withVerifiedLocalRegistration } from './identity.t
 import { startPersistenceConsumer, assertPersistenceAccepting } from './service.ts';
 import { isWriteErrorCode, isWriteReceipt } from './types.ts';
 import type { PersistenceIpcProvider } from './ipc.ts';
+import { runPersistenceAdministration } from './administration.ts';
 
 /** Resident lifecycle owns the consumer; each connection proves its own durable registration. */
 export async function createPersistenceIpcProvider(engine: BrainEngine, config: GBrainConfig): Promise<PersistenceIpcProvider> {
@@ -55,5 +56,11 @@ export async function createPersistenceIpcProvider(engine: BrainEngine, config: 
     if (isWriteErrorCode(body.write_error)) error.writeError = body.write_error;
     if (body.protocol_version === 1) error.protocolVersion = 1;
     throw error;
+  }), administer: request => withVerifiedLocalRegistration(engine, request.registration, async verified => {
+    assertPersistenceAccepting(engine);
+    if (request.brain_id !== brain.brain_id || verified.remote || verified.principal.kind !== 'local_cli') {
+      throw new OperationError('permission_denied', 'Local administration requires this brain’s current trusted CLI registration.');
+    }
+    return runPersistenceAdministration(engine, request.operation, request.params);
   }) };
 }

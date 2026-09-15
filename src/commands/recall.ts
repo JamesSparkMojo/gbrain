@@ -783,8 +783,8 @@ export async function runForget(engine: BrainEngine | (() => Promise<BrainEngine
     const { getCliOptions } = await import('../core/cli-options.ts');
     const cli = getCliOptions();
     const source = sourceValue ?? null;
-    const delegated = await maybeDelegateLocalOperation('forget', { ...params, ...(source ? { source } : {}) }, cfg, {
-      brain: cli.brain, timeoutMs: cli.timeoutMs ?? undefined,
+    const delegated = await maybeDelegateLocalOperation('forget', params, cfg, {
+      brain: cli.brain, source, timeoutMs: cli.timeoutMs ?? undefined,
     });
     let result: { id: string; expired: boolean };
     if (delegated.handled) result = delegated.result as typeof result;

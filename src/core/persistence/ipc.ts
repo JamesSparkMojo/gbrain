@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path';
 import { OperationError } from '../ops/contract.ts';
 import { resolveSocketPathForConfig, socketHasLiveListener } from '../context/resolve-ipc.ts';
 import { isWriteErrorCode, isWriteReceipt, isWriteRequestId, publicWriteReceipt } from './types.ts';
+import { isPersistenceAdminOperation, PERSISTENCE_ADMIN_OPERATIONS, type PersistenceAdminOperation } from './admin-contract.ts';
 
 export const PERSISTENCE_IPC_VERSION = 1;
 // Five million content bytes can require six JSON bytes each (e.g. NUL).
@@ -15,11 +16,13 @@ export const PERSISTENCE_IPC_OPERATIONS = [
   'put_page', 'capture', 'delete_page', 'restore_page', 'revert_version',
   'remember', 'forget', 'get_write_request', 'list_write_requests', 'cancel_write_request',
   'get_page', 'fetch',
+  'add_tag', 'remove_tag', 'add_timeline_entry', 'takes_add', 'takes_update', 'takes_supersede', 'takes_resolve',
 ] as const;
 export type PersistenceIpcOperation = typeof PERSISTENCE_IPC_OPERATIONS[number];
 const OPERATIONS = new Set<string>(PERSISTENCE_IPC_OPERATIONS);
 const MUTATIONS = new Set<string>([
   'put_page', 'capture', 'delete_page', 'restore_page', 'revert_version', 'remember', 'forget',
+  'add_tag', 'remove_tag', 'add_timeline_entry', 'takes_add', 'takes_update', 'takes_supersede', 'takes_resolve',
 ]);
 
 export interface PersistenceIpcRegistration {
@@ -44,12 +47,25 @@ export interface PersistenceIpcCapabilities {
   brain_id: string;
   operations: readonly PersistenceIpcOperation[];
   max_frame_bytes: number;
+  /** Optional for protocol compatibility with owners predating local administration. */
+  administration?: readonly PersistenceAdminOperation[];
+}
+
+export interface PersistenceIpcAdminRequest {
+  version: 1;
+  kind: 'administration';
+  brain_id: string;
+  operation: PersistenceAdminOperation;
+  params: Record<string, unknown>;
+  registration: PersistenceIpcRegistration;
 }
 
 export interface PersistenceIpcProvider {
   brainId: string;
   /** Authenticate registration against the DB, reconstruct context, then dispatch through the registry. */
   dispatch(request: PersistenceIpcRequest): Promise<unknown>;
+  /** Verify the live CLI registration again; never accept stdio or a wire trust assertion. */
+  administer?(request: PersistenceIpcAdminRequest): Promise<unknown>;
 }
 
 export interface PersistenceIpcBinding {
@@ -98,6 +114,13 @@ function operationRequest(value: unknown): value is PersistenceIpcRequest {
   // Wire mutations always have an ID BEFORE bytes are sent. Never allocate
   // an ID on the listener: a lost acknowledgment must be replayable.
   return !isPersistenceIpcMutation(value.operation) || isWriteRequestId(value.params.request_id);
+}
+
+function administrationRequest(value: unknown): value is PersistenceIpcAdminRequest {
+  return record(value) && exactKeys(value, ['version', 'kind', 'brain_id', 'operation', 'params', 'registration'])
+    && value.version === 1 && value.kind === 'administration' && isWriteRequestId(value.brain_id)
+    && isPersistenceAdminOperation(value.operation) && record(value.params)
+    && isPersistenceIpcRegistration(value.registration) && value.registration.lane === 'cli';
 }
 
 function publicError(error: unknown): Record<string, unknown> {
@@ -165,15 +188,17 @@ export async function startPersistenceIpcServer(
             socket.end(responseFrame({ version: 1, ok: true, result: {
               version: 1, brain_id: provider.brainId, operations: PERSISTENCE_IPC_OPERATIONS,
               max_frame_bytes: PERSISTENCE_IPC_MAX_BYTES,
+              ...(provider.administer ? { administration: PERSISTENCE_ADMIN_OPERATIONS } : {}),
             } satisfies PersistenceIpcCapabilities }));
             return;
           }
-          if (!operationRequest(request)) throw new OperationError('invalid_params', 'Invalid persistence request envelope.');
+          if (!operationRequest(request) && !administrationRequest(request)) throw new OperationError('invalid_params', 'Invalid persistence request envelope.');
           if (request.brain_id !== provider.brainId) throw new OperationError('source_changed', 'The persistence listener now serves a different brain.');
           if (active >= PERSISTENCE_IPC_MAX_CONNECTIONS) throw new OperationError('queue_capacity', 'The persistence listener is at capacity; retry this request ID.');
           active++;
           admitted = true;
-          const result = await provider.dispatch(request);
+          if (request.kind === 'administration' && !provider.administer) throw new OperationError('unavailable', 'This owner does not support local administration.');
+          const result = request.kind === 'administration' ? await provider.administer!(request) : await provider.dispatch(request);
           if (!socket.destroyed) socket.end(responseFrame({ version: 1, ok: true, result }));
         } catch (error) {
           if (!socket.destroyed) socket.end(responseFrame({ version: 1, ok: false, error: publicError(error) }));
@@ -228,7 +253,8 @@ export class PersistenceIpcTransportError extends Error {
       submission_status: this.sent ? 'unknown' : 'not_sent',
       suggestion: this.requestId
         ? `Retry the same operation and arguments with request_id ${this.requestId}; do not generate a replacement ID.`
-        : 'Restart the persistence owner, then retry.',
+        : this.sent ? 'Inspect writer status and local registrations before repeating administration; the acknowledgment was lost.'
+          : 'Restart the persistence owner, then retry.',
     };
   }
 }
@@ -292,6 +318,7 @@ export async function requestPersistenceCapabilities(socketPath: string, timeout
   const value = await exchange(socketPath, { version: 1, kind: 'capabilities' }, timeoutMs);
   if (!record(value) || value.version !== 1 || !isWriteRequestId(value.brain_id)
     || !Array.isArray(value.operations) || !value.operations.every(isPersistenceIpcOperation)
+    || value.administration !== undefined && (!Array.isArray(value.administration) || !value.administration.every(isPersistenceAdminOperation))
     || typeof value.max_frame_bytes !== 'number' || !Number.isSafeInteger(value.max_frame_bytes)
     || value.max_frame_bytes < 1 || value.max_frame_bytes > PERSISTENCE_IPC_MAX_BYTES) {
     throw new PersistenceIpcTransportError(false);
@@ -303,4 +330,9 @@ export async function requestPersistenceOperation(socketPath: string, request: P
   if (!operationRequest(request)) throw new OperationError('invalid_params', 'Invalid persistence request envelope.');
   return exchange(socketPath, request, timeoutMs,
     typeof request.params.request_id === 'string' ? request.params.request_id : undefined);
+}
+
+export async function requestPersistenceAdministration(socketPath: string, request: PersistenceIpcAdminRequest, timeoutMs = 30_000): Promise<unknown> {
+  if (!administrationRequest(request)) throw new OperationError('invalid_params', 'Invalid local administration envelope.');
+  return exchange(socketPath, request, timeoutMs);
 }

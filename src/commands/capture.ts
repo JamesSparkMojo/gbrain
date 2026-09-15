@@ -385,9 +385,9 @@ export async function runCapture(engine: BrainEngine | null, args: string[], opt
       result = unpackToolResult<Record<string, unknown>>(raw);
     } else {
       const cli = getCliOptions();
-      const delegated = await maybeDelegateLocalOperation('capture', {
-        ...params, ...(parsed.source ? { source: parsed.source } : {}),
-      }, cfg, { brain: cli.brain, timeoutMs: cli.timeoutMs ?? undefined });
+      const delegated = await maybeDelegateLocalOperation('capture', params, cfg, {
+        brain: cli.brain, source: parsed.source ?? null, timeoutMs: cli.timeoutMs ?? undefined,
+      });
       if (delegated.handled) result = delegated.result as Record<string, unknown>;
       else {
         if (!engine && options.getEngine) engine = await options.getEngine();

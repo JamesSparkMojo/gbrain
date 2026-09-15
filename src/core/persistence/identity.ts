@@ -7,6 +7,7 @@ import { configDir } from '../config.ts';
 import { OperationError } from '../ops/contract.ts';
 import { sha256 } from './digest.ts';
 import type { Principal, SqlEngine } from './model.ts';
+import { acquireNativeLock } from './native-lock.ts';
 
 export interface LocalRegistration { id: string; credential: string; lane: 'cli' | 'stdio'; }
 export interface LocalGrant { sourceIds: string[]; operations: string[] | null; scopes: string[]; slugPrefixes: string[] | null; }
@@ -21,6 +22,14 @@ export async function withVerifiedLocalRegistration<T>(engine: SqlEngine, regist
 }
 const defaultGrant = (): LocalGrant => ({ sourceIds: ['*'], operations: null, scopes: ['read', 'write'], slugPrefixes: null });
 export function persistenceHome(): string { return join(configDir(), 'persistence'); }
+
+function flushRegistrationDirectory(): void {
+  let fd: number | undefined;
+  try { fd = openSync(persistenceHome(), 'r'); fsyncSync(fd); }
+  catch (error) {
+    if (!(process.platform === 'win32' && ['EISDIR', 'EPERM', 'EINVAL', 'ENOTSUP'].includes((error as NodeJS.ErrnoException).code ?? ''))) throw error;
+  } finally { if (fd !== undefined) closeSync(fd); }
+}
 
 /** Exclusive create keeps simultaneous installations on one identity without replacing it. */
 function privateJson<T>(path: string, create: () => T): T {
@@ -51,10 +60,16 @@ async function brainIdentity(engine: SqlEngine): Promise<string> {
 export async function registerLocalWriter(engine: BrainEngine, lane: 'cli' | 'stdio', grant = defaultGrant(), replace = false): Promise<LocalRegistration> {
   const brain = await brainIdentity(engine);
   const path = join(persistenceHome(), `${brain}.${lane}.json`);
-  if (replace && existsSync(path)) {
-    // Rotation is explicit; preserve the old registration file as a recovery record.
-    renameSync(path, `${path}.revoked.${randomUUID()}`);
-  }
+  if (!replace) return ensureLocalWriter(engine, lane, grant, path);
+  const lock = await acquireNativeLock(join(persistenceHome(), 'locks', `${brain}.${lane}.registration.lock`), { timeoutMs: 5000 });
+  if (!lock) throw new OperationError('writer_lock_unavailable', 'Local writer registration is busy.');
+  try {
+    if (existsSync(path)) return await rotateLocalWriter(engine, lane, grant, path);
+    return await ensureLocalWriter(engine, lane, grant, path);
+  } finally { await lock.release(); }
+}
+
+async function ensureLocalWriter(engine: BrainEngine, lane: 'cli' | 'stdio', grant: LocalGrant, path: string): Promise<LocalRegistration> {
   const local = privateJson<LocalRegistration>(path, () => ({ id: randomUUID(), credential: randomBytes(32).toString('hex'), lane }));
   if (local.lane !== lane || typeof local.credential !== 'string' || typeof local.id !== 'string') throw new OperationError('writer_identity_invalid', 'Local writer registration is invalid.');
   const [existing] = await engine.executeRaw<{ revoked_at: unknown; credential_hash: string; lane: string }>(
@@ -64,6 +79,42 @@ export async function registerLocalWriter(engine: BrainEngine, lane: 'cli' | 'st
   await engine.executeRaw(`INSERT INTO persistence_local_writers(id,lane,credential_hash,grant_ceiling)
     VALUES($1::uuid,$2,$3,$4::text::jsonb) ON CONFLICT(id) DO NOTHING`, [local.id, lane, sha256(local.credential), JSON.stringify(grant)]);
   return local;
+}
+
+/** Commit replacement and revocation together, then atomically publish the private credential. */
+async function rotateLocalWriter(engine: BrainEngine, lane: 'cli' | 'stdio', grant: LocalGrant, path: string): Promise<LocalRegistration> {
+  const old = JSON.parse(readFileSync(path, 'utf8')) as LocalRegistration;
+  if (old.lane !== lane || typeof old.id !== 'string' || typeof old.credential !== 'string') {
+    throw new OperationError('writer_identity_invalid', 'Local writer registration is invalid.');
+  }
+  const next: LocalRegistration = { id: randomUUID(), credential: randomBytes(32).toString('hex'), lane };
+  const pending = `${path}.pending.${next.id}`;
+  const fd = openSync(pending, 'wx', 0o600);
+  try { writeFileSync(fd, JSON.stringify(next)); fsyncSync(fd); } finally { closeSync(fd); }
+  flushRegistrationDirectory();
+  let durable = false;
+  try {
+    await engine.transaction(async tx => {
+      const [prior] = await tx.executeRaw<{ credential_hash: string; lane: string }>(
+        'SELECT credential_hash,lane FROM persistence_local_writers WHERE id=$1::uuid FOR UPDATE', [old.id]);
+      if (prior && (prior.lane !== lane || prior.credential_hash !== sha256(old.credential))) {
+        throw new OperationError('permission_denied', 'Local writer credential does not match this registration.');
+      }
+      await tx.executeRaw(`INSERT INTO persistence_local_writers(id,lane,credential_hash,grant_ceiling)
+        VALUES($1::uuid,$2,$3,$4::text::jsonb)`, [next.id, lane, sha256(next.credential), JSON.stringify(grant)]);
+      await tx.executeRaw('UPDATE persistence_local_writers SET revoked_at=COALESCE(revoked_at,now()) WHERE id=$1::uuid', [old.id]);
+    });
+    durable = true;
+    linkSync(path, `${path}.revoked.${next.id}`);
+    renameSync(pending, path); // readers always see one complete credential document
+    flushRegistrationDirectory();
+    return next;
+  } catch (error) {
+    if (!durable) unlinkSync(pending);
+    else throw new OperationError('writer_identity_publish_failed', 'The replacement writer is durable but its credential file could not be published.',
+      `Inspect the preserved private registration files in ${persistenceHome()} before retrying replacement.`);
+    throw error;
+  }
 }
 export async function readLocalWriter(engine: SqlEngine, lane: 'cli' | 'stdio'): Promise<LocalRegistration> {
   const brain = await brainIdentity(engine);

@@ -59,11 +59,11 @@ export async function runCall(
   if (!params || typeof params !== 'object' || Array.isArray(params)) throw new Error('Tool parameters must be a JSON object.');
   // Parse and submit before acquiring PGLite. Keep the generated request ID
   // on the direct path as well, and never reconnect after ambiguous delivery.
-  const wireParams = { ...params, ...(explicitSource ? { source: explicitSource } : {}) };
+  const wireParams = { ...params };
   try {
     const cli = getCliOptions();
     const delegated = await maybeDelegateLocalOperation(tool, wireParams, loadConfig(), {
-      brain: cli.brain, timeoutMs: cli.timeoutMs ?? undefined,
+      brain: cli.brain, source: explicitSource, timeoutMs: cli.timeoutMs ?? undefined,
     });
     if (wireParams.request_id !== undefined) params.request_id = wireParams.request_id;
     if (delegated.handled) {

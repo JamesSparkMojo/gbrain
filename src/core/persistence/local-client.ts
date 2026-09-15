@@ -13,7 +13,9 @@ import {
   isPersistenceIpcMutation, isPersistenceIpcOperation, isPersistenceIpcRegistration,
   persistenceSocketPathForConfig, requestPersistenceCapabilities, requestPersistenceOperation,
   type PersistenceIpcRegistration,
+  requestPersistenceAdministration,
 } from './ipc.ts';
+import type { PersistenceAdminOperation } from './admin-contract.ts';
 
 /** The brain axis must be resolved before inspecting any host lock/socket. */
 export function persistenceConfigForBrain(
@@ -44,6 +46,26 @@ export function readPersistenceCliRegistration(brainId: string): PersistenceIpcR
 
 export type LocalDelegationResult = { handled: false } | { handled: true; result: unknown };
 
+/** Administration uses a separate CLI-only envelope and never manufactures a new credential. */
+export async function maybeDelegateLocalAdministration(
+  operation: PersistenceAdminOperation, params: Record<string, unknown>, config: GBrainConfig,
+  options: { timeoutMs?: number } = {},
+): Promise<LocalDelegationResult> {
+  if (config.engine !== 'pglite' || !config.database_path || config.database_url) return { handled: false };
+  const holder = inspectLockHolder(config.database_path);
+  if (!holder.held || !holder.serve) return { handled: false };
+  const socketPath = persistenceSocketPathForConfig(config);
+  if (!socketPath) throw new OperationError('owner_unavailable', 'The PGLite owner has no persistence discovery path.');
+  const capability = await requestPersistenceCapabilities(socketPath);
+  if (!capability.administration?.includes(operation)) throw new OperationError('owner_unavailable',
+    'The running owner does not support this local administration command.', 'Upgrade and restart the owner before administering this brain.');
+  const registration = readPersistenceCliRegistration(capability.brain_id);
+  const result = await requestPersistenceAdministration(socketPath, {
+    version: 1, kind: 'administration', brain_id: capability.brain_id, operation, params, registration,
+  }, options.timeoutMs);
+  return { handled: true, result };
+}
+
 /**
  * Mutates params only to retain a generated request ID across local/IPC paths.
  * False means no live serve owns this selected brain; the normal engine path
@@ -54,7 +76,7 @@ export async function maybeDelegateLocalOperation(
   operation: string,
   params: Record<string, unknown>,
   hostConfig: GBrainConfig | null,
-  options: { brain?: string | null; cwd?: string; timeoutMs?: number } = {},
+  options: { brain?: string | null; source?: string | null; cwd?: string; timeoutMs?: number } = {},
 ): Promise<LocalDelegationResult> {
   if (!isPersistenceIpcOperation(operation)) return { handled: false };
   if (isPersistenceIpcMutation(operation)) {
@@ -69,11 +91,13 @@ export async function maybeDelegateLocalOperation(
   const socketPath = persistenceSocketPathForConfig(config);
   if (!socketPath) throw new OperationError('owner_unavailable', 'The selected PGLite owner has no persistence discovery path.');
 
-  const explicit = typeof params.source === 'string' ? params.source : null;
+  // Takes' source is claim provenance, independent of the CLI source routing axis.
+  const sourceInParams = options.source === undefined && !operation.startsWith('takes_');
+  const explicit = options.source ?? (sourceInParams && typeof params.source === 'string' ? params.source : null);
   const source = resolveSourceIdEngineFree(explicit, cwd);
   const wireParams = { ...params };
   // These belong to the CLI context/renderer, not the operation schema.
-  delete wireParams.source;
+  if (sourceInParams) delete wireParams.source;
   delete wireParams.json;
   const capability = await requestPersistenceCapabilities(socketPath);
   if (!capability.operations.includes(operation)) {

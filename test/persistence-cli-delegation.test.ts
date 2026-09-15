@@ -92,6 +92,18 @@ describe('CLI-only persistence delegation before engine connection', () => {
     });
   });
 
+  test('generic take mutation preserves provenance source independently of CLI source routing', async () => {
+    await withOwner(async (_dir, calls, connect) => {
+      await runDeferredPersistenceCommand('call', ['--source', 'call-source', 'takes_add', JSON.stringify({
+        slug: 'test/page', claim: 'A claim', kind: 'fact', holder: 'world', source: 'meeting notes', request_id: ID,
+      })], connect);
+      expect(calls[0].operation).toBe('takes_add');
+      expect(calls[0].params.source).toBe('meeting notes');
+      expect(calls[0].routing.source).toBe('call-source');
+      expect(calls[0].params.request_id).toBe(ID);
+    });
+  });
+
   test('capture parses both UUID flag forms and forwards preconditions', () => {
     expect(capture.parseArgs(['body', `--request-id=${ID}`, '--expected-revision', BRAIN])).toMatchObject({
       content: 'body', request_id: ID, expected_revision: BRAIN,
