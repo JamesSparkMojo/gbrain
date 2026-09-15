@@ -65,7 +65,7 @@ test('actual CLI sync and page reads delegate to a real non-serve stdio owner be
   expect(inspectLockHolder(databasePath)).toMatchObject({held:true,serve:false});
   const synced=await cli(['sync','--source','workspace','--no-pull','--exclude','excluded.md','--json','--no-hard-deadline']);
   expect({code:synced.code,err:synced.err}).toMatchObject({code:0});
-  expect(JSON.parse(synced.out)).toMatchObject({status:'first_sync',added:1});
+  expect(JSON.parse(synced.out)).toMatchObject({schema_version:1,source_id:'workspace',sync_status:'first_sync',added:1});
   expect(synced.err).toContain('registered PGLite owner');
   const page=await cli(['call','get_page',JSON.stringify({slug:'a',source_id:'workspace'})]);
   expect({code:page.code,err:page.err}).toMatchObject({code:0});

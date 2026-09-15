@@ -4452,7 +4452,17 @@ export {
 function manageGitignoreAtGitRoot(path: string, engineKind?: 'pglite' | 'postgres'): void {
   let root = path;
   try { root = discoverGitRoot(path); } catch { /* best-effort */ }
-  manageGitignore(root, engineKind);
+  try { manageGitignore(root, engineKind); }
+  catch (error) {
+    // Managed sync already committed through its canonical owner. Ancillary
+    // legacy housekeeping must neither write outside that journal nor turn
+    // the completed sync into a failure before its JSON acknowledgment.
+    if (error instanceof Error && 'code' in error && error.code === 'writer_coordinator_required') {
+      serr('[sync] Skipped automatic .gitignore maintenance for the managed worktree.');
+      return;
+    }
+    throw error;
+  }
 }
 
 export async function runSync(engine: BrainEngine, args: string[]) {

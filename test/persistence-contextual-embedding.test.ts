@@ -115,7 +115,7 @@ for (const kind of ['pglite', 'postgres'] as const) {
       const sourceId = await fixture('none');
       const original = engine.executeRaw;
       let policyReads = 0;
-      engine.executeRaw = async function (sql: string, params?: unknown[]) {
+      engine.executeRaw = async function (this: BrainEngine, sql: string, params?: unknown[]) {
         if (sql.includes('SELECT id, name, local_path, last_commit') && params?.[0] === sourceId) {
           policyReads++;
           if (policyReads === 1) throw Object.assign(new Error('Synthetic source policy serialization failure'), { code: '40001' });

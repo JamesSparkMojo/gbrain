@@ -25,10 +25,16 @@ export async function runAuthenticatedSyncSlice(engine: BrainEngine, params: Rec
       const [brain]=await engine.executeRaw<{enabled:boolean}>('SELECT enabled FROM persistence_brain WHERE singleton=1');
       if(!brain?.enabled) {
         const {performSync}=await import('../../commands/sync.ts');
-        return {...await performSync(engine,{...wire.options,sourceId,signal:controller.signal})};
+        // Delegation bypasses runSync's inline embedding cost/config gate.
+        // Preserve import-only publication; the owner drains accepted embeds.
+        const result=await performSync(engine,{...wire.options,sourceId,noEmbed:true,signal:controller.signal});
+        if(!wire.options.dryRun&&!wire.options.noEmbed&&result.added+result.modified>0) {
+          (await import('../serve-sync-runner.ts')).scheduleDeferredSyncEmbeds(engine,sourceId);
+        }
+        return {...result,source_id:sourceId};
       }
       const {performManagedSync}=await import('./sync-run.ts');
-      return {...await performManagedSync(engine,{...wire.options,sourceId,signal:controller.signal},{maxPages:25,maxMs:1000})};
+      return {...await performManagedSync(engine,{...wire.options,sourceId,signal:controller.signal},{maxPages:25,maxMs:1000}),source_id:sourceId};
     })();
     return await work;
   } finally {if(timer)clearTimeout(timer);unregister();}

@@ -13,6 +13,7 @@ import { deriveDelegatedTimeoutSeconds } from './sync-delegate.ts';
 import { reportPersistenceCliError } from './persistence-delegate.ts';
 import { setCliExitVerdict, writeStdoutFinal } from '../core/cli-force-exit.ts';
 import type { SyncResult } from './sync.ts';
+import { buildSingleSyncJsonEnvelope } from '../core/sync-embed-backfill.ts';
 
 export async function parsePersistenceSyncArgs(args:string[],cwd=process.cwd()) {
   const options:Record<string,unknown>={};
@@ -42,7 +43,7 @@ export async function maybeDelegateSyncToPersistence(hostConfig:GBrainConfig|nul
   try {
     const params=await parsePersistenceSyncArgs(args);
     const deadline=params.timeoutSeconds>0?performance.now()+params.timeoutSeconds*1000:Infinity;
-    let result:SyncResult;
+    let result:SyncResult&{source_id?:string};
     console.error('[sync] Delegating to the registered PGLite owner.');
     for(;;){
       const remaining=deadline-performance.now();
@@ -54,8 +55,13 @@ export async function maybeDelegateSyncToPersistence(hostConfig:GBrainConfig|nul
       if(performance.now()>=deadline){result={...result,reason:'timeout'};break;}
       await new Promise(resolve=>setTimeout(resolve,result.reason==='writer_pending'?250:0));
     }
-    if(args.includes('--json'))await writeStdoutFinal(JSON.stringify(result)+'\n');
-    else (await import('./sync.ts')).printSyncResult(result);
+    if(args.includes('--json'))await writeStdoutFinal(JSON.stringify(buildSingleSyncJsonEnvelope(result.source_id??params.options.sourceId??'default',result))+'\n');
+    else {
+      (await import('./sync.ts')).printSyncResult(result);
+      if(!params.options.dryRun&&!params.options.noEmbed&&result.added+result.modified>0) {
+        console.error('[sync] embeds deferred — the owner drains them using its configured provider and keys.');
+      }
+    }
     if(result.status==='blocked_by_failures'||result.reason==='pull_failed')setCliExitVerdict(1);
     return true;
   }catch(error){
