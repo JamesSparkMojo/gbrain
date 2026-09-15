@@ -71,9 +71,10 @@ export async function runCall(
       return;
     }
   } catch (error) {
-    if (await reportPersistenceCliError(error, true)) return;
+    if (await reportPersistenceCliError(error, true, out)) return;
     throw error;
   }
+  try {
   const connected = typeof engine === 'function' ? await engine() : engine;
   // Resolve through the canonical 6-tier chain. resolveSourceWithTier()
   // throws if an explicit/env/dotfile id refers to a non-registered source.
@@ -95,4 +96,8 @@ export async function runCall(
   // Awaited delivery (#3423): a >64KiB payload piped to a slow reader loses
   // its tail to the exit grace under queued stdout writes.
   await out(JSON.stringify(result, bigintToStringReplacer, 2) + '\n');
+  } catch (error) {
+    if (await reportPersistenceCliError(error, true, out)) return;
+    throw error;
+  }
 }

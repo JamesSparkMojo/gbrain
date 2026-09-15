@@ -4,6 +4,7 @@ import { OperationError } from '../ops/contract.ts';
 import { digest, jsonBytes, requireUuid } from './digest.ts';
 import { authorizeWrite } from './authority.ts';
 import { readJournalLimits } from './limits.ts';
+import { retryWriteAdmission } from './admission-retry.ts';
 import {
   isTerminal, principalKey, requestPrincipal,
   type JournalLimits, type Principal, type RecoveryRecord, type RequestState,
@@ -76,8 +77,9 @@ export async function admitWrite(engine: BrainEngine, input: WriteAdmission, ove
   const bytes = jsonBytes(input.intent) + jsonBytes(input.authority);
   const terminalBytes = input.terminalReservation ?? Math.max(16_384,jsonBytes(input.authority)+8192);
   if (!Number.isSafeInteger(terminalBytes) || terminalBytes < 1024) throw new TypeError('Invalid terminal receipt reservation.');
-  return engine.transaction(async tx => {
-    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout','1s',true),set_config('statement_timeout','5s',true)");
+  return retryWriteAdmission(requestId, remaining => engine.transaction(async tx => {
+    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout',$1,true),set_config('statement_timeout',$2,true)",
+      [`${Math.min(1000, remaining)}ms`, `${remaining}ms`]);
     if (input.worktreeId) {
       await tx.executeRaw('SELECT id FROM persistence_worktrees WHERE id=$1::uuid FOR SHARE', [input.worktreeId]);
       const binding = await tx.executeRaw(`SELECT source_id FROM persistence_source_bindings WHERE source_id=$1
@@ -117,7 +119,7 @@ export async function admitWrite(engine: BrainEngine, input: WriteAdmission, ove
     for (const c of counters) await tx.executeRaw(`UPDATE persistence_counters SET outstanding_count=outstanding_count+1,
       intent_bytes=intent_bytes+$2,lifetime_ids=lifetime_ids+1,terminal_bytes=terminal_bytes+$3 WHERE key=$1`, [c.key, bytes, terminalBytes]);
     return row;
-  });
+  }));
 }
 
 /** Claims commit before OS-lock waits. An unresolved head blocks its entire root. */

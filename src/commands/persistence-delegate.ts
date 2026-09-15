@@ -6,10 +6,11 @@ import { finishCliTeardown, setCliExitVerdict, writeStdoutFinal } from '../core/
 import { maybeDelegateLocalOperation } from '../core/persistence/local-client.ts';
 import { PersistenceIpcTransportError } from '../core/persistence/ipc.ts';
 
-export async function reportPersistenceCliError(error: unknown, json = false): Promise<boolean> {
+export async function reportPersistenceCliError(error: unknown, json = false,
+  out: (payload: string) => Promise<void> = writeStdoutFinal): Promise<boolean> {
   if (!(error instanceof OperationError || error instanceof PersistenceIpcTransportError)) return false;
   const detail = error.toJSON();
-  if (json) await writeStdoutFinal(JSON.stringify(detail, null, 2) + '\n');
+  if (json) await out(JSON.stringify(detail, null, 2) + '\n');
   console.error(error instanceof OperationError ? `Error [${error.code}]: ${error.message}` : error.message);
   if (detail.suggestion) console.error(`Fix: ${detail.suggestion}`);
   setCliExitVerdict(1);

@@ -56,6 +56,54 @@ async function admission(engine: BrainEngine, slug: string, content = 'new', ext
 }
 
 describe('durable mutation journal', () => {
+  test('admission retries a rolled-back transaction with one retained ID and one quota reservation', async () => {
+    for (const engine of engines) {
+      const a = await admission(engine, `admission-retry-${engine.kind}`);
+      let attempts = 0;
+      const retrying = new Proxy(engine, { get(target, property) {
+        if (property === 'transaction') return (run: (tx: BrainEngine) => Promise<unknown>) => target.transaction(async tx => {
+          const result = await run(tx);
+          if (++attempts === 1) throw Object.assign(new Error('injected serialization abort after admission'), { code: '40001' });
+          return result;
+        });
+        const value = Reflect.get(target, property);
+        return typeof value === 'function' ? value.bind(target) : value;
+      } });
+      const before = await engine.executeRaw<{ outstanding_count: string; lifetime_ids: string }>(
+        "SELECT outstanding_count::text,lifetime_ids::text FROM persistence_counters WHERE key='brain'");
+      const accepted = await admitWrite(retrying, a);
+      expect(attempts).toBe(2);
+      expect(accepted.request_id).toBe(a.requestId!);
+      const [after] = await engine.executeRaw<{ outstanding_count: string; lifetime_ids: string }>(
+        "SELECT outstanding_count::text,lifetime_ids::text FROM persistence_counters WHERE key='brain'");
+      expect(Number(after.outstanding_count)).toBe(Number(before[0]?.outstanding_count ?? 0) + 1);
+      expect(Number(after.lifetime_ids)).toBe(Number(before[0]?.lifetime_ids ?? 0) + 1);
+      expect((await admitWrite(engine, a)).id).toBe(accepted.id);
+      await cancelWriteRequest(engine, a.principal, a.requestId!);
+    }
+  });
+
+  test('Postgres admission survives a real counter lock held beyond one SQL lock deadline', async () => {
+    const engine = engines.find(candidate => candidate.kind === 'postgres');
+    if (!engine) return;
+    const a = await admission(engine, 'admission-counter-contention');
+    let held!: () => void;
+    const ready = new Promise<void>(resolve => { held = resolve; });
+    const blocker = engine.transaction(async tx => {
+      await tx.executeRaw("SELECT key FROM persistence_counters WHERE key='brain' FOR UPDATE");
+      held();
+      await new Promise(resolve => setTimeout(resolve, 1400));
+    });
+    await ready;
+    try {
+      const accepted = await admitWrite(engine, a);
+      expect(accepted.state).toBe('queued');
+      expect(accepted.request_id).toBe(a.requestId!);
+      expect((await admitWrite(engine, a)).id).toBe(accepted.id);
+      await cancelWriteRequest(engine, a.principal, a.requestId!);
+    } finally { await blocker; }
+  });
+
   test('activation rejects legacy canonical writers but accepts guarded publication', async () => {
     for (const engine of engines) {
       await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');

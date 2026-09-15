@@ -71,6 +71,10 @@ UUID, without fabricating a queued receipt or opening another PGLite engine.
 Legacy callers that omit a request ID and lose the entire acknowledgment cannot
 recover exact replay identity from the content alone.
 
+Admission retries confirmed database lock/serialization aborts for up to five
+seconds using the same UUID. Persistent contention returns a storage error with
+that UUID and no fabricated queued receipt. Keep the ID for the next attempt.
+
 ## Frozen memory verbs
 
 `remember` and `forget` accept optional `request_id`. Their frozen success enums

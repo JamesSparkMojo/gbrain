@@ -16,11 +16,17 @@ versions, tags or chunks. A same-body hash is insufficient for a prepared no-op:
 canonical metadata and additive tags must also match. Legacy hash repairs and
 unchanged-file skips acquire the same page guard and compare revisions.
 
+Source add, archive, restore, remove, purge, path rebind and managed reclone use
+native exclusion and guarded topology transactions. Directory replacement also
+reserves recovery space and records its beforeimage before publication. Source
+incarnations fence old queued requests; lifecycle replay retains its original
+outcome even after a source is removed and recreated.
+
 Unsupported direct writers fail closed after managed activation. SQL triggers
 cover pages, tags, slug aliases, free-text aliases, facts, takes, timeline entries
-and sources. Physical embeddings/index telemetry remain projections. Import,
-source clone/remove/reclone/archive/restore/purge, connector sync, unmanaged import variants,
-engine migration, manual link edits, schema link rewrites, synthesis, patterns
+and sources. Physical embeddings/index telemetry remain projections. Connector
+materialization, unmanaged import variants, engine migration, manual link edits,
+schema link rewrites, synthesis, patterns
 and phantom redirect refuse before their first canonical side effect. Legacy
 maintenance that reaches a canonical engine mutation is rejected by the SQL
 trigger. Extracted links are derived projections; manually authored link API
