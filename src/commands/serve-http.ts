@@ -2133,7 +2133,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       if (req.path.startsWith('/admin/api/') || req.path === '/admin/events' || req.path === '/admin/login') {
         return next();
       }
-      res.sendFile(path.join(adminDistPath, 'index.html'));
+      res.sendFile('index.html', { root: adminDistPath }); // Exclude hidden checkout ancestors from dotfile checks.
     });
   } else {
     // Embedded path. Read assets from the generated manifest. Cache the
