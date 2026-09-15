@@ -9,6 +9,8 @@ interface NativeBinding {
   openLock(path: string): object;
   tryLock(handle: object): boolean;
   close(handle: object): void;
+  openIpcMutex?(name: string): object;
+  removeWindowsUnixSocket?(handle: object, path: string): boolean;
 }
 
 export class NativeLockUnavailableError extends Error {
@@ -35,6 +37,7 @@ export interface NativeLockOptions {
 }
 
 let bindingPromise: Promise<NativeBinding> | undefined;
+const windowsSocketRemovers = new WeakMap<NativeLockHandle, (path: string) => boolean>();
 
 async function loadBinding(): Promise<NativeBinding> {
   const arch = process.arch;
@@ -67,6 +70,9 @@ async function loadBinding(): Promise<NativeBinding> {
     } else throw new NativeLockUnavailableError(`Native writer locking does not support ${process.platform}/${arch}`);
     if (binding.target !== target || typeof binding.openLock !== 'function' || typeof binding.tryLock !== 'function' || typeof binding.close !== 'function') {
       throw new NativeLockUnavailableError('Installed native writer lock addon has the wrong target or ABI');
+    }
+    if (process.platform === 'win32' && (typeof binding.openIpcMutex !== 'function' || typeof binding.removeWindowsUnixSocket !== 'function')) {
+      throw new NativeLockUnavailableError('Installed native writer lock addon lacks Windows IPC support');
     }
     return binding;
   } catch (cause) {
@@ -118,7 +124,14 @@ export async function acquireNativeLock(path: string, options: NativeLockOptions
       let acquired: boolean;
       try { acquired = binding.tryLock(handle); }
       catch (cause) { throw new NativeLockUnavailableError('The OS could not acquire the writer lock', cause); }
-      if (acquired) return { get released() { return released; }, release };
+      if (acquired) {
+        const guard = { get released() { return released; }, release };
+        if (process.platform === 'win32') windowsSocketRemovers.set(guard, socketPath => {
+          if (path !== `${socketPath}.bind.lock`) throw new NativeLockUnavailableError('The retained claim belongs to another IPC path');
+          return binding.removeWindowsUnixSocket!(handle, socketPath);
+        });
+        return guard;
+      }
       const remaining = deadline - performance.now();
       if (remaining <= 0) { await release(); return null; }
       await delay(Math.min(pollMs, remaining), undefined, { signal });
@@ -131,4 +144,38 @@ export async function acquireNativeLock(path: string, options: NativeLockOptions
 
 export function tryAcquireNativeLock(path: string): Promise<NativeLockHandle | null> {
   return acquireNativeLock(path, { timeoutMs: 0 });
+}
+
+/** Named pipes share one kernel identity across homes and Windows sessions. */
+export async function tryAcquireNativeIpcMutex(name: string): Promise<NativeLockHandle | null> {
+  if (process.platform !== 'win32' || !/^[\\/]{2}[.?][\\/]pipe[\\/][^\\/]/i.test(name) || name.includes('\0')) throw new TypeError('Expected a Windows named-pipe address');
+  const binding = await (bindingPromise ??= loadBinding());
+  let handle: object;
+  try { handle = binding.openIpcMutex!(name); }
+  catch (cause) { throw new NativeLockUnavailableError('Cannot open the Windows IPC binding claim', cause); }
+  let released = false;
+  const release = async () => {
+    if (released) return;
+    try { binding.close(handle); }
+    catch (cause) { throw new NativeLockUnavailableError('Cannot close the Windows IPC binding claim; this host must stop publishing', cause); }
+    released = true;
+  };
+  try {
+    if (binding.tryLock(handle)) return { get released() { return released; }, release };
+    await release();
+    return null;
+  } catch (cause) {
+    await release();
+    throw new NativeLockUnavailableError('Cannot acquire the Windows IPC binding claim', cause);
+  }
+}
+
+/** The native side requires the same still-held opaque file-lock handle. */
+export function removeNativeWindowsUnixSocket(path: string, claim: NativeLockHandle): boolean {
+  const remove = windowsSocketRemovers.get(claim);
+  if (process.platform !== 'win32' || claim.released || !remove || !isAbsolute(path) || path.includes('\0')) {
+    throw new NativeLockUnavailableError('Cannot remove an IPC socket without its retained binding claim');
+  }
+  try { return remove(path); }
+  catch (cause) { throw new NativeLockUnavailableError('Cannot verify and remove the stale Windows IPC socket', cause); }
 }

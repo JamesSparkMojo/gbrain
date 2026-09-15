@@ -149,7 +149,8 @@ export async function startPersistenceIpcServer(
   if (await socketHasLiveListener(socketPath)) { await binding.release(); return null; }
   try {
     // Refuse to remove ordinary files or symlinks from the discovery path.
-    if (!isWindowsIpcPipe(socketPath)) {
+    if (binding.removeStaleWindowsSocket) binding.removeStaleWindowsSocket();
+    else if (!isWindowsIpcPipe(socketPath)) {
       if (!lstatSync(socketPath).isSocket()) throw new Error('Persistence IPC path is not a socket.');
       unlinkSync(socketPath);
     }

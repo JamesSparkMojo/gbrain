@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto';
 import { accessSync, chmodSync, constants, lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { tryAcquireNativeLock } from '../persistence/native-lock.ts';
+import { removeNativeWindowsUnixSocket, tryAcquireNativeIpcMutex, tryAcquireNativeLock } from '../persistence/native-lock.ts';
+import { windowsPipeName } from './windows-ipc.ts';
 
 // Darwin sockaddr_un.sun_path is 104 bytes including the terminating NUL.
 // https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/un.h
 export const UNIX_SOCKET_PATH_MAX_BYTES = 103;
-function pipe(path: string): boolean { return process.platform === 'win32' && /^\\\\[.?]\\pipe\\/i.test(path); }
+function pipe(path: string): boolean { return process.platform === 'win32' && /^[\\/]{2}[.?][\\/]pipe[\\/]/i.test(path); }
 function systemRoot(): string { return process.platform === 'darwin' ? '/private/tmp' : '/tmp'; }
 function uid(): number {
   const value = process.getuid?.();
@@ -45,7 +46,7 @@ function missing(error: unknown): boolean { return (error as NodeJS.ErrnoExcepti
 /** Validate private fallback entries before connect, probe, or bind; never repair a squatted directory. */
 export function prepareLocalIpcPath(legacyPath: string, createParent = false, probe = false): string {
   const path = localIpcSocketPath(legacyPath);
-  if (pipe(path)) return path;
+  if (pipe(path)) return windowsPipeName(path);
   if (!fallback(path)) {
     if (createParent) {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -75,13 +76,18 @@ export function prepareLocalIpcPath(legacyPath: string, createParent = false, pr
 }
 
 /** A live server retains this kernel claim across probe/unlink/listen and until actual close. */
-export async function claimLocalIpcBinding(legacyPath: string): Promise<{ socketPath: string; release(): Promise<void> } | null> {
+export async function claimLocalIpcBinding(legacyPath: string): Promise<{ socketPath: string; release(): Promise<void>; removeStaleWindowsSocket?(): void } | null> {
   const socketPath = prepareLocalIpcPath(legacyPath, true);
-  // Named pipes have no stale filesystem entry to unlink; listen is already
-  // an atomic kernel claim. Their names and Windows security remain intact.
-  if (pipe(socketPath)) return { socketPath, async release() {} };
+  // Bun's older Windows pipe listener misclassifies a competing bind and can
+  // crash during its failed-listen cleanup. Claim before any probe or listen.
+  if (pipe(socketPath)) {
+    const lock = await tryAcquireNativeIpcMutex(windowsPipeName(socketPath));
+    return lock ? { socketPath, release: () => lock.release() } : null;
+  }
   const lock = await tryAcquireNativeLock(`${resolve(socketPath)}.bind.lock`);
-  return lock ? { socketPath, release: () => lock.release() } : null;
+  return lock ? { socketPath, release: () => lock.release(),
+    ...(process.platform === 'win32' ? { removeStaleWindowsSocket: () => { removeNativeWindowsUnixSocket(resolve(socketPath), lock); } } : {}),
+  } : null;
 }
 
 export function isWindowsIpcPipe(path: string): boolean { return pipe(path); }

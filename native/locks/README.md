@@ -18,6 +18,24 @@ An unavailable addon or an OS error produces `writer_lock_unavailable`.
 There is no timestamp, PID, or TTL ownership fallback. A close failure must
 stop publication; it cannot be treated as successful relinquishment.
 
+Windows IPC adds two narrowly scoped operations in `windows-ipc.h`. Named
+pipes retain a nonblocking Global kernel mutex from before probing through
+the listener's actual close. Windows invariant Unicode uppercase plus CNG
+SHA-256 gives case and prefix aliases one identity independent of homes and
+logon sessions. The environment registry and a small shared kernel owner record
+prevent recursive acquisition through separate addon copies on the same thread;
+opaque finalizers and cleanup release on the owning thread. Failed finalizer
+release retains the handle and registry reference until verified cleanup.
+Abandoned mutexes are acquired only through the kernel. Namespace permission
+errors refuse binding.
+
+For a provably dead Windows AF_UNIX listener, cleanup requires a still-held
+opaque file binding claim. It opens the leaf without following reparse
+points, verifies `IO_REPARSE_TAG_AF_UNIX`, and marks that exact handle for
+deletion. Ordinary files, directories, other reparse tags and access errors
+are refused. This avoids treating Bun's stale-socket `lstat` errors as proof
+that an arbitrary filesystem entry may be removed.
+
 ## Distribution and reproducible builds
 
 All eight addons are checked in, so source installs work with
@@ -37,6 +55,8 @@ from the running executable through `windows-napi.h`, including renamed
 compiled CLIs. It never loads a separate `node.exe`. A process-wide once
 guard publishes the complete function table before any API call; missing
 exports refuse registration without borrowing another runtime's environment.
+The Windows IPC helpers link the OS-provided `bcrypt` CNG library and remain
+within Node-API v3 and the existing Windows platform minimum.
 
 Use the pinned Zig 0.14.1 compiler. Archive URLs, SHA-256 hashes and sizes
 are in `scripts/native/toolchain.json`; setup verifies them before extracting.

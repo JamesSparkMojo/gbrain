@@ -32,9 +32,19 @@ typedef int os_handle;
 #endif
 
 typedef struct lock_state lock_state;
+#ifdef _WIN32
+typedef struct ipc_mutex_owner { DWORD process_id; DWORD thread_id; } ipc_mutex_owner;
+#endif
 typedef struct lock_handle {
   os_handle handle;
   bool locked;
+#ifdef _WIN32
+  char *mutex_name;
+  DWORD owning_thread;
+  HANDLE mutex_owner_mapping;
+  volatile ipc_mutex_owner *mutex_owner;
+  bool finalized;
+#endif
   struct lock_handle *next;
   lock_state *owner;
 } lock_handle;
@@ -56,11 +66,30 @@ static napi_value fail(napi_env env, const char *action, unsigned long code) {
  * and retrying can close an unrelated, newly reused descriptor. */
 static unsigned long close_handle(lock_handle *lock) {
   if (lock->handle == INVALID_LOCK_HANDLE) return 0;
+#ifdef _WIN32
+  if (lock->mutex_name && lock->locked) {
+    /* Mutex release is thread-affine. NAPI handles cannot leave their owning
+     * environment; an unexpected finalizer thread must not pretend to close. */
+    if (lock->owning_thread != GetCurrentThreadId()) return ERROR_NOT_OWNER;
+    lock->mutex_owner->process_id = 0;
+    lock->mutex_owner->thread_id = 0;
+    if (!ReleaseMutex(lock->handle)) {
+      lock->mutex_owner->process_id = GetCurrentProcessId();
+      lock->mutex_owner->thread_id = lock->owning_thread;
+      return GetLastError();
+    }
+  }
+#endif
   os_handle handle = lock->handle;
   lock->handle = INVALID_LOCK_HANDLE;
   lock->locked = false;
 #ifdef _WIN32
-  return CloseHandle(handle) ? 0 : GetLastError();
+  unsigned long error = CloseHandle(handle) ? 0 : GetLastError();
+  if (lock->mutex_owner && !UnmapViewOfFile((const void *)lock->mutex_owner) && !error) error = GetLastError();
+  if (lock->mutex_owner_mapping && !CloseHandle(lock->mutex_owner_mapping) && !error) error = GetLastError();
+  lock->mutex_owner = NULL;
+  lock->mutex_owner_mapping = NULL;
+  return error;
 #else
   return close(handle) == 0 ? 0 : (unsigned long)errno;
 #endif
@@ -74,10 +103,19 @@ static void finalize_lock(napi_env env, void *data, void *hint) {
   (void)env; (void)hint;
   lock_handle *lock = data;
   lock_state *state = lock->owner;
+#ifdef _WIN32
+  /* A failed release must retain both its handle and registry reference for
+   * owning-environment cleanup; never free the only tracked unreleased lock. */
+  if (close_handle(lock) != 0) { lock->finalized = true; return; }
+#else
   close_handle(lock);
+#endif
   lock_handle **cursor = &state->handles;
   while (*cursor && *cursor != lock) cursor = &(*cursor)->next;
   if (*cursor) *cursor = lock->next;
+#ifdef _WIN32
+  free(lock->mutex_name);
+#endif
   free(lock);
   release_state(state);
 }
@@ -85,7 +123,20 @@ static void finalize_lock(napi_env env, void *data, void *hint) {
 static void cleanup(void *data) {
   lock_state *state = data;
   state->closing = true;
+#ifdef _WIN32
+  lock_handle **cursor = &state->handles;
+  while (*cursor) {
+    lock_handle *lock = *cursor;
+    unsigned long error = close_handle(lock);
+    if (lock->finalized && !error) {
+      *cursor = lock->next;
+      free(lock->mutex_name); free(lock);
+      release_state(state);
+    } else cursor = &lock->next;
+  }
+#else
   for (lock_handle *lock = state->handles; lock; lock = lock->next) close_handle(lock);
+#endif
   release_state(state);
 }
 
@@ -178,6 +229,10 @@ static napi_value open_lock(napi_env env, napi_callback_info info) {
   return object;
 }
 
+#ifdef _WIN32
+#include "windows-ipc.h"
+#endif
+
 static napi_value try_lock(napi_env env, napi_callback_info info) {
   lock_handle *lock = get_lock(env, info);
   if (!lock) return NULL;
@@ -185,6 +240,29 @@ static napi_value try_lock(napi_env env, napi_callback_info info) {
   bool acquired = lock->locked;
   if (!acquired) {
 #ifdef _WIN32
+    if (lock->mutex_name) {
+      /* Windows mutexes recurse for their owning thread. Refuse a separate
+       * handle in this environment before asking the kernel to acquire. */
+      for (lock_handle *other = lock->owner->handles; other; other = other->next) {
+        if (other != lock && other->locked && other->mutex_name &&
+            strcmp(other->mutex_name, lock->mutex_name) == 0) goto lock_result;
+      }
+      DWORD result = WaitForSingleObject(lock->handle, 0);
+      if (result == WAIT_OBJECT_0 || result == WAIT_ABANDONED) {
+        /* A copied DLL has another environment registry on the same thread.
+         * Kernel-backed owner metadata makes recursion visible across copies.
+         * An abandoned owner's metadata cannot veto the kernel's handoff. */
+        if (result == WAIT_OBJECT_0 && lock->mutex_owner->process_id == GetCurrentProcessId() &&
+            lock->mutex_owner->thread_id == GetCurrentThreadId()) {
+          if (!ReleaseMutex(lock->handle)) return fail(env, "undo recursive IPC mutex", GetLastError());
+          goto lock_result;
+        }
+        lock->mutex_owner->process_id = GetCurrentProcessId();
+        lock->mutex_owner->thread_id = GetCurrentThreadId();
+        acquired = true;
+        lock->owning_thread = GetCurrentThreadId();
+      } else if (result != WAIT_TIMEOUT) return fail(env, "acquire IPC mutex", GetLastError());
+    } else {
     OVERLAPPED offset = {0};
     acquired = LockFileEx(lock->handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
         0, 1, 0, &offset) != 0;
@@ -192,12 +270,16 @@ static napi_value try_lock(napi_env env, napi_callback_info info) {
       DWORD error = GetLastError();
       if (error != ERROR_LOCK_VIOLATION) return fail(env, "acquire", error);
     }
+    }
 #else
     acquired = flock(lock->handle, LOCK_EX | LOCK_NB) == 0;
     if (!acquired && errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR)
       return fail(env, "acquire", (unsigned long)errno);
 #endif
   }
+#ifdef _WIN32
+lock_result:
+#endif
   lock->locked = acquired;
   napi_value result;
   if (napi_get_boolean(env, acquired, &result) != napi_ok) return NULL;
@@ -229,9 +311,13 @@ NAPI_MODULE_INIT() {
     {"openLock", NULL, open_lock, NULL, NULL, NULL, napi_default, state},
     {"tryLock", NULL, try_lock, NULL, NULL, NULL, napi_default, state},
     {"close", NULL, close_lock, NULL, NULL, NULL, napi_default, state},
+#ifdef _WIN32
+    {"openIpcMutex", NULL, open_ipc_mutex, NULL, NULL, NULL, napi_default, state},
+    {"removeWindowsUnixSocket", NULL, remove_windows_unix_socket, NULL, NULL, NULL, napi_default, state},
+#endif
   };
   napi_value target;
-  if (napi_define_properties(env, exports, 3, properties) != napi_ok ||
+  if (napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties) != napi_ok ||
       napi_create_string_utf8(env, GBRAIN_NATIVE_TARGET, NAPI_AUTO_LENGTH, &target) != napi_ok ||
       napi_set_named_property(env, exports, "target", target) != napi_ok) return NULL;
   return exports;

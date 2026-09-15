@@ -20,7 +20,7 @@ const repo = resolve(import.meta.dir, '../..');
 const nativeDir = join(repo, 'native/locks');
 export const buildInputs = [
   'native/locks/locks.c', 'native/locks/darwin-abi.h', 'native/locks/abi-check.c',
-  'native/locks/windows-napi.h', 'native/locks/vendor/node-v22.15.0/node_api.h',
+  'native/locks/windows-napi.h', 'native/locks/windows-ipc.h', 'native/locks/vendor/node-v22.15.0/node_api.h',
   'native/locks/vendor/node-v22.15.0/node_api_types.h',
   'native/locks/vendor/node-v22.15.0/js_native_api.h',
   'native/locks/vendor/node-v22.15.0/js_native_api_types.h',
@@ -41,6 +41,7 @@ function build(target: NativeTarget, output: string, zig: string): void {
     '-Inative/locks/vendor/node-v22.15.0', '-ffile-prefix-map=.=gbrain',
     'native/locks/locks.c', '-o', join(output, `${target}.node`)];
   if (target.startsWith('darwin-')) args.push('-ffreestanding', '-nostdlib', '-Wl,-undefined,dynamic_lookup', `-Wl,-install_name,@rpath/gbrain-lock-${target}.node`);
+  else if (target.startsWith('win32-')) args.push('-lbcrypt');
   else if (!target.startsWith('win32-')) args.push('-Wl,--build-id=none');
   execFileSync(zig, args, { cwd: repo, stdio: 'inherit', env: { ...process.env, SOURCE_DATE_EPOCH: '1745280000' } });
   if (target.startsWith('win32-')) rmSync(join(output, 'locks.lib'), { force: true });

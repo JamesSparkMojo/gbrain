@@ -2,7 +2,7 @@
   "version": 1,
   "napi": 3,
   "zig": "0.14.1",
-  "input_sha256": "0117ff84bb1731cec15c0ca36e4e81f0b452203090ee41f0e1c8ca519abc28a3",
+  "input_sha256": "4759bdd927c0c0fa29c2d5af30e42972a183f9be006d595144d73b6ca1111636",
   "artifacts": {
     "linux-x64-glibc": {
       "sha256": "1a8b15c6be3f0ada433a5c1e6558b913641fde7f6daf72b9c37f54e4bfebb3fa",
@@ -29,12 +29,12 @@
       "bytes": 52288
     },
     "win32-x64": {
-      "sha256": "38254ad60065a3df637f06f19e6374edd1e5199d1ea746a73b249a0f3be20991",
-      "bytes": 22528
+      "sha256": "0b494ec94896219a3b142b6f216bf12c9ee94d27fa7e7399bcdab707ca60212e",
+      "bytes": 28160
     },
     "win32-arm64": {
-      "sha256": "5a043e135e3a51857674e03093178bc68d6eae779b14ac294513e76319448368",
-      "bytes": 18944
+      "sha256": "e8315b4453dce3df775eeb76c73e8895c273390e64b16a2c255e10790fa75dd7",
+      "bytes": 24576
     }
   }
 }

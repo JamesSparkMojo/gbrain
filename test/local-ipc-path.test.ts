@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import net, { type Server, type Socket } from 'node:net';
 import { once } from 'node:events';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -10,6 +10,8 @@ import { ipcSecretPathForConfig, resolveSocketPathForConfig, resolveViaIpc, sock
 import { persistenceSocketPathForConfig, requestPersistenceCapabilities, requestPersistenceOperation, startPersistenceIpcServer } from '../src/core/persistence/ipc.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { waitFor } from './helpers/wait-for.ts';
+import { windowsPipeName } from '../src/core/context/windows-ipc.ts';
+import { tryAcquireNativeIpcMutex } from '../src/core/persistence/native-lock.ts';
 
 const BRAIN = '10000000-0000-4000-8000-000000000001';
 const ID = '20000000-0000-4000-8000-000000000001';
@@ -202,6 +204,7 @@ describe.skipIf(process.platform === 'win32')('portable private Unix IPC', () =>
     const root = temporary(), context = join(root, 'src/core/context'), persistence = join(root, 'src/core/persistence');
     mkdirSync(context, { recursive: true }); mkdirSync(persistence, { recursive: true });
     cpSync(resolve(import.meta.dir, '../src/core/context/ipc-path.ts'), join(context, 'ipc-path.ts'));
+    cpSync(resolve(import.meta.dir, '../src/core/context/windows-ipc.ts'), join(context, 'windows-ipc.ts'));
     cpSync(resolve(import.meta.dir, '../src/core/persistence/native-lock.ts'), join(persistence, 'native-lock.ts'));
     cpSync(dirname(require.resolve('detect-libc/package.json')), join(root, 'node_modules/detect-libc'), { recursive: true });
     const socket = join(root, 'socket'), selected = localIpcSocketPath(socket);
@@ -214,10 +217,11 @@ describe.skipIf(process.platform === 'win32')('portable private Unix IPC', () =>
   });
 });
 
-test('Windows named-pipe addresses and atomic kernel binding remain unchanged', async () => {
-  const code = `Object.defineProperty(process,'platform',{value:'win32'}); const api=await import(process.argv[1]); const path=String.raw\`\\\\.\\pipe\\gbrain-${'x'.repeat(120)}\`; if(api.localIpcSocketPath(path)!==path) throw Error('renamed'); const binding=await api.claimLocalIpcBinding(path); if(binding?.socketPath!==path) throw Error('not retained'); await binding.release();`;
-  const child = Bun.spawn([process.execPath, '--no-env-file', '-e', code, resolve(import.meta.dir, '../src/core/context/ipc-path.ts')], { stdout: 'pipe', stderr: 'pipe' });
-  expect(await child.exited).toBe(0);
+test('Windows pipe prefix normalization is pure and preserves the complete Unicode name', () => {
+  const name = `example-${'界'.repeat(120)}-Σ`;
+  const canonical = `\\\\.\\pipe\\${name}`;
+  for (const prefix of ['\\\\.\\pipe\\', '\\\\?\\PIPE\\', '//./pipe/', '//?/PiPe/']) expect(windowsPipeName(prefix + name)).toBe(canonical);
+  for (const invalid of ['relative', '\\\\server\\pipe\\name', '\\\\.\\pipe\\', '\\\\.\\pipe\\bad\0name']) expect(() => windowsPipeName(invalid)).toThrow();
 });
 
 
@@ -248,4 +252,88 @@ test.skipIf(process.platform !== 'win32')('Windows named pipes elect one actual 
   const closed = once(first.server, 'close'); first.close(); await closed;
   track((await startPersistenceIpcServer(path, { brainId: BRAIN, dispatch: async () => ({}) }))?.server ?? null);
   expect((await requestPersistenceCapabilities(path)).brain_id).toBe(BRAIN);
+});
+
+describe.skipIf(process.platform !== 'win32')('Windows native IPC ownership', () => {
+  function child(mode: string, path: string, output: string, barrier: string, env = {}) {
+    const process = Bun.spawn([globalThis.process.execPath, '--no-env-file', resolve(import.meta.dir, 'fixtures/windows-ipc-mutex.ts'), mode, path, output, barrier], {
+      stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', env: { ...globalThis.process.env, ...env },
+    }); children.push(process); return process;
+  }
+  async function ready(process: ReturnType<typeof child>, output: string) {
+    await waitFor(() => existsSync(output) || process.exitCode !== null, { timeoutMs: 15000 });
+    if (!existsSync(output)) throw new Error(await new Response(process.stderr).text());
+    expect(readFileSync(output, 'utf8')).toBe('acquired');
+  }
+  test('case, prefix and Unicode aliases share one claim in the same event loop', async () => {
+    const name = `gbrain-${randomUUID()}-σıé`, path = `\\\\.\\pipe\\${name}`;
+    const first = await claimLocalIpcBinding(path); expect(first).not.toBeNull();
+    try {
+      for (const alias of [`\\\\?\\PIPE\\${name.toUpperCase()}`, `//./pipe/${name.toUpperCase()}`, path]) expect(await claimLocalIpcBinding(alias)).toBeNull();
+    } finally { await first!.release(); await first!.release(); }
+    const next = await claimLocalIpcBinding(path); expect(next).not.toBeNull(); await next!.release();
+  });
+  test('two processes with distinct homes elect one actual pipe provider and survive owner death', async () => {
+    const path = `\\\\.\\pipe\\gbrain-${randomUUID()}`, root = temporary(), barrier = join(root, 'start');
+    const outputs = [join(root, 'a'), join(root, 'b')];
+    const pair = outputs.map((output, index) => child('server', path, output, barrier,
+      { HOME: join(root, `home-${index}`), GBRAIN_HOME: join(root, `brain-${index}`), TMPDIR: join(root, `tmp-${index}`) }));
+    await waitFor(() => outputs.every(output => existsSync(`${output}.ready`)), { timeoutMs: 15000 });
+    writeFileSync(barrier, 'go');
+    await waitFor(() => outputs.every(existsSync), { timeoutMs: 15000 });
+    const outcomes = outputs.map(output => readFileSync(output, 'utf8'));
+    expect([...outcomes].sort()).toEqual(['acquired', 'busy']);
+    expect((await requestPersistenceCapabilities(path)).brain_id).toBe(BRAIN);
+    const owner = pair[outcomes.indexOf('acquired')]; owner.kill(9); await owner.exited;
+    track((await startPersistenceIpcServer(path, { brainId: BRAIN, dispatch: async () => ({}) }))?.server ?? null);
+    expect((await requestPersistenceCapabilities(path)).brain_id).toBe(BRAIN);
+  });
+  test('an already-open contender acquires an abandoned kernel mutex after actual process death', async () => {
+    const root = temporary(), path = `\\\\.\\pipe\\gbrain-${randomUUID()}`, barrier = join(root, 'start');
+    writeFileSync(barrier, 'go');
+    const owner = child('mutex', path, join(root, 'owner'), barrier); await ready(owner, join(root, 'owner'));
+    const release = join(root, 'release'), output = join(root, 'next');
+    const waiter = child('abandoned', path, output, release);
+    await waitFor(() => existsSync(`${output}.ready`), { timeoutMs: 15000 });
+    expect(await tryAcquireNativeIpcMutex(path)).toBeNull();
+    owner.kill(9); await owner.exited; writeFileSync(release, 'go'); await ready(waiter, output);
+    expect(await tryAcquireNativeIpcMutex(path)).toBeNull();
+    waiter.stdin.write('close'); waiter.stdin.end(); expect(await waiter.exited).toBe(0);
+    const next = await tryAcquireNativeIpcMutex(path); expect(next).not.toBeNull(); await next!.release();
+  });
+  test('opaque finalizers and worker-environment cleanup relinquish claims without exiting the process', async () => {
+    for (const mode of ['finalize', 'worker', 'copied-addon']) {
+      const root = temporary(), output = join(root, 'result');
+      const process = child(mode, `\\\\.\\pipe\\gbrain-${randomUUID()}`, output, '-');
+      expect(await process.exited).toBe(0);
+      expect(readFileSync(output, 'utf8')).toBe('released');
+    }
+  });
+  test('a denied Global mutex fails closed and closes after its owner exits', async () => {
+    const root = temporary(), name = `gbrain-${randomUUID()}`, path = `\\\\.\\pipe\\${name}`, output = join(root, 'ready');
+    const identity = createHash('sha256').update(name.toUpperCase(), 'utf16le').digest('hex');
+    const process = Bun.spawn(['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+      resolve(import.meta.dir, 'fixtures/windows-ipc-denied.ps1'), `Global\\gbrain-ipc-${identity}`, output], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
+    children.push(process);
+    await waitFor(() => existsSync(output) || process.exitCode !== null, { timeoutMs: 15000 });
+    if (!existsSync(output)) throw new Error(await new Response(process.stderr).text());
+    await expect(tryAcquireNativeIpcMutex(path)).rejects.toThrow();
+    process.stdin.write('close\n'); process.stdin.end(); expect(await process.exited).toBe(0);
+    const next = await tryAcquireNativeIpcMutex(path); expect(next).not.toBeNull(); await next!.release();
+  });
+  test('native stale cleanup preserves regular files, directories and junction targets', async () => {
+    for (const kind of ['file', 'directory', 'junction']) {
+      const root = temporary(), path = join(root, 'socket'), target = join(root, 'target');
+      if (kind === 'file') writeFileSync(path, 'kept');
+      else if (kind === 'directory') mkdirSync(path);
+      else { mkdirSync(target); writeFileSync(join(target, 'kept'), 'kept'); symlinkSync(target, path, 'junction'); }
+      const claim = await claimLocalIpcBinding(path); expect(claim).not.toBeNull();
+      try { expect(() => claim!.removeStaleWindowsSocket!()).toThrow(); }
+      finally { await claim!.release(); }
+      if (kind === 'file') expect(readFileSync(path, 'utf8')).toBe('kept');
+      if (kind === 'directory') expect(lstatSync(path).isDirectory()).toBe(true);
+      if (kind === 'junction') { expect(lstatSync(path).isSymbolicLink()).toBe(true); expect(readFileSync(join(target, 'kept'), 'utf8')).toBe('kept'); }
+      expect(() => claim!.removeStaleWindowsSocket!()).toThrow();
+    }
+  });
 });

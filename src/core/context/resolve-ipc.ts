@@ -773,13 +773,13 @@ export async function startResolveIpcServer(
   // is busy) both defer — this serve runs without IPC rather than risk it.
   // The native claim serializes this probe and stale cleanup with binding.
   if ((await probeSocketOwner(socketPath)) !== 'dead') { await binding.release(); return null; }
-  // Remove the dead owner's socket file so bind() can succeed. NOT gated on
-  // existsSync/statSync (#4333): on win32 Bun binds a plain path as a real
-  // AF_UNIX socket, which leaves a reparse-point file that Bun's existsSync()/
-  // statSync() cannot see while bind() still fails WSAEADDRINUSE against it —
-  // unlink is the only fs call that observes the entry. ENOENT and EISDIR/
-  // EPERM (a directory we must not touch) are swallowed.
-  if (!isWindowsIpcPipe(socketPath)) try { unlinkSync(socketPath); } catch { /* nothing stale, or not ours to remove */ }
+  // Bun 1.3.11 cannot stat a stale Windows AF_UNIX reparse point. The native
+  // binding verifies its exact tag and deletes through that same handle.
+  // A denied or unexpected leaf never authorizes stale cleanup.
+  if (binding.removeStaleWindowsSocket) {
+    try { binding.removeStaleWindowsSocket(); }
+    catch { await binding.release(); return null; }
+  } else if (!isWindowsIpcPipe(socketPath)) try { unlinkSync(socketPath); } catch { /* nothing stale, or not ours to remove */ }
 
   return new Promise((resolve) => {
     const server = net.createServer((conn) => {
