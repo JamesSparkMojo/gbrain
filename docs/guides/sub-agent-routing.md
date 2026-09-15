@@ -51,10 +51,17 @@ routing policy; this guide is the cost rationale behind it.
 
 ### The Signal Detector Pattern
 
-Spawn a lightweight sub-agent on EVERY inbound message. This is mandatory.
+Automatic capture is off by default. Only after the user opts in, spawn a
+lightweight signal detector for inbound messages covered by that consent.
+Ordinary recall and explicit requests to remember do not require this detector.
+Paid enrichment and delegation require their own authority.
 
 ```
 on_every_message(text):
+  if not automatic_capture_opted_in or chat_only(text):
+    return
+  if not authorized_delegation:
+    return
   // Spawn async — don't block the response
   spawn_subagent({
     task: `SIGNAL DETECTION — scan this message:
@@ -97,7 +104,7 @@ budget-model cost for 80% of the work.
 
 | Situation | Spawn? | Model |
 |-----------|--------|-------|
-| Every inbound message | YES (mandatory) | Sonnet |
+| Inbound message covered by automatic-capture consent | Only after opt-in | Sonnet |
 | Research request | YES | DeepSeek for execution |
 | Quick lookup / fact check | YES | Fast model (Groq) |
 | Complex analysis | NO -- handle in main session | Opus |
