@@ -19,7 +19,9 @@ into a successful no-op. A canonical content/tag/timeline/deletion/withdrawal
 change advances the opaque logical revision. Embeddings, summaries, and other
 derived rebuilds do not. Reverting an older version creates a new revision;
 it does not reinstate an old revision token. Legacy partial versions preserve
-fields that the old version did not record.
+fields that the old version did not record, including whether the page was deleted.
+New versions record deletion state: reverting a tombstone version removes the
+canonical file and hides the page; reverting a live version restores them.
 
 Facts, takes, and canonical timeline rows commit with their page. The legacy
 `auto_timeline` switch does not suppress that required projection; maintenance

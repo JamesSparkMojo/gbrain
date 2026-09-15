@@ -1651,6 +1651,8 @@ export interface RawData {
 
 // Versions
 export interface PageVersion {
+  /** NULL/absent on legacy versions: reverting preserves current deletion state. */
+  is_deleted?: boolean | null;
   knowledge_revision?: string | null;
   timeline?: string | null;
   title?: string | null;

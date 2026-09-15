@@ -1,3 +1,6 @@
+/** NULL marks a legacy snapshot whose deletion state was not recorded. */
+export const PAGE_VERSION_DELETION_SCHEMA_SQL = `ALTER TABLE page_versions ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN;`;
+
 /** Shared by migration 150 and both schema blobs. Statements stay idempotent. */
 export const PAGE_STATE_SCHEMA_STATEMENTS = [
   `ALTER TABLE sources ADD COLUMN IF NOT EXISTS incarnation UUID NOT NULL DEFAULT gen_random_uuid()`,
@@ -9,6 +12,7 @@ export const PAGE_STATE_SCHEMA_STATEMENTS = [
   `ALTER TABLE page_versions ADD COLUMN IF NOT EXISTS title TEXT`,
   `ALTER TABLE page_versions ADD COLUMN IF NOT EXISTS type TEXT`,
   `ALTER TABLE page_versions ADD COLUMN IF NOT EXISTS tags JSONB`,
+  PAGE_VERSION_DELETION_SCHEMA_SQL,
   `CREATE TABLE IF NOT EXISTS page_write_guards (
     source_incarnation UUID NOT NULL REFERENCES sources(incarnation) ON DELETE CASCADE,
     slug TEXT NOT NULL,

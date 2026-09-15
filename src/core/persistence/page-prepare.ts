@@ -91,6 +91,9 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
   }
   let content = preparedIntent?.content ?? p.content as string;
   let versionTags: string[] | undefined = preparedIntent?.tags;
+  // A replacement/restore publishes a live page. Only a recorded version may
+  // explicitly restore a tombstone; legacy versions leave this state unchanged.
+  let targetDeleted = false;
   if (row.operation === 'restore_page' || row.operation === 'revert_version') {
     if (!snapshot) throw new OperationError('page_not_found', 'Page not found.');
     let page = snapshot.page;
@@ -99,6 +102,7 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
       const [version] = await engine.executeRaw<PageVersion>(
         'SELECT * FROM page_versions WHERE id=$1 AND page_id=$2', [p.version_id, page.id]);
       if (!version) throw new OperationError('not_found', 'Version not found for this page.');
+      targetDeleted = version.is_deleted ?? (snapshot.page.deleted_at != null);
       page = { ...page, compiled_truth: version.compiled_truth, frontmatter: version.frontmatter,
         ...(version.timeline !== null && version.timeline !== undefined ? { timeline: version.timeline } : {}),
         ...(version.title !== null && version.title !== undefined ? { title: version.title } : {}),
@@ -117,11 +121,11 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
   }
   // Detect an exact canonical no-op before ingestion can invoke any provider.
   // Revision/identity checks above still apply to stale identical replacements.
-  if (snapshot && snapshot.page.deleted_at == null && typeof content === 'string') {
+  if (snapshot && (snapshot.page.deleted_at != null) === targetDeleted && typeof content === 'string') {
     const incoming = parseMarkdown(content,row.slug);
     const tags = versionTags ?? [...new Set([...snapshot.tags,...incoming.tags])].sort();
     if (digest(canonical(snapshot.page,snapshot.tags)) === digest(canonical(incoming,tags))) {
-      return {observedRevision,noop:true,file:await prepareFileTarget(engine,row,snapshot,serializePageToMarkdown(snapshot.page,snapshot.tags)),
+      return {observedRevision,noop:true,file:await prepareFileTarget(engine,row,snapshot,targetDeleted ? null : serializePageToMarkdown(snapshot.page,snapshot.tags)),
         apply:async()=>({...pageNoopAdvisories(row),status:'skipped',slug:row.slug,source_id:row.source_id,noop:true,chunks:0,chunk_skip_reason:'write_skipped',
           ...(row.operation==='capture'?{channel:'capture',content_hash:p.capture_hash}:{})})};
     }
@@ -159,15 +163,15 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
   const renderedPage: Page = { ...(snapshot?.page ?? { id: 0, slug: row.slug, source_id: row.source_id, created_at: new Date(), updated_at: new Date() }), ...ready.parsedPage };
   const rendered = serializePageToMarkdown(renderedPage, tags);
   const logicalNoop = snapshot !== null && digest(canonical(snapshot.page, snapshot.tags)) === digest(canonical(ready.parsedPage, tags));
-  const noop = logicalNoop && snapshot?.page.deleted_at == null;
+  const noop = logicalNoop && (snapshot?.page.deleted_at != null) === targetDeleted;
   const project = row.operation === 'remember' || row.operation.startsWith('takes_') ? undefined
     : prepareCanonicalProjections(ready.parsedPage,row.slug,row.source_id);
   const ordinaryPage = ['put_page','capture','restore_page','revert_version'].includes(row.operation);
-  const advisories = noop ? pageNoopAdvisories(row) : !ordinaryPage ? remoteLinkHint(row) : await preparePageAdvisories(engine,row,ready.parsedPage);
-  const links = !noop && ordinaryPage && (row.authority.autoLinkTrusted ?? !row.authority.remote) && await isAutoLinkEnabled(engine)
+  const advisories = noop || targetDeleted ? pageNoopAdvisories(row) : !ordinaryPage ? remoteLinkHint(row) : await preparePageAdvisories(engine,row,ready.parsedPage);
+  const links = !noop && !targetDeleted && ordinaryPage && (row.authority.autoLinkTrusted ?? !row.authority.remote) && await isAutoLinkEnabled(engine)
     ? await prepareAutomaticLinks(engine,row.slug,ready.parsedPage,row.source_id) : undefined;
   return { observedRevision, noop, additionalPageKeys:links?.pageKeys,
-    file: await prepareFileTarget(engine, row, snapshot, rendered), apply: async tx => {
+    file: await prepareFileTarget(engine, row, snapshot, targetDeleted ? null : rendered), apply: async tx => {
     let autoLinks: Awaited<ReturnType<NonNullable<typeof links>['apply']>> | undefined;
     if (!noop) {
       await ready.apply(tx);
@@ -178,6 +182,7 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
       }
       await project?.(tx);
       autoLinks = await links?.apply(tx);
+      if (targetDeleted) await tx.softDeletePage(row.slug, source);
       // Index installation and terminal receipt share this transaction.
       await sealPageTextProjection(tx, row.slug, row.source_id);
     }
