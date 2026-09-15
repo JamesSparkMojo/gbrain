@@ -47,7 +47,7 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
   }
   // A normal edit may replace only the bytes represented by its read snapshot.
   // Unknown local edits require explicit import/recovery, even for force writes.
-  if (before && snapshot && !snapshot.page.deleted_at) {
+  if (before && snapshot) {
     const parsed = parseMarkdown(before.toString('utf8'), row.slug);
     const expected = canonical(snapshot.page, snapshot.tags);
     const actual = canonical({ ...parsed, ...await overlayCanonicalBodies(engine.executeRaw.bind(engine),
@@ -159,7 +159,7 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
   const renderedPage: Page = { ...(snapshot?.page ?? { id: 0, slug: row.slug, source_id: row.source_id, created_at: new Date(), updated_at: new Date() }), ...ready.parsedPage };
   const rendered = serializePageToMarkdown(renderedPage, tags);
   const logicalNoop = snapshot !== null && digest(canonical(snapshot.page, snapshot.tags)) === digest(canonical(ready.parsedPage, tags));
-  const noop = logicalNoop && (row.operation !== 'restore_page' || snapshot?.page.deleted_at == null);
+  const noop = logicalNoop && snapshot?.page.deleted_at == null;
   const project = row.operation === 'remember' || row.operation.startsWith('takes_') ? undefined
     : prepareCanonicalProjections(ready.parsedPage,row.slug,row.source_id);
   const ordinaryPage = ['put_page','capture','restore_page','revert_version'].includes(row.operation);
