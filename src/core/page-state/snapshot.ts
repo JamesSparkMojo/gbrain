@@ -45,7 +45,7 @@ export async function readPageSnapshot(query: ReadQuery, slug: string, opts?: Pa
   const params: unknown[] = [slug, opts?.resolveAlias === true];
   const where = [`(p.slug=$1 OR ($2::boolean AND EXISTS (SELECT 1 FROM slug_aliases a
     WHERE a.alias_slug=$1 AND a.source_id=p.source_id AND a.canonical_slug=p.slug
-      AND EXISTS (SELECT 1 FROM sources alias_source WHERE alias_source.id=a.source_id AND NOT alias_source.archived))))`];
+      AND EXISTS (SELECT 1 FROM sources alias_source WHERE alias_source.id=a.source_id ${opts?.includeDeleted ? '' : 'AND NOT alias_source.archived'}))))`];
   if (opts?.sourceIds?.length) {
     params.push(opts.sourceIds);
     where.push(`p.source_id=ANY($${params.length}::text[])`);

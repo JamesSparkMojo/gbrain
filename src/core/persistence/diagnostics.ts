@@ -67,7 +67,9 @@ export async function readWriterDiagnostics(engine: BrainEngine) {
     FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id
     WHERE e.state<>'committed' GROUP BY e.kind,e.state ORDER BY e.kind,e.state`);
   const limits = await readJournalLimits(engine);
+  const { persistenceConsumerStatus } = await import('./service.ts');
+  const ingress = persistenceConsumerStatus(engine);
   return { ...brain, sampled_at: new Date().toISOString(), publication_concurrency: publicationConcurrency(engine),
-    worktrees, counters, queue, effects, limits, capacity: capacityDiagnostics(counters, limits),
+    ingress, worktrees, counters, queue, effects, limits, capacity: capacityDiagnostics(counters, limits),
     blockers: blockers.map(row => ({ ...row, next_action: writerNextAction(row.blocked_reason ?? row.error_code) })) };
 }

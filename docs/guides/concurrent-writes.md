@@ -231,6 +231,14 @@ After a lost administration acknowledgment, inspect writer status and local
 registrations before repeating a command; administration is not automatically
 replayed as a page mutation.
 
+Writer status reports resident ingress state, active preparations, owner epochs,
+queued request counts/bytes/age, the last committed sequence for each worktree,
+and recovery storage including withdrawal mirrors. Capacity entries show the
+configured limit, remaining reservation and the exact configuration key to
+adjust; usage at or above 80% includes expansion guidance. Blocked requests carry
+a concrete next action. Diagnostics contain no request content, credentials or
+private checkout paths.
+
 ## Bounded admission and retention
 
 Default admission limits are enforced atomically:
