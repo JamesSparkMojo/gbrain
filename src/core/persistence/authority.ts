@@ -30,11 +30,14 @@ export async function submissionAuthority(ctx: OperationContext, operation: stri
   const a: WriteAuthority = {
     version: 1, principal, remote: ctx.remote !== false, sourceId, sourceIncarnation,
     excludePrivate: await excludesPrivateWrites(ctx.engine, ctx.remote !== false),
+    autoLinkTrusted: ctx.remote === false || ctx.viaSubagent === true && !ctx.auth && !!ctx.allowedSlugPrefixes?.length,
     takesHolders: ctx.remote === false ? null : [...(ctx.takesHoldersAllowList ?? ['world'])],
     scopes: [...(ctx.auth?.scopes ?? localGrant?.scopes ?? [])],
     operations: ctx.auth?.allowedOperations ? [...ctx.auth.allowedOperations] : localGrant?.operations ?? null,
     slugPrefixes: ctx.auth?.boundSlugPrefixes ? [...ctx.auth.boundSlugPrefixes] : localGrant?.slugPrefixes ?? null,
-    ...(ctx.viaSubagent && ctx.auth ? { delegated: true, delegatedPrefixes: ctx.allowedSlugPrefixes ? [...ctx.allowedSlugPrefixes] : [] } : {}),
+    ...(ctx.viaSubagent ? { restrictedNamespace: true, delegated: !!ctx.auth,
+      delegatedPrefixes: ctx.allowedSlugPrefixes?.length ? [...ctx.allowedSlugPrefixes]
+        : typeof ctx.subagentId === 'number' ? [`wiki/agents/${ctx.subagentId}/*`] : [] } : {}),
   };
   if (ctx.auth?.sourceId != null && ctx.auth.sourceId !== sourceId) deny('The source is outside this writer grant.');
   if (!prefixAllowed(a.slugPrefixes, slug)) deny('The target is outside this writer grant.');
@@ -47,7 +50,7 @@ export async function submissionAuthority(ctx: OperationContext, operation: stri
 export async function authorizeWrite(engine: SqlEngine, a: WriteAuthority, operation: string, slug: string, lock = false): Promise<void> {
   if (a.version !== 1 || !a.principal || !a.sourceId || !a.sourceIncarnation) deny('Missing durable write authority.');
   if (!hasScope(a.scopes, a.delegated ? 'agent' : 'write') || !operationAllowed(a.operations, operation) || !prefixAllowed(a.slugPrefixes, slug)) deny('The operation exceeds its original accepted grant.');
-  if (a.delegated && (!a.delegatedPrefixes?.length || !matchesSlugAllowList(slug, a.delegatedPrefixes))) deny('The target exceeds the accepted delegated namespace.');
+  if ((a.delegated || a.restrictedNamespace) && (!a.delegatedPrefixes?.length || !matchesSlugAllowList(slug, a.delegatedPrefixes))) deny('The target exceeds the accepted delegated namespace.');
   const suffix = lock ? ' FOR SHARE' : '';
   if (a.principal.kind === 'oauth_client') {
     const [row] = await engine.executeRaw<Record<string, unknown>>(`SELECT deleted_at,scope,source_id,allowed_operations,
@@ -89,6 +92,10 @@ export async function authorizeStoredRequest(engine: SqlEngine, row: WriteReques
   if (!source || source.archived || source.incarnation !== row.source_incarnation) throw new OperationError('source_changed', 'The accepted source is no longer active.');
   await authorizeWrite(engine, row.authority, row.operation, row.slug, lock);
   await authorizePageVisibility(engine, row.authority, row.slug);
+  if (row.outcome?.status === 'duplicate' && typeof row.outcome.slug === 'string' && row.outcome.slug !== row.slug) {
+    await authorizeWrite(engine, row.authority, row.operation, row.outcome.slug, lock);
+    await authorizePageVisibility(engine, row.authority, row.outcome.slug);
+  }
 }
 export async function ownRequestAccessible(ctx: OperationContext, row: WriteRequest): Promise<boolean> {
   try {

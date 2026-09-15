@@ -19,6 +19,9 @@ import { sealPageTextProjection } from '../page-state/projections.ts';
 import { overlayCanonicalBodies } from '../page-state/snapshot.ts';
 import { prepareCanonicalProjections } from './canonical-projections.ts';
 import { preserveProtectedTakes } from './protected-takes.ts';
+import { isAutoLinkEnabled } from '../link-extraction.ts';
+import { prepareAutomaticLinks } from './links-preparation.ts';
+import { preparePageAdvisories, remoteLinkHint } from './page-advisories.ts';
 
 function canonical(page: Pick<Page, 'type' | 'title' | 'compiled_truth' | 'timeline' | 'frontmatter'>, tags: string[]) {
   return { type: page.type, title: page.title, compiled_truth: page.compiled_truth, timeline: page.timeline ?? '',
@@ -65,6 +68,14 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
   assertPageRevision(snapshot, preparedIntent ? { expectedRevision: preparedIntent.expectedRevision } : engineMutationPrecondition(parseMutationPrecondition(p)));
   if ((snapshot?.page.id ?? null) !== row.page_id) throw new OperationError('page_identity_changed', 'The accepted page identity changed.');
   const observedRevision = snapshot?.revision ?? null;
+  if (row.operation === 'put_page' && p.allow_empty !== true && snapshot && !snapshot.page.deleted_at
+    && typeof p.content === 'string' && `${snapshot.page.compiled_truth}\n${snapshot.page.timeline ?? ''}`.trim()) {
+    const incoming = parseMarkdown(p.content, row.slug);
+    if (!`${incoming.compiled_truth}\n${incoming.timeline ?? ''}`.trim()) {
+      throw new OperationError('invalid_params', `Refusing to overwrite existing non-empty page '${row.slug}' with empty content. Use capture --file PATH --slug SLUG for file input; set allow_empty:true to intentionally clear it.`,
+        'Use capture --file PATH --slug SLUG for file input, or pass allow_empty:true with the expected revision to intentionally clear it.');
+    }
+  }
   if (row.operation === 'delete_page') {
     if (!snapshot) throw new OperationError('page_not_found', 'Page not found.');
     const noop = snapshot.page.deleted_at != null;
@@ -106,7 +117,7 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
     const tags = versionTags ?? [...new Set([...snapshot.tags,...incoming.tags])].sort();
     if (digest(canonical(snapshot.page,snapshot.tags)) === digest(canonical(incoming,tags))) {
       return {observedRevision,noop:true,file:await prepareFileTarget(engine,row,snapshot,serializePageToMarkdown(snapshot.page,snapshot.tags)),
-        apply:async()=>({status:'skipped',slug:row.slug,source_id:row.source_id,noop:true,chunks:0,
+        apply:async()=>({...remoteLinkHint(row),status:'skipped',slug:row.slug,source_id:row.source_id,noop:true,chunks:0,
           ...(row.operation==='capture'?{channel:'capture',content_hash:p.capture_hash}:{})})};
     }
   }
@@ -141,7 +152,13 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
   const noop = logicalNoop && (row.operation !== 'restore_page' || snapshot?.page.deleted_at == null);
   const project = row.operation === 'remember' || row.operation.startsWith('takes_') ? undefined
     : prepareCanonicalProjections(ready.parsedPage,row.slug,row.source_id);
-  return { observedRevision, noop, file: await prepareFileTarget(engine, row, snapshot, rendered), apply: async tx => {
+  const ordinaryPage = ['put_page','capture','restore_page','revert_version'].includes(row.operation);
+  const advisories = noop || !ordinaryPage ? remoteLinkHint(row) : await preparePageAdvisories(engine,row,ready.parsedPage);
+  const links = !noop && ordinaryPage && (row.authority.autoLinkTrusted ?? !row.authority.remote) && await isAutoLinkEnabled(engine)
+    ? await prepareAutomaticLinks(engine,row.slug,ready.parsedPage,row.source_id) : undefined;
+  return { observedRevision, noop, additionalPageKeys:links?.pageKeys,
+    file: await prepareFileTarget(engine, row, snapshot, rendered), apply: async tx => {
+    let autoLinks: Awaited<ReturnType<NonNullable<typeof links>['apply']>> | undefined;
     if (!noop) {
       await ready.apply(tx);
       if (row.operation === 'restore_page') await tx.restorePage(row.slug, source);
@@ -150,10 +167,12 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
         for (const tag of versionTags) await tx.addTag(row.slug, tag, source);
       }
       await project?.(tx);
+      autoLinks = await links?.apply(tx);
       // Index installation and terminal receipt share this transaction.
       await sealPageTextProjection(tx, row.slug, row.source_id);
     }
-    return { status: noop ? 'skipped' : row.operation === 'restore_page' ? 'restored' : row.operation === 'revert_version' ? 'reverted' : 'created_or_updated',
+    return { ...advisories, ...(autoLinks ? {auto_links:autoLinks} : {}),
+      status: noop ? 'skipped' : row.operation === 'restore_page' ? 'restored' : row.operation === 'revert_version' ? 'reverted' : 'created_or_updated',
       slug: row.slug, source_id: row.source_id, chunks: ready.result.chunks, noop,
       ...(row.operation === 'capture' ? { channel: 'capture', content_hash: p.capture_hash } : {}) };
   } };

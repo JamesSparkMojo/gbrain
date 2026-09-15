@@ -294,7 +294,7 @@ describe('add_timeline_entry on an FS-canonical brain (#1856)', () => {
     expect(fs.readFileSync(filePath, 'utf8')).toBe(beforeDisk);
     const timeline = await engine.getTimeline(slug, { sourceId: 'default' });
     expect(timeline.length).toBe(1);
-    expect(timeline[0].source).toBe(''); // legacy tuple, unchanged
+    expect(timeline[0].source).toBe('manual'); // same canonical tuple in database-only configurations
   });
 });
 
@@ -528,7 +528,7 @@ describe('add_timeline_entry on a DB-only brain', () => {
 
     expect(res.write_through?.written).toBe(false);
     expect(res.write_through?.skipped).toBe('disabled_by_config');
-    expect((await engine.getTimeline(slug, { sourceId: 'default' }))[0].source).toBe('');
+    expect((await engine.getTimeline(slug, { sourceId: 'default' }))[0].source).toBe('manual');
     expect(fs.readdirSync(brainDir)).toEqual([]);
   });
 

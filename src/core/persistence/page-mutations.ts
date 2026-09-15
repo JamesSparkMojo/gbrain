@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { OperationContext } from '../ops/contract.ts';
 import { OperationError } from '../ops/contract.ts';
 import { enforceClientSlugFence, enforceSubagentSlugFence, normalizeSlugPrefix, validatePageSlug } from '../ops/context.ts';
@@ -9,7 +9,7 @@ import { computeContentHash } from '../ingestion/types.ts';
 import { assertPersistenceAccepting, waitForWrite, writeResponse } from './service.ts';
 import { admitWrite, assertReplayIntent, getWriteRequest, intentDigest } from './journal.ts';
 import { submissionAuthority, authorizeStoredRequest } from './authority.ts';
-import { currentVerifiedLocalWriter, readLocalWriter, registerLocalWriter } from './identity.ts';
+import { currentVerifiedLocalWriter, localHostId, readLocalWriter, registerLocalWriter } from './identity.ts';
 import { claimWorktree, getWorktreeBinding } from './ownership.ts';
 import { parseMutationPrecondition } from './preconditions.ts';
 import type { Principal } from './model.ts';
@@ -88,11 +88,16 @@ export async function submitPageMutation(ctx: OperationContext,
   else if (!configuredWriteThrough) authority.databaseOnlyReason = 'disabled_by_config';
   else if (!root && !binding) authority.databaseOnlyReason = 'no_repo_configured';
   if (p.local_dir !== undefined) {
-    if (ctx.remote !== false || typeof p.local_dir !== 'string' || !root
-      || realpathSync(resolve(p.local_dir)) !== realpathSync(resolve(root))) {
-      throw new OperationError('invalid_params', 'The CLI directory must match the selected source canonical root.',
-        'Register the source canonical path, then omit --dir or use that same path.');
+    // Checkout paths belong to a host binding; sources.local_path may name
+    // another host's original checkout after a verified ownership transfer.
+    const localRoot = binding ? binding.owner_host_id === localHostId() && binding.local_path
+      ? join(binding.local_path, binding.relative_path) : null : root;
+    let matches = false;
+    if (ctx.remote === false && typeof p.local_dir === 'string' && localRoot) {
+      try { matches = realpathSync(resolve(p.local_dir)) === realpathSync(resolve(localRoot)); } catch { /* missing local binding */ }
     }
+    if (!matches) throw new OperationError('invalid_params', 'The CLI directory must match the selected source canonical root.',
+      'Register the source canonical path, then omit --dir or use that same path.');
   }
   if (writeThrough && root && !binding) {
     if (ctx.engine.kind !== 'pglite') throw new OperationError('owner_unavailable', 'This source has no designated canonical owner.', 'Register its owner with sources writer claim before accepting writes.');

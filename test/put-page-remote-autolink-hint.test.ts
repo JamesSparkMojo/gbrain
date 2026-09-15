@@ -66,8 +66,8 @@ describe('put_page remote auto-link disclosure (#4525)', () => {
     expect(result.auto_links?.skipped).toBe('remote');
     expect(result.auto_links?.hint).toBeDefined();
     expect(result.auto_links?.hint).toContain('NOT reconciled');
-    expect(result.auto_timeline?.skipped).toBe('remote');
-    expect(result.auto_timeline?.hint).toBeDefined();
+    // Canonical timeline projections now commit with the page snapshot.
+    expect(result.auto_timeline?.skipped).toBeUndefined();
   }, 120000);
 
   test('local write does not carry the remote skip marker', async () => {

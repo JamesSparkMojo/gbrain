@@ -11,16 +11,10 @@ import { PAGE_MUTATION_PARAMS, CAPTURE_EVENT_PARAMS } from '../persistence/param
 
 import type { BrainEngine } from '../engine.ts';
 import { clampSearchLimit } from '../engine.ts';
-import type { Page, PageType } from '../types.ts';
-import { importFromContent } from '../import-file.ts';
+import type { Page } from '../types.ts';
 import { serializePageToMarkdown } from '../markdown.ts';
-import { writePageThrough, deletePageThrough, resolvePageWriteTarget, type WriteThroughResult } from '../write-through.ts';
-import { extractPageLinks, isAutoLinkEnabled, isAutoTimelineEnabled, isGlobalBasenameEnabled, parseTimelineEntries, makeResolver, type UnresolvedFrontmatterRef } from '../link-extraction.ts';
-// #3190: pack-aware link typing on the put_page auto-link path.
-import { loadActivePackForLocalEngine } from '../schema-pack/best-effort.ts';
-import { isFactsBackstopEligible } from '../facts/eligibility.ts';
+import { isAutoLinkEnabled } from '../link-extraction.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
-import type { WriterLintPayload } from '../output/post-write.ts';
 import { getContentFlag } from '../quarantine.ts';
 import { bumpLastRetrievedAt } from '../last-retrieved.ts';
 import { resolveExcludePrivatePages, isPrivatePage, findPrivateOnlySlugs } from '../search/private-visibility.ts';
@@ -35,7 +29,6 @@ import {
   federatedSearchScope,
   normalizeSlugPrefix,
   parseSourceIdParam,
-  requireWritablePage,
   validatePageSlug,
 } from './context.ts';
 
@@ -300,7 +293,7 @@ const fetch_page: Operation = {
 
 const put_page: Operation = {
   name: 'put_page',
-  description: 'Replace a complete canonical Markdown page. Read get_page with include_content:true and pass its revision as expected_revision; force explicitly overwrites the current revision. Omitting both permits creation only. Retain a UUID request_id and repeat identical arguments after transport failure or a pending receipt. Content, tags, sanitized text projections, versions and the committed receipt publish together; embedding and optional Git effects have separate status. Remote round trips preserve protected facts/takes fences. For file input use gbrain capture --file PATH --slug SLUG.',
+  description: 'Replace a complete canonical Markdown page. Read get_page with include_content:true and pass its revision as expected_revision; force explicitly overwrites the current revision. Omitting both permits creation only. Retain a UUID request_id and repeat identical arguments after transport failure or a pending receipt. Content, tags, sanitized text projections, versions and the committed receipt publish together; embedding and optional Git effects have separate status. Remote callers preserve protected facts/takes fences; automatic graph links are skipped for untrusted writes. For file input use gbrain capture --file PATH --slug SLUG.',
   params: {
     ...PAGE_MUTATION_PARAMS,
     slug: { type: 'string', required: true, description: 'Page slug' },
@@ -336,35 +329,12 @@ const put_page: Operation = {
 // so sync.ts, file_upload, code_import, and runFactsBackstop all share one
 // predicate. Imported above.
 
-/**
- * Advisory-lock key for the auto-link reconciliation critical section.
- * Source-scoped (PR6 D5): two concurrent put_page calls on the SAME slug in
- * DIFFERENT sources reconcile disjoint link rows — a shared `auto_link:${slug}`
- * key serialized them for no correctness benefit (cross-source contention),
- * while same-(source, slug) writers still serialize. runAutoLink has two
- * callers (the put_page handler above and autoLinkWrittenPage below), both
- * lock-covered inside runAutoLink itself; the `?? ''` fallback is
- * belt-and-braces only, never a real key shape.
- */
+/** Legacy key export retained for callers; publication now uses canonical page guards. */
 export function autoLinkLockKey(sourceId: string | undefined, slug: string): string {
   return `auto_link:${sourceId ?? ''}:${slug}`;
 }
 
-/**
- * #4216 post-batch auto-link reconciliation for the oneshot runner.
- *
- * Within one oneshot batch, page A can wikilink page B that is written LATER
- * in the same batch: at A's put_page, runAutoLink's getAllSlugs filter
- * silently drops the A→B edge (B doesn't exist yet). The content keeps the
- * wikilink; only the links-table edge is missing. This wrapper re-runs the
- * reconciliation for a written page AFTER the whole batch landed, so
- * in-batch forward references materialize (serialized per (source, slug) by
- * runAutoLink's own advisory lock).
- *
- * Policy-preserving (CDX-11): gated on the same `auto_link` config as the
- * put_page hook; best-effort (an error never fails the batch); re-fetches +
- * re-shapes the page because runAutoLink needs the parsed shape (OV-m2).
- */
+/** Revisit forward references after a oneshot batch, conditional on its current snapshot. */
 export async function autoLinkWrittenPage(
   engine: BrainEngine,
   slug: string,
@@ -372,229 +342,29 @@ export async function autoLinkWrittenPage(
 ): Promise<void> {
   try {
     if (!(await isAutoLinkEnabled(engine))) return;
-    // Scope the read to the write's source (mirrors putPage's schema default).
-    const page = await engine.getPage(slug, { sourceId: opts?.sourceId ?? 'default' });
-    if (!page) return;
-    await runAutoLink(engine, slug, {
-      type: page.type,
-      compiled_truth: page.compiled_truth ?? '',
-      timeline: page.timeline ?? '',
-      frontmatter: (page.frontmatter ?? {}) as Record<string, unknown>,
-    }, opts?.sourceId ? { sourceId: opts.sourceId } : undefined);
+    await runAutoLink(engine, slug, opts);
   } catch (e) {
     process.stderr.write(`[oneshot] post-batch auto-link for ${slug} failed (best-effort): ${e instanceof Error ? e.message : String(e)}\n`);
   }
 }
 
-/**
- * Extract entity refs from a freshly-written page, sync the links table to match.
- * Creates new links via addLink, removes stale ones (links present in DB but no
- * longer referenced in content) via removeLink. Returns counts.
- *
- * Runs OUTSIDE importFromContent's transaction so it doesn't block the page write
- * or get rolled back if a single link operation fails. Per-link failures are
- * counted; the overall function never throws (catch in put_page handler covers
- * extraction errors).
- */
+/** Reconcile derived links only if the prepared canonical snapshot is still current. */
 async function runAutoLink(
   engine: BrainEngine,
   slug: string,
-  parsed: { type: PageType; compiled_truth: string; timeline: string; frontmatter: Record<string, unknown> },
   opts?: { sourceId?: string },
-): Promise<{ created: number; removed: number; errors: number; unresolved: UnresolvedFrontmatterRef[] }> {
-  const fullContent = parsed.compiled_truth + '\n' + parsed.timeline;
-  // v0.31.8 (codex OV-2): thread sourceId through every read + write inside
-  // reconcileLinks. Without this the FS walker reads cross-source links/slugs
-  // but writes scoped to one source — phantom stale-deletions and duplicate
-  // inserts. runAutoLink has exactly ONE caller (the put_page handler) and
-  // ctx.sourceId is a REQUIRED string there, so opts.sourceId is always set in
-  // practice; the omitted-opts branches below (and the `?? ''` in
-  // autoLinkLockKey) are belt-and-braces only, not a live back-compat path.
-  const sourceOpts = opts?.sourceId ? { sourceId: opts.sourceId } : {};
-  const linkSourceOpts = opts?.sourceId
-    ? { fromSourceId: opts.sourceId, toSourceId: opts.sourceId, originSourceId: opts.sourceId }
-    : {};
-  const removeSourceOpts = opts?.sourceId
-    ? { fromSourceId: opts.sourceId, toSourceId: opts.sourceId }
-    : {};
-
-  // Live-mode resolver: per-put throwaway cache, pg_trgm + optional search.
-  // Issue #972 (codex [P1]): pass sourceId so basename resolution stays
-  // within this page's source — no cross-source basename edges. Also scopes
-  // the fuzzy fallback (findByTitleFuzzy) to the same source the put_page is
-  // targeting — without it, cross-source slug suggestions get silently dropped
-  // at the FK filter and the link looks like it failed to resolve. Twin of
-  // #1436's `tryFuzzyMatch` fix.
-  const resolver = makeResolver(engine, { mode: 'live', sourceId: opts?.sourceId });
-  // Issue #972: opt-in bare-wikilink basename resolution. Off by default.
-  const globalBasename = await isGlobalBasenameEnabled(engine);
-  // #3190: pack-aware link typing + pack frontmatter_links on the put_page
-  // auto-link path. Loaded via the local-engine best-effort resolver (this
-  // hook only runs for trusted-local / trusted-workspace writes); null keeps
-  // the legacy in-code inference.
-  const pack = (await loadActivePackForLocalEngine(engine))?.manifest ?? null;
-  const { candidates, unresolved } = await extractPageLinks(
-    slug, fullContent, parsed.frontmatter, parsed.type, resolver,
-    { globalBasename, pack },
-  );
-
-  // Resolve which targets exist (skip refs to non-existent pages to avoid FK
-  // violation churn in addLink). #2544: targeted membership probe over just
-  // the candidate target/from slugs instead of materializing the whole slug
-  // set — getAllSlugs was a full-table scan on EVERY put_page while the
-  // candidates are typically a handful. Mirrors the proven oneshot probe
-  // (subagent-oneshot.ts). Deliberately does NOT filter deleted_at: the
-  // getAllSlugs it replaces included soft-deleted pages, and changing link
-  // visibility is out of scope here. Skips the query entirely when there are
-  // no candidates. v0.31.8 (D12): scoped to the source when opts.sourceId is
-  // set so wikilink resolution doesn't span unrelated sources.
-  const candidateSlugs = [...new Set(candidates.flatMap(c => (c.fromSlug ? [c.targetSlug, c.fromSlug] : [c.targetSlug])))];
-  let existingSlugs = new Set<string>();
-  if (candidateSlugs.length > 0) {
-    const rows = opts?.sourceId
-      ? await engine.executeRaw<{ slug: string }>(
-          `SELECT slug FROM pages WHERE slug = ANY($1::text[]) AND source_id = $2`,
-          [candidateSlugs, opts.sourceId],
-        )
-      : await engine.executeRaw<{ slug: string }>(
-          `SELECT slug FROM pages WHERE slug = ANY($1::text[])`,
-          [candidateSlugs],
-        );
-    existingSlugs = new Set(rows.map(r => r.slug));
-  }
-  const valid = candidates.filter(c =>
-    existingSlugs.has(c.targetSlug) && (!c.fromSlug || existingSlugs.has(c.fromSlug))
-  );
-
-  // Split candidates by direction. Outgoing (fromSlug === slug or unset) are
-  // this page's own edges, reconciled against getLinks(slug). Incoming
-  // (fromSlug !== slug — frontmatter with `direction: incoming`) are edges
-  // where this page is the TO side; reconciled against getBacklinks(slug)
-  // but SCOPED to the frontmatter edges this page authored via
-  // (link_source='frontmatter' AND origin_slug = slug). We never touch
-  // frontmatter edges authored by OTHER pages.
-  const out = valid.filter(c => !c.fromSlug || c.fromSlug === slug);
-  const inc = valid.filter(c => c.fromSlug && c.fromSlug !== slug);
-
-  // Run getLinks + addLink/removeLink loops inside a single transaction so that
-  // concurrent put_page calls on the same slug can't race the reconciliation:
-  // without this, two simultaneous writes both read stale `existingKeys` and
-  // re-create links the other side just removed (lost-update).
-  //
-  // Row-level locks alone aren't enough: both writers can read the same
-  // `existingKeys` set BEFORE either mutates a row, so the union-of-writes
-  // race survives. A transaction-scoped advisory lock keyed on the slug
-  // hash serializes the entire reconciliation across processes. Falls
-  // through on engines that don't support pg_advisory_xact_lock (PGLite is
-  // single-process so there's no cross-process concern there anyway).
-  const result = await engine.transaction(async (tx) => {
-    try {
-      // hashtext (not hashtextextended): this call must behave identically on
-      // BOTH engines and any failure here is SILENTLY swallowed by the catch
-      // below — a primitive that errored on either engine would quietly drop
-      // the lock entirely. hashtext is the primitive every advisory-lock site
-      // in this repo already proves on both engines; keep the family uniform.
-      await tx.executeRaw(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [autoLinkLockKey(opts?.sourceId, slug)]);
-    } catch {
-      // engine doesn't support advisory locks — fall through
-    }
-    const existingOut = await tx.getLinks(slug, sourceOpts);
-    // Incoming: we only look at frontmatter edges WE authored (origin_slug=slug).
-    // Non-frontmatter and other-page frontmatter edges survive untouched.
-    const existingInRaw = await tx.getBacklinks(slug, sourceOpts);
-    const existingIn = existingInRaw.filter(
-      l => l.link_source === 'frontmatter' && l.origin_slug === slug,
-    );
-
-    // Reconcilable outgoing edges: markdown + our own frontmatter edges +
-    // basename-resolved wikilinks (issue #972). Manual edges
-    // (link_source='manual') are NEVER touched by reconciliation.
-    // 'wikilink-resolved' MUST be reconcilable (codex outside-voice [P1]):
-    // auto-link writes these; if it weren't here, a basename edge would
-    // survive after the wikilink is deleted from the page OR the
-    // link_resolution.global_basename flag is turned off (out no longer
-    // includes it, so the stale-removal loop below must be allowed to drop it).
-    const reconcilableOut = existingOut.filter(
-      l => l.link_source === 'markdown' || l.link_source == null ||
-           l.link_source === 'wikilink-resolved' ||
-           (l.link_source === 'frontmatter' && l.origin_slug === slug),
-    );
-
-    const outKeys = new Set(out.map(c =>
-      `${c.targetSlug}\u0000${c.linkType}\u0000${c.linkSource ?? 'markdown'}`
-    ));
-    const incKeys = new Set(inc.map(c =>
-      `${c.fromSlug}\u0000${c.linkType}`
-    ));
-
-    let created = 0, removed = 0, errors = 0;
-
-    // Add outgoing edges.
-    for (const c of out) {
-      try {
-        await tx.addLink(
-          slug, c.targetSlug, c.context, c.linkType,
-          c.linkSource, c.originSlug, c.originField,
-          linkSourceOpts,
-        );
-        const existKey = `${c.targetSlug}\u0000${c.linkType}\u0000${c.linkSource ?? 'markdown'}`;
-        const exists = reconcilableOut.some(l =>
-          `${l.to_slug}\u0000${l.link_type}\u0000${l.link_source ?? 'markdown'}` === existKey
-        );
-        if (!exists) created++;
-      } catch {
-        errors++;
-      }
-    }
-
-    // Add incoming edges (other page → slug).
-    for (const c of inc) {
-      try {
-        await tx.addLink(
-          c.fromSlug!, c.targetSlug, c.context, c.linkType,
-          'frontmatter', c.originSlug, c.originField,
-          linkSourceOpts,
-        );
-        const existKey = `${c.fromSlug}\u0000${c.linkType}`;
-        const exists = existingIn.some(l =>
-          `${l.from_slug}\u0000${l.link_type}` === existKey
-        );
-        if (!exists) created++;
-      } catch {
-        errors++;
-      }
-    }
-
-    // Remove stale outgoing (markdown or our-frontmatter, not in desired set).
-    for (const l of reconcilableOut) {
-      const key = `${l.to_slug}\u0000${l.link_type}\u0000${l.link_source ?? 'markdown'}`;
-      if (!outKeys.has(key)) {
-        try {
-          await tx.removeLink(slug, l.to_slug, l.link_type, l.link_source ?? undefined, removeSourceOpts);
-          removed++;
-        } catch {
-          errors++;
-        }
-      }
-    }
-
-    // Remove stale incoming (our frontmatter → slug, not in desired set).
-    for (const l of existingIn) {
-      const key = `${l.from_slug}\u0000${l.link_type}`;
-      if (!incKeys.has(key)) {
-        try {
-          await tx.removeLink(l.from_slug, slug, l.link_type, 'frontmatter', removeSourceOpts);
-          removed++;
-        } catch {
-          errors++;
-        }
-      }
-    }
-
-    return { created, removed, errors };
+) {
+  const sourceId = opts?.sourceId ?? 'default';
+  const snapshot = await engine.readPageSnapshot(slug, { sourceId });
+  if (!snapshot) return;
+  const { prepareAutomaticLinks } = await import('../persistence/links-preparation.ts');
+  const prepared = await prepareAutomaticLinks(engine, slug, { ...snapshot.page, frontmatter: snapshot.page.frontmatter ?? {} }, sourceId);
+  return engine.transaction(async tx => {
+    await tx.lockPageKeys([{sourceId,slug}, ...prepared.pageKeys]);
+    const current = await tx.readPageSnapshot(slug, {sourceId});
+    if (!current || current.page.id !== snapshot.page.id || current.revision !== snapshot.revision) return;
+    return prepared.apply(tx);
   });
-
-  return { ...result, unresolved };
 }
 
 const delete_page: Operation = {

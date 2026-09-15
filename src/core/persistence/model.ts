@@ -9,6 +9,8 @@ export interface WriteAuthority {
   /** Original page-visibility ceiling; current policy can only narrow it. */
   excludePrivate?: boolean;
   databaseOnlyReason?: 'subagent_sandbox' | 'disabled_by_config' | 'no_repo_configured';
+  autoLinkTrusted?: boolean;
+  restrictedNamespace?: boolean;
   sourceId: string;
   sourceIncarnation: string;
   scopes: string[];
