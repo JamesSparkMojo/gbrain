@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { parseFactsFence, renderFactsTable, replaceOrInsertFactsFence } from '../facts-fence.ts';
+import { renderFactsTable } from '../facts-fence.ts';
+import { withdrawnFact, withdrawalFenceBlocks } from '../facts/withdrawal-overlay.ts';
 import { privatePagesFilterFragment } from '../search/private-visibility.ts';
 import type { ReadQuery } from '../search/read-enrichment.ts';
 import { rowToPage } from '../utils.ts';
@@ -8,24 +9,24 @@ import type { PageSnapshot, PageSnapshotOptions, PageWithdrawal } from './types.
 /** The DB normalizes companion lines, preserving its lower()/POSIX-space semantics. */
 function overlayWithdrawals(body: string, normalizedBody: string, withdrawals: PageWithdrawal[]): string {
   if (!withdrawals.length || !body.includes('gbrain:facts:begin')) return body;
-  const original = parseFactsFence(body);
-  const normalized = parseFactsFence(normalizedBody);
-  // Preserve malformed-fence diagnostics instead of silently dropping partial rows.
-  if (original.warnings.length || normalized.warnings.length) return body;
-  const claims = new Map(normalized.facts.map(f => [f.rowNum, f.claim]));
   const ledger = new Map(withdrawals.map(w => [`${w.visibility}:${w.fact_hash}`, w.withdrawn_at]));
-  let changed = false;
-  const facts = original.facts.map(f => {
-    const claim = claims.get(f.rowNum);
-    if (claim === undefined || !f.active) return f;
-    const hash = createHash('sha256').update(claim).digest('hex');
-    const at = ledger.get(`${f.visibility}:${hash}`);
-    if (!at) return f;
-    changed = true;
-    return { ...f, active: false, forgotten: true, validUntil: new Date(at).toISOString().slice(0, 10),
-      context: [f.context, 'forgotten: memory withdrawn'].filter(Boolean).join(' | ') };
-  });
-  return changed ? replaceOrInsertFactsFence(body, renderFactsTable(facts)) : body;
+  const blocks = withdrawalFenceBlocks(body), normalized = withdrawalFenceBlocks(normalizedBody);
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const block = blocks[i], norm = normalized[i];
+    if (!norm || block.parsed.warnings.length || norm.parsed.warnings.length) continue;
+    const claims = new Map(norm.parsed.facts.map(f => [f.rowNum, f.claim]));
+    let changed = false;
+    const facts = block.parsed.facts.map(f => {
+      const claim = claims.get(f.rowNum);
+      if (claim === undefined) return f;
+      const at = ledger.get(`${f.visibility}:${createHash('sha256').update(claim).digest('hex')}`);
+      if (!at) return f;
+      changed = true;
+      return withdrawnFact(f, new Date(at).toISOString().slice(0, 10));
+    });
+    if (changed) body = body.slice(0, block.start) + renderFactsTable(facts) + body.slice(block.end);
+  }
+  return body;
 }
 
 /** Normalize filesystem bytes with the exact ledger fingerprint rules before comparing them. */

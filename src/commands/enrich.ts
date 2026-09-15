@@ -32,7 +32,9 @@
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../core/engine.ts';
 import type { EnrichCandidate, PageType } from '../core/types.ts';
-import { operations } from '../core/operations.ts';
+import { operations, OperationError } from '../core/operations.ts';
+import { assertUnmanagedCanonicalWriter } from '../core/persistence/maintenance.ts';
+import type { WriteReceipt } from '../core/persistence/types.ts';
 import type { OperationContext } from '../core/operations.ts';
 import { configureGatewayIfUninitialized, isAvailable, chat, getChatModel, withBudgetTracker } from '../core/ai/gateway.ts';
 import { BudgetTracker, BudgetExhausted, loadPricingOverrides, type BudgetReason } from '../core/budget/budget-tracker.ts';
@@ -168,6 +170,8 @@ export interface EnrichResult {
   /** #2504 — first pool failure ('slug: message'), so pages_failed > 0 always
    *  carries a WHY (pool.failures was previously write-only). */
   first_failure?: string;
+  /** Accepted publication IDs remain inspectable after a pending or failed run. */
+  write_requests?: WriteReceipt[];
 }
 
 // ---------------------------------------------------------------------------
@@ -471,6 +475,7 @@ export async function runEnrichCore(
   signal?: AbortSignal,
 ): Promise<EnrichResult> {
   if (!opts.sourceId) throw new Error('runEnrichCore: opts.sourceId is required');
+  if (!opts.dryRun) await assertUnmanagedCanonicalWriter(engine, 'enrich');
 
   const result: EnrichResult = {
     candidates_considered: 0,
@@ -583,6 +588,11 @@ export async function runEnrichCore(
     }
 
     result.pages_failed = pool.errored;
+    const writeRequests = pool.failures.flatMap(f => f.error instanceof OperationError && f.error.writeRequest ? [f.error.writeRequest] : []);
+    if (writeRequests.length) {
+      result.write_requests = writeRequests;
+      for (const receipt of writeRequests) process.stderr.write(`[enrich:${sourceId}] Write request ${receipt.request_id}: ${receipt.state}; inspect get_write_request before repeating enrichment.\n`);
+    }
 
     // #2504 — pool.failures used to be write-only: an operator saw
     // pages_failed:N with zero reason anywhere (the pricing hard-fail looked
@@ -888,6 +898,7 @@ function addInto(agg: EnrichResult, r: EnrichResult): void {
   if (r.first_failure && agg.first_failure === undefined) {
     agg.first_failure = r.first_failure;
   }
+  if (r.write_requests?.length) (agg.write_requests ??= []).push(...r.write_requests);
 }
 
 /**

@@ -1,5 +1,6 @@
 import type { BrainEngine } from '../engine.ts';
-import { parseFactsFence, renderFactsTable, replaceOrInsertFactsFence, type ParsedFact } from '../facts-fence.ts';
+import { renderFactsTable, type ParsedFact } from '../facts-fence.ts';
+import { withdrawnFact, withdrawalFenceBlocks } from './withdrawal-overlay.ts';
 
 export interface WithdrawalCommit {
   withdrawn: boolean;
@@ -66,19 +67,19 @@ async function withdrawalDates(engine: BrainEngine, sourceId: string, facts: rea
 /** Overlay stale source files before hashing/chunking, retaining an explicit retraction. */
 export async function preserveWithdrawnFenceRows(engine: BrainEngine, sourceId: string, body: string): Promise<string> {
   if (!body.includes('gbrain:facts:begin')) return body;
-  const parsed = parseFactsFence(body);
-  // Preserve the existing malformed-fence diagnostics; re-rendering a
-  // partial parse would delete unreadable rows. The database trigger still
-  // protects derived facts if a later repair/reconcile sees their claims.
-  if (parsed.warnings.length) return body;
-  const dates = await withdrawalDates(engine, sourceId, parsed.facts.filter(f => f.active));
-  if (!dates.size) return body;
-  const facts = parsed.facts.map(f => {
-    const date = dates.get(f.rowNum);
-    return date ? { ...f, active:false, forgotten:true, validUntil:date,
-      context: [f.context, 'forgotten: memory withdrawn'].filter(Boolean).join(' | ') } : f;
-  });
-  return replaceOrInsertFactsFence(body, renderFactsTable(facts));
+  const blocks = withdrawalFenceBlocks(body);
+  for (const block of blocks.reverse()) {
+    // Preserve malformed-fence diagnostics; never re-render a partial parse.
+    if (block.parsed.warnings.length) continue;
+    const dates = await withdrawalDates(engine, sourceId, block.parsed.facts);
+    if (!dates.size) continue;
+    const facts = block.parsed.facts.map(f => {
+      const date = dates.get(f.rowNum);
+      return date ? withdrawnFact(f, date) : f;
+    });
+    body = body.slice(0, block.start) + renderFactsTable(facts) + body.slice(block.end);
+  }
+  return body;
 }
 
 /** Explicit remember is not an implicit restore operation. */

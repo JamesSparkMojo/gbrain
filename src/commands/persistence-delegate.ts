@@ -11,7 +11,7 @@ export async function reportPersistenceCliError(error: unknown, json = false): P
   const detail = error.toJSON();
   if (json) await writeStdoutFinal(JSON.stringify(detail, null, 2) + '\n');
   console.error(error instanceof OperationError ? `Error [${error.code}]: ${error.message}` : error.message);
-  if (detail.suggestion) console.error(detail.suggestion);
+  if (detail.suggestion) console.error(`Fix: ${detail.suggestion}`);
   setCliExitVerdict(1);
   return true;
 }
