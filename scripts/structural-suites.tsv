@@ -164,6 +164,7 @@ test/files.test.ts	storage precondition — the silent-no-op class (#4022)	3	rea
 test/filing-rules-resolution.serial.test.ts	per-source filing-rules resolution	3	readFileSync
 test/fix-wave-structural.test.ts	#2084 — cli.ts owns process-exit teardown via finishCliTeardown	4	readFileSync
 test/fix-wave-structural.test.ts	#2955 — sync multi-source repoPath routes through msysToNativePath	1	readFileSync
+test/fix-wave-structural.test.ts	#4603 — keyword-arm ORDER BY score DESC carries the stable tiebreaker	1	readFileSync
 test/fix-wave-structural.test.ts	WAL-repair wave structural pins (#223/#2575)	4	readFileSync
 test/fix-wave-structural.test.ts	five-issue fix wave — integrity progress is (source_id, slug)-keyed	1	readFileSync
 test/fix-wave-structural.test.ts	v0.36.1.x #1077 — admin register-client supports PKCE public clients	1	readFileSync
