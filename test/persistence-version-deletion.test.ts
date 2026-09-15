@@ -9,16 +9,20 @@ import { OperationError, type OperationContext } from '../src/core/ops/contract.
 import { activatePersistence } from '../src/core/persistence/activation.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MIGRATIONS } from '../src/core/migrate.ts';
+import { detectMissingColumns } from '../src/core/schema-verify.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { serializePageToMarkdown } from '../src/core/markdown.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 const fixtures: Array<{ engine: BrainEngine; root: string; ctx: OperationContext; close: () => Promise<void> }> = [];
 const sourceId = 'version-deletion';
 beforeAll(async () => {
-  const engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema();
+  const engine = new PGLiteEngine();
+  // This suite verifies schema replay itself, including already-current ledgers.
+  await withEnv({ GBRAIN_PGLITE_SNAPSHOT: undefined }, async () => { await engine.connect({}); await engine.initSchema(); });
   const databases: Array<{ engine: BrainEngine; close: () => Promise<void> }> = [{ engine, close: () => engine.disconnect() }];
   if (process.env.DATABASE_URL) databases.push(await isolatedPersistencePostgres(process.env.DATABASE_URL));
   for (const database of databases) {
@@ -49,12 +53,25 @@ test('migration158 leaves old snapshots unknown and new versions record live or 
     await engine.executeRaw('ALTER TABLE page_versions DROP COLUMN is_deleted');
     const [legacy] = await engine.executeRaw<{ id: number }>('INSERT INTO page_versions(page_id,compiled_truth,frontmatter) VALUES($1,$2,$3::text::jsonb) RETURNING id',
       [page.id, page.compiled_truth, JSON.stringify(page.frontmatter)]);
+    expect((await detectMissingColumns(engine)).missing).toContainEqual({ table: 'page_versions', column: 'is_deleted' });
+    // The ledger already says v158; the standalone schema replay must repair
+    // the missing column without relying on the pending migration runner.
+    await engine.initSchema();
     const migration = MIGRATIONS.find(value => value.version === 158)!;
     await engine.executeRaw(migration.sql); await engine.executeRaw(migration.sql);
     expect((await engine.executeRaw<PageVersion>('SELECT * FROM page_versions WHERE id=$1', [legacy.id]))[0].is_deleted).toBeNull();
-    expect((await engine.createVersion('upgrade', { sourceId })).is_deleted).toBe(false);
+    const liveVersion = await engine.createVersion('upgrade', { sourceId });
+    expect(liveVersion.is_deleted).toBe(false);
     await engine.softDeletePage('upgrade', { sourceId });
-    expect((await engine.createVersion('upgrade', { sourceId })).is_deleted).toBe(true);
+    const deletedVersion = await engine.createVersion('upgrade', { sourceId });
+    expect(deletedVersion.is_deleted).toBe(true);
+    const before = await engine.readPageSnapshot('upgrade', { sourceId, includeDeleted: true });
+    await engine.initSchema();
+    expect(await engine.readPageSnapshot('upgrade', { sourceId, includeDeleted: true })).toEqual(before);
+    const versions = await engine.getVersions('upgrade', { sourceId });
+    expect(versions.find(version => version.id === legacy.id)!.is_deleted).toBeNull();
+    expect(versions.find(version => version.id === liveVersion.id)!.is_deleted).toBe(false);
+    expect(versions.find(version => version.id === deletedVersion.id)!.is_deleted).toBe(true);
     expect((await activatePersistence(engine, { confirmQuiesced: true })).enabled).toBe(true);
   }
 });

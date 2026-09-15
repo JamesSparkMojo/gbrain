@@ -1686,6 +1686,7 @@ ALTER TABLE page_versions ADD COLUMN IF NOT EXISTS timeline TEXT;
 ALTER TABLE page_versions ADD COLUMN IF NOT EXISTS title TEXT;
 ALTER TABLE page_versions ADD COLUMN IF NOT EXISTS type TEXT;
 ALTER TABLE page_versions ADD COLUMN IF NOT EXISTS tags JSONB;
+ALTER TABLE page_versions ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN;
 CREATE TABLE IF NOT EXISTS page_write_guards (
     source_incarnation UUID NOT NULL REFERENCES sources(incarnation) ON DELETE CASCADE,
     slug TEXT NOT NULL,
