@@ -49,22 +49,27 @@ async function finishPage(engine: BrainEngine, effect: PersistenceEffect, snapsh
   else await completeEffect(engine, effect, outcome);
 }
 
+/** Missing physical files never prevent the authoritative withdrawal from materializing. */
+async function materializeAndAdvance(engine: BrainEngine, effect: PersistenceEffect, snapshot: PageSnapshot, hostId: string): Promise<void> {
+  await engine.transaction(async tx => {
+    await guardEffectSource(tx, effect, hostId);
+    await tx.lockPageKeys([{ sourceId: effect.source_id, slug: snapshot.page.slug }]);
+    const current = await tx.readPageSnapshot(snapshot.page.slug, { sourceId: effect.source_id, includeDeleted: true });
+    if (current?.revision !== snapshot.revision || current.page.id !== snapshot.page.id) throw new OperationError('revision_conflict', 'The withdrawal page changed during preparation.');
+    await materializePageSnapshot(tx, current);
+    await finishPage(tx, effect, current);
+  });
+}
+
 async function mirrorPage(engine: BrainEngine, effect: PersistenceEffect, binding: WorktreeBinding | null, opts: EffectWorkerOptions): Promise<void> {
   const snapshot = await selectedPage(engine, effect);
   if (!snapshot) { await completeEffect(engine, effect); return; }
   if (snapshot.sourceIncarnation !== effect.source_incarnation) throw new OperationError('source_changed', 'The mirror source was replaced.');
   const content = serializePageToMarkdown(snapshot.page, snapshot.tags);
-  const file = binding?.local_path ? await prepareFileTarget(engine, { ...effect, slug: snapshot.page.slug }, snapshot, content, opts.hostId) : undefined;
+  const file = binding?.local_path ? await prepareFileTarget(engine, { ...effect, slug: snapshot.page.slug }, snapshot, content, opts.hostId, { allowMissing: true }) : undefined;
   if (!file || snapshot.page.deleted_at || !existsSync(file.path)) {
     // A withdrawal cannot resurrect a deleted or missing physical page.
-    await engine.transaction(async tx => {
-      await guardEffectSource(tx, effect, opts.hostId);
-      await tx.lockPageKeys([{ sourceId: effect.source_id, slug: snapshot.page.slug }]);
-      const current = await tx.readPageSnapshot(snapshot.page.slug, { sourceId: effect.source_id, includeDeleted: true });
-      if (current?.revision !== snapshot.revision) throw new OperationError('revision_conflict', 'The mirror page changed during preparation.');
-      await materializePageSnapshot(tx, current);
-      await finishPage(tx, effect, current);
-    });
+    await materializeAndAdvance(engine, effect, snapshot, opts.hostId);
     return;
   }
   const after = Buffer.from(content);
@@ -83,9 +88,10 @@ async function gitPage(engine: BrainEngine, effect: PersistenceEffect, binding: 
   if (effect.data.source_scan) {
     if (!snapshot) { await completeEffect(engine, effect); return; }
     const file = await prepareFileTarget(engine, { ...effect, slug: snapshot.page.slug }, snapshot,
-      snapshot.page.deleted_at ? null : serializePageToMarkdown(snapshot.page, snapshot.tags), opts.hostId);
+      snapshot.page.deleted_at ? null : serializePageToMarkdown(snapshot.page, snapshot.tags), opts.hostId, { allowMissing: true });
     if (!file) throw new OperationError('source_changed', 'The Git binding changed.');
     path = file.path;
+    if (!existsSync(path)) { await materializeAndAdvance(engine, effect, snapshot, opts.hostId); return; }
     if (snapshot.page.deleted_at && existsSync(path)) { await finishPage(engine, effect, snapshot, { reason: 'deleted_page_file_present' }); return; }
   } else {
     if (!effect.data.relative_path) throw new OperationError('storage_error', 'The Git effect lost its target.');

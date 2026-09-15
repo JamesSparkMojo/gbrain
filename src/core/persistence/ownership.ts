@@ -124,6 +124,7 @@ export async function prepareWriterTransfer(engine: BrainEngine, sourceId: strin
   if (!lock) throw new OperationError('write_pending', 'The worktree is busy; retry transfer preparation.');
   try {
     return await engine.transaction(async tx => {
+      await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
       const [owner] = await tx.executeRaw<{ owner_host_id: string; owner_epoch: string }>('SELECT owner_host_id,owner_epoch FROM persistence_worktrees WHERE id=$1::uuid FOR UPDATE', [binding.worktree_id]);
       if (owner.owner_host_id !== hostId) throw new OperationError('owner_unavailable', 'Ownership changed during transfer.');
       const pending = await tx.executeRaw(`SELECT id FROM persistence_requests WHERE worktree_id=$1::uuid AND
@@ -147,6 +148,7 @@ export async function acceptWriterTransfer(engine: BrainEngine, sourceId: string
   if (!lock) throw new OperationError('write_pending', 'Successor worktree is busy.');
   try {
     await engine.transaction(async tx => {
+      await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
       const [owner] = await tx.executeRaw<{ owner_epoch: string; state: string; manifest: { digest: string } }>('SELECT owner_epoch,state,manifest FROM persistence_worktrees WHERE id=$1::uuid FOR UPDATE', [binding.worktree_id]);
       if (!owner || owner.state !== 'draining' || String(owner.owner_epoch) !== expectedEpoch || owner.manifest?.digest !== expectedManifest) throw new OperationError('writer_transfer_conflict', 'Transfer preparation or epoch changed.');
       const pending = await tx.executeRaw(`SELECT id FROM persistence_requests WHERE worktree_id=$1::uuid AND (state IN ('running','recovering') OR recovery IS NOT NULL) LIMIT 1`, [binding.worktree_id]);

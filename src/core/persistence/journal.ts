@@ -148,6 +148,9 @@ export async function prepareRecovery(engine: BrainEngine, row: WriteRequest, re
   if (!row.worktree_id) throw new TypeError('Filesystem recovery requires a worktree.');
   if (bytes > limits.worktreeRecoveryBytes || bytes > limits.brainRecoveryBytes) throw new OperationError('request_too_large', 'This request exceeds the configured recovery capacity.', 'Increase recovery capacity before submitting a new request.');
   await engine.transaction(async tx => {
+    // A crash after rename must never lose the earlier recovery reservation,
+    // even when the deployment defaults ordinary transactions to async commit.
+    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
     const counters = await lockCounters(tx, ['brain', `worktree:${row.worktree_id}`]);
     const [current] = await tx.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE id=$1::uuid FOR UPDATE', [row.id]);
     if (!current || current.execution_token !== row.execution_token || current.state !== 'running') throw new OperationError('write_claim_lost', 'The write execution claim was superseded.');
@@ -165,6 +168,9 @@ export async function prepareRecovery(engine: BrainEngine, row: WriteRequest, re
 /** In the SAME transaction as page publication. Counters are always before request locks. */
 export async function completeWrite(tx: SqlEngine, row: WriteRequest, state: 'committed' | 'conflict' | 'failed' | 'cancelled',
   outcome: Record<string, unknown>, error?: { code: string; message: string }): Promise<WriteRequest> {
+  // Every acknowledged terminal state survives a crash, including cancellation
+  // and pre-publication failures that do not enter the file coordinator.
+  await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
   const keys = ['brain', principalKey(requestPrincipal(row)), ...(row.worktree_id ? [`worktree:${row.worktree_id}`] : [])];
   await lockCounters(tx, keys);
   const [current] = await tx.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE id=$1::uuid FOR UPDATE', [row.id]);

@@ -123,6 +123,29 @@ test('unexpected mirror bytes retain recovery, block this root and transfer, and
   await engine.transaction(tx => completeWrite(tx, blocked, 'cancelled', {}));
 });
 
+test('missing withdrawal files materialize and advance mirror and Git scans without resurrection', async () => {
+  const f = await fixture(body());
+  await engine.putPage('z-later', page(body()), { sourceId: f.sourceId });
+  const later = (await engine.readPageSnapshot('z-later', { sourceId: f.sourceId }))!;
+  const laterFile = join(f.root, 'z-later.md'); writeFileSync(laterFile, serializePageToMarkdown(later.page, later.tags));
+  const row = await withdraw(f); await onlyEffects(row.id); rmSync(f.file);
+  const logical = (await engine.readPageSnapshot('page', { sourceId: f.sourceId }))!;
+  // Ordinary edits still refuse this unimported deletion.
+  await expect(prepareFileTarget(engine, row, logical, 'Replacement', hostId)).rejects.toMatchObject({ code: 'source_changed' });
+  await engine.executeRaw("UPDATE persistence_effects SET next_attempt_at=now()+interval '1 hour' WHERE request_id=$1::uuid AND kind<>'withdrawal-mirror'", [row.id]);
+  await runPersistenceEffects(engine, config, { hostId, limit: 3 });
+  expect(existsSync(f.file)).toBe(false);
+  expect((await publicEffectsForRequest(engine, row.id)).find(effect => effect.kind === 'withdrawal-mirror')!.state).toBe('committed');
+  const [raw] = await engine.executeRaw<{ compiled_truth: string; knowledge_revision: string }>('SELECT compiled_truth,knowledge_revision FROM pages WHERE id=$1', [logical.page.id]);
+  expect(raw.compiled_truth).toBe(logical.page.compiled_truth); expect(raw.knowledge_revision).toBe(logical.revision);
+  expect(parseFactsFence(readFileSync(laterFile, 'utf8')).facts.filter(fact => fact.active)).toHaveLength(0);
+  await engine.executeRaw("UPDATE persistence_effects SET next_attempt_at=now() WHERE request_id=$1::uuid AND kind='git'", [row.id]);
+  await runPersistenceEffects(engine, config, { hostId, limit: 1 });
+  const [git] = await engine.executeRaw<{ data: { after_slug: string }; error_code: string | null }>("SELECT data,error_code FROM persistence_effects WHERE request_id=$1::uuid AND kind='git'", [row.id]);
+  expect(git.data.after_slug).toBe('page'); expect(git.error_code).toBeNull(); expect(existsSync(f.file)).toBe(false);
+  expect((await getWriteRequestById(engine, row.id))!.state).toBe('committed');
+});
+
 test('configured recovery capacity refuses file mutation without undoing withdrawal', async () => {
   const f = await fixture(body()); const original = readFileSync(f.file, 'utf8'); const row = await withdraw(f); await onlyEffects(row.id);
   await engine.setConfig('persistence.limits.worktree_recovery_bytes', '1');
