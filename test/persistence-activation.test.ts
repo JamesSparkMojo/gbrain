@@ -1,4 +1,5 @@
-import { expect, test } from 'bun:test';
+import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -16,19 +17,37 @@ import { persistenceSocketPathForConfig, startPersistenceIpcServer } from '../sr
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { withEnv } from './helpers/with-env.ts';
 
+let memoryEngine: PGLiteEngine;
+let diskEngine: PGLiteEngine;
+let schemaVersion: string;
+const diskHome = mkdtempSync(join(tmpdir(), 'gbrain-activation-disk-'));
+beforeAll(async () => {
+  memoryEngine = new PGLiteEngine();
+  await memoryEngine.connect({}); await memoryEngine.initSchema();
+  schemaVersion = (await memoryEngine.getConfig('version'))!;
+  await withEnv({ GBRAIN_HOME: diskHome, DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, async () => {
+    diskEngine = new PGLiteEngine();
+    await diskEngine.connect({ database_path: join(diskHome, 'db') }); await diskEngine.initSchema();
+  });
+}, 120_000);
+afterAll(async () => {
+  await disposePersistenceConsumer(memoryEngine); await memoryEngine.disconnect();
+  await disposePersistenceConsumer(diskEngine); await diskEngine.disconnect();
+  rmSync(diskHome, { recursive: true, force: true });
+});
 async function fixture(run: (engine: PGLiteEngine, root: string, home: string, sourceId: string) => Promise<void>, disk = false) {
-  const home = mkdtempSync(join(tmpdir(), 'gbrain-activation-'));
+  const home = disk ? diskHome : mkdtempSync(join(tmpdir(), 'gbrain-activation-'));
   const root = join(home, 'canonical'); mkdirSync(root);
-  await withEnv({ GBRAIN_HOME: home, DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, async () => {
-    const engine = new PGLiteEngine();
-    try {
-      await engine.connect(disk ? { database_path: join(home, 'db') } : {}); await engine.initSchema();
+  const engine = disk ? diskEngine : memoryEngine;
+  try {
+    await withEnv({ GBRAIN_HOME: home, DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, async () => {
+      await disposePersistenceConsumer(engine); await resetPgliteState(engine); await engine.setConfig('version', schemaVersion);
       const sourceId = `activate-${randomUUID()}`;
       await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', [sourceId, root]);
-      await run(engine, root, home, sourceId);
-    } finally { await disposePersistenceConsumer(engine); await engine.disconnect(); }
-  });
-  rmSync(home, { recursive: true, force: true });
+      try { await run(engine, root, home, sourceId); }
+      finally { await disposePersistenceConsumer(engine); }
+    });
+  } finally { if (!disk) rmSync(home, { recursive: true, force: true }); }
 }
 
 test('activation requires explicit quiescence and a complete owner binding without silently claiming', () => fixture(async (engine, root, _home, sourceId) => {
