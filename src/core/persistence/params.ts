@@ -1,4 +1,13 @@
 import type { ParamDef } from '../ops/contract.ts';
+
+/** Capture input sugar stays data; the owner materializes generated fields once. */
+export const CAPTURE_EVENT_PARAMS: Record<string, ParamDef> = {
+  who: { type: 'string', description: 'For event captures, comma-separated entity slugs.' },
+  what: { type: 'string', description: 'For event captures, the event description.' },
+  where: { type: 'string', description: 'For event captures, the location.' },
+  kind: { type: 'string', description: 'For event captures, the event kind.' },
+  depth: { type: 'string', description: 'For event captures, the depth page to link.' },
+};
 import { WRITE_REQUEST_STATES } from './types.ts';
 
 /** Leaf definitions: safe to import while the frozen verb registry is evaluating. */

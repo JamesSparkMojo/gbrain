@@ -725,29 +725,10 @@ async function main() {
   // The live PGLite owner exposes canonical operations over a dedicated
   // local socket. Delegate before opening a competing engine connection.
   {
-    const { maybeDelegateLocalOperation } = await import('./core/persistence/local-client.ts');
-    const { PersistenceIpcTransportError } = await import('./core/persistence/ipc.ts');
-    try {
-      const delegated = await maybeDelegateLocalOperation(op.name, params, cfgPre, {
-        brain: cliOpts.brain, timeoutMs: cliOpts.timeoutMs ?? undefined,
-      });
-      if (delegated.handled) {
-        const output = formatResult(op.name, delegated.result, params);
-        if (output) await writeStdoutFinal(output);
-        if ((delegated.result as { status?: unknown } | null)?.status === 'error') setCliExitVerdict(1);
-        return;
-      }
-    } catch (error) {
-      if (error instanceof OperationError || error instanceof PersistenceIpcTransportError) {
-        if (params.json) await writeStdoutFinal(JSON.stringify(error.toJSON(), null, 2) + '\n');
-        console.error(error.message);
-        const detail = error.toJSON();
-        if (detail.suggestion) console.error(detail.suggestion);
-        setCliExitVerdict(1);
-        return;
-      }
-      throw error;
-    }
+    const { runDelegatedCliOperation } = await import('./commands/persistence-delegate.ts');
+    if (await runDelegatedCliOperation(op.name, params, cfgPre, {
+      brain: cliOpts.brain, timeoutMs: cliOpts.timeoutMs ?? undefined,
+    }, formatResult)) return;
   }
 
   // No live serve owns the selected brain; connect through the normal lock path.
@@ -2908,6 +2889,12 @@ async function handleCliOnly(command: string, args: string[]) {
     }
   }
 
+  if (command === 'capture' || command === 'forget' || command === 'call') {
+    const { runDeferredPersistenceCommand } = await import('./commands/persistence-delegate.ts');
+    await runDeferredPersistenceCommand(command, args, connectEngine);
+    return;
+  }
+
   // Serve-delegated sync preflight (PGLite host brains only): a live `gbrain
   // serve` owns the single-writer lock, so connectEngine below would throw
   // LiveServeLockError — instead the sync runs INSIDE the serve over its IPC
@@ -3103,11 +3090,6 @@ async function handleCliOnly(command: string, args: string[]) {
         const { runServe } = await import('./commands/serve.ts');
         await runServe(engine, args);
         return; // serve doesn't disconnect
-      }
-      case 'call': {
-        const { runCall } = await import('./commands/call.ts');
-        await runCall(engine, args);
-        break;
       }
       case 'sweep': {
         // [CX2-5] Trusted local sweep entry — succeeds precisely because no
@@ -3311,11 +3293,6 @@ async function handleCliOnly(command: string, args: string[]) {
         break;
       }
       // v0.38 — Capture: single human-facing entrypoint for ingestion.
-      case 'capture': {
-        const { runCapture } = await import('./commands/capture.ts');
-        await runCapture(engine, args);
-        break;
-      }
       case 'conversation-parser': {
         // v0.41.13.0 — debug + introspection CLI for the new parser
         // cathedral. `scan <slug>` requires a connected brain; the
@@ -3418,12 +3395,6 @@ async function handleCliOnly(command: string, args: string[]) {
         // `--supersessions`, `--include-expired`, `--as-context`, `--json`.
         const { runRecall } = await import('./commands/recall.ts');
         await runRecall(engine, args);
-        break;
-      }
-      case 'forget': {
-        // v0.31: shorthand for expireFact. `gbrain forget <fact-id>`.
-        const { runForget } = await import('./commands/recall.ts');
-        await runForget(engine, args);
         break;
       }
       case 'notability-eval': {
