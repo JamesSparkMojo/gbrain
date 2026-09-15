@@ -59,6 +59,18 @@ invariants against real Postgres; the E2E map selects it for lease and engine
 changes. `test/engine-control-routing.test.ts` pins direct/shared pool routing,
 nested transaction confinement and the Postgres resident-stop barrier.
 
+### Durable persistence schedules and process crashes
+
+`test/persistence-chaos.slow.test.ts` and `test/e2e/persistence-chaos.test.ts`
+execute real journal/coordinator schedules and six SIGKILL publication
+boundaries, followed by a small multi-process soak. The Postgres test creates
+and drops fresh test databases, requiring CREATEDB on the explicit test URL.
+It never truncates the shared E2E database. The reusable
+`persistence-validation.yml` gate runs 1,000 schedules and 10,000 writes per
+engine under Bun 1.3.11 and 1.3.13 and uploads actual executed-case manifests.
+See [`scripts/persistence/README.md`](../scripts/persistence/README.md) for
+workloads, reruns, performance measurements and the process-crash scope.
+
 ### PGLite schema snapshot (default-on)
 
 `scripts/build-pglite-snapshot.ts` (`bun run build:pglite-snapshot`) bakes a
