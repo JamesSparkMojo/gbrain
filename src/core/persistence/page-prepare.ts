@@ -10,6 +10,7 @@ import { parseMarkdown, serializePageToMarkdown, resolveSourceLocalFilePath } fr
 import { OperationError } from '../ops/contract.ts';
 import { assertPageRevision, type PageSnapshot } from '../page-state/types.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
+import { recordedPathFromFileUri } from '../write-through.ts';
 import { engineMutationPrecondition, parseMutationPrecondition } from './preconditions.ts';
 import { authorizeWrite } from './authority.ts';
 import { digest, sha256 } from './digest.ts';
@@ -35,7 +36,9 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
   const binding = await getWorktreeBinding(engine, row.source_id, hostId);
   if (!binding?.local_path) throw new OperationError('owner_unavailable', 'The canonical worktree is unavailable on this host.');
   const root = join(binding.local_path, binding.relative_path);
-  const path = resolveSourceLocalFilePath(root, snapshot?.page.source_path, row.slug) ?? join(root, `${row.slug}.md`);
+  const capturedPath = recordedPathFromFileUri(snapshot?.page.source_uri, root);
+  const path = resolveSourceLocalFilePath(root, snapshot?.page.source_path, row.slug)
+    ?? (capturedPath ? join(root, capturedPath) : join(root, `${row.slug}.md`));
   if (!isWriteTargetContained(path, root)) throw new OperationError('source_changed', 'The canonical file target is outside its registered source.');
   const before = existsSync(path) ? readFileSync(path) : null;
   if (!before && snapshot && !snapshot.page.deleted_at && !options.allowMissing) {
