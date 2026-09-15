@@ -4,6 +4,6 @@ export interface TopologyCloneRecovery {
   sourceId:string;incarnation:string;worktreeId:string;ownerHostId:string;ownerEpoch:string;
   target:string;stage:string;aside:string;beforeHash:string|null;afterHash:string|null;
   manifest:{digest:string;files:Record<string,string>;canonical_stamp?:string}|null;
-  canonicalStamp:string;checkpoint:string|null;input:SourceLifecycleInput;cloneBudget:number;
+  canonicalStamp:string;checkpoint:string|null;sourceRemoteUrl:string|null;input:SourceLifecycleInput;cloneBudget:number;
   stageIdentity?:{device:string;inode:string;birthNs:string};failureCode?:string;
 }

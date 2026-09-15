@@ -3,14 +3,14 @@ import { existsSync, lstatSync, renameSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import { OperationError } from '../ops/contract.ts';
+import { parseSourceConfig } from '../sources-load.ts';
 import { canonicalFilesystemPath } from './root-registry.ts';
 import { managedFilesystemDatastorePath, refreshManagedFilesystemRoots, withFilesystemPublication } from './filesystem-guard.ts';
 import { localHostId } from './identity.ts';
 import { worktreeManifest } from './ownership.ts';
 import { advanceTopology, lockTopologyPrincipal, settleTopologyRequests, topologyCanonicalStamp, withTopologyLocks } from './topology-locks.ts';
-import { lockCounters } from './journal.ts';
 import { withCoordinatedWrite } from './context.ts';
-import type { TopologyChange } from './topology-receipts.ts';
+import { releaseTopologyReservation, type TopologyChange } from './topology-receipts.ts';
 import type { TopologyCloneRecovery } from './topology-clone-model.ts';
 import type { CloneLifecycleHooks } from './topology-clone.ts';
 import { flushTopologyDirectory, topologyDirectoryIdentity } from './topology-filesystem.ts';
@@ -67,10 +67,7 @@ async function guard(tx:BrainEngine,row:TopologyChange,record:TopologyCloneRecov
   return sources;
 }
 async function releaseReservation(tx:BrainEngine,row:TopologyChange,record:TopologyCloneRecovery,state:'committed'|'failed'):Promise<void>{
-  await lockCounters(tx,['brain',`worktree:${record.worktreeId}`]);
-  const [current]=await tx.executeRaw<TopologyChange>('SELECT * FROM persistence_topology_changes WHERE id=$1::uuid FOR UPDATE',[row.id]);
-  if(!current.recovery)return;
-  for(const key of ['brain',`worktree:${record.worktreeId}`])await tx.executeRaw('UPDATE persistence_counters SET recovery_bytes=recovery_bytes-$2 WHERE key=$1',[key,Number(current.recovery_bytes)]);
+  if(!await releaseTopologyReservation(tx,row))return;
   await tx.executeRaw(`UPDATE persistence_topology_changes SET state=$2,recovery=NULL,recovery_bytes=0,updated_at=now(),
     outcome=COALESCE(outcome,'{}'::jsonb)||$3::text::jsonb WHERE id=$1::uuid`,[row.id,state,JSON.stringify(state==='failed'?{write_error:record.failureCode??'clone_interrupted'}:{})]);
   if(state==='failed'&&record.operation==='add')await tx.executeRaw('DELETE FROM persistence_source_bindings WHERE source_id=$1 AND source_incarnation=$2::uuid',[record.sourceId,record.incarnation]);
@@ -120,8 +117,9 @@ export async function finishTopologyClone(engine:BrainEngine,id:string,hooks:Clo
       try{
         await topologyTransaction(engine,async tx=>{
           const sources=await guard(tx,row,record);
-          const [source]=await tx.executeRaw<{incarnation:string;last_commit:string|null}>('SELECT incarnation,last_commit FROM sources WHERE id=$1',[record.sourceId]);
-          if(record.operation==='add'?!!source:!source||source.incarnation!==record.incarnation||source.last_commit!==record.checkpoint)
+          const [source]=await tx.executeRaw<{incarnation:string;last_commit:string|null;config:unknown}>('SELECT incarnation,last_commit,config FROM sources WHERE id=$1',[record.sourceId]);
+          if(record.operation==='add'?!!source:!source||source.incarnation!==record.incarnation||source.last_commit!==record.checkpoint
+            ||record.operation==='reclone'&&(parseSourceConfig(source?.config).remote_url??null)!==record.sourceRemoteUrl)
             throw new OperationError('source_changed','The source identity/checkpoint changed while cloning.');
           if(record.operation==='reclone'&&await topologyCanonicalStamp(tx,record.worktreeId)!==record.canonicalStamp)
             throw new OperationError('source_changed','The logical source changed while cloning; retry after its mirrors finish.');

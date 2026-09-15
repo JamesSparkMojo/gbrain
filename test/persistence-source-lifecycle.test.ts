@@ -281,4 +281,29 @@ test('pending withdrawal mirrors block topology without cancelling accepted work
   expect((await getWorktreeBinding(engine,source))!.topology_generation).toBe(binding.topology_generation);
 }),60_000);
 
+
+test('archive and restore preserve historical source configuration fields',()=>fixture(async(_home,source)=>{
+  const original={federated:true,remote_url:'https://example.invalid/brain.git',custom_key:'retained'};
+  await engine.executeRaw('UPDATE sources SET config=$2::text::jsonb WHERE id=$1',[source,JSON.stringify(JSON.stringify(original))]);
+  await runManagedSourceLifecycle(engine,{operation:'archive',sourceId:source});
+  await runManagedSourceLifecycle(engine,{operation:'restore',sourceId:source,refederate:false});
+  const [row]=await engine.executeRaw<{config:Record<string,unknown>}>('SELECT config FROM sources WHERE id=$1',[source]);
+  expect(row.config).toEqual({...original,federated:false});
+}),60_000);
+
+test('remote URL changes during clone preparation refuse publication',()=>fixture(async(_home,source,root)=>{
+  await engine.executeRaw('UPDATE sources SET config=$2::text::jsonb WHERE id=$1',[source,JSON.stringify({managed_clone:true,remote_url:'https://example.invalid/brain.git'})]);
+  const input={operation:'reclone' as const,sourceId:source,requestId:randomUUID()};
+  const result=await runManagedSourceClone(engine,input,await topologyPrincipal(engine),input.requestId,{...input,requestId:undefined,dryRun:undefined},{
+    clone:async(_url,stage)=>{
+      cpSync(root,stage,{recursive:true,filter:path=>!isPhysicalRootMetadata(basename(path))});
+      await engine.executeRaw('UPDATE sources SET config=$2::text::jsonb WHERE id=$1',[source,JSON.stringify({managed_clone:true,remote_url:'https://example.invalid/changed.git'})]);
+    },
+  });
+  expect(result).toMatchObject({state:'failed',write_error:'source_changed'});
+  expect(readFileSync(join(root,'example.md'),'utf8')).toContain('Canonical');
+  const counters=await engine.executeRaw<{key:string;outstanding_count:string;intent_bytes:string;recovery_bytes:string}>('SELECT key,outstanding_count::text,intent_bytes::text,recovery_bytes::text FROM persistence_counters');
+  for(const counter of counters){expect(counter.outstanding_count).toBe('0');expect(counter.intent_bytes).toBe('0');expect(counter.recovery_bytes).toBe('0');}
+}),60_000);
+
 });

@@ -5,6 +5,8 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import { OperationError } from '../ops/contract.ts';
 import { parseRemoteUrl } from '../git-remote.ts';
+import { isOwnedClone } from '../sources-ops.ts';
+import { parseSourceConfig } from '../sources-load.ts';
 import type { SourceLifecycleInput } from './source-lifecycle.ts';
 import type { TopologyCloneRecovery } from './topology-clone-model.ts';
 import { getWorktreeBinding, worktreeManifest } from './ownership.ts';
@@ -28,16 +30,19 @@ export async function runManagedSourceClone(engine:BrainEngine,input:SourceLifec
   hooks:CloneLifecycleHooks={}):Promise<Record<string,unknown>>{
   const [source]=await engine.executeRaw<{incarnation:string;config:Record<string,unknown>;last_commit:string|null;local_path:string|null}>(
     'SELECT incarnation,config,last_commit,local_path FROM sources WHERE id=$1',[input.sourceId]);
+  if(source)source.config=parseSourceConfig(source.config);
   if(input.operation==='add'&&source)throw new OperationError('source_id_taken','Source ID is already registered.');
   if(input.operation==='reclone'&&!source)throw new OperationError('not_found','Source not found.');
   if(input.expectedIncarnation&&input.expectedIncarnation!==source?.incarnation)throw new OperationError('source_changed','The source was replaced.');
   const binding=input.operation==='reclone'?await getWorktreeBinding(engine,input.sourceId):null;
   if(input.operation==='reclone'&&(!binding?.local_path||binding.owner_host_id!==localHostId()||binding.relative_path!==''))
     throw new OperationError('owner_unavailable','Reclone must run on the owner of the complete canonical worktree.');
-  if(input.operation==='reclone'&&source?.config.managed_clone!==true)throw new OperationError('unmanaged_path','Reclone only replaces a checkout created and managed by GBrain.');
+  if(input.operation==='reclone'&&(!source||!isOwnedClone({id:input.sourceId,local_path:source.local_path,config:source.config})))throw new OperationError('unmanaged_path','Reclone only replaces a checkout created and managed by GBrain.');
   const url=input.remoteUrl??source?.config.remote_url;
   if(typeof url!=='string')throw new OperationError('invalid_params','A configured HTTPS clone URL is required.');
   parseRemoteUrl(url);
+  if(input.operation==='reclone'&&input.remoteUrl!==undefined&&input.remoteUrl!==source?.config.remote_url)
+    throw new OperationError('source_changed',"Reclone must use the source's configured remote URL.");
   const requested=binding?.local_path??input.path;
   if(typeof requested!=='string'||!isAbsolute(requested)||requested.includes('\0'))throw new OperationError('invalid_params','Clone destination must be an absolute path on the owner.');
   const target=canonicalFilesystemPath(resolve(requested));
@@ -73,9 +78,10 @@ export async function runManagedSourceClone(engine:BrainEngine,input:SourceLifec
             throw new OperationError('recovery_required','The reserved checkout is still bound, recovering, or has a different physical identity.');
         }
         const sources=await lockTopologyRows(tx,input.sourceId,bindings);
-        const [current]=await tx.executeRaw<{incarnation:string;last_commit:string|null}>('SELECT incarnation,last_commit FROM sources WHERE id=$1',[input.sourceId]);
+        const [current]=await tx.executeRaw<{incarnation:string;last_commit:string|null;config:unknown}>('SELECT incarnation,last_commit,config FROM sources WHERE id=$1',[input.sourceId]);
         const replay=await priorTopologyChange(tx,principal,requestId,intent);if(replay)return replay;
-        if((current?.incarnation??null)!==(source?.incarnation??null)||current?.last_commit!==source?.last_commit)throw new OperationError('source_changed','The source changed before clone admission.');
+        if((current?.incarnation??null)!==(source?.incarnation??null)||current?.last_commit!==source?.last_commit
+          ||current&&parseSourceConfig(current.config).remote_url!==source?.config.remote_url)throw new OperationError('source_changed','The source changed before clone admission.');
         const invalidated=await settleTopologyRequests(tx,sources,bindings.map(row=>row.worktree_id),principal);
         const incarnation=source?.incarnation??randomUUID();
         let canonicalStamp=currentBinding?await topologyCanonicalStamp(tx,worktreeId):'';
@@ -86,7 +92,7 @@ export async function runManagedSourceClone(engine:BrainEngine,input:SourceLifec
         if(manifest&&Buffer.byteLength(JSON.stringify(manifest))>1_048_576)throw new OperationError('request_too_large','The canonical manifest exceeds the 1 MiB recovery metadata bound.');
         const recovery:TopologyCloneRecovery={version:1,kind:'clone',phase:'reserved',operation:input.operation as 'add'|'reclone',sourceId:input.sourceId,
           incarnation,worktreeId,ownerHostId:localHostId(),ownerEpoch:String(currentBinding?.owner_epoch??preparedOwner?.owner_epoch??1),target,stage,aside,
-          beforeHash:before?.digest??null,afterHash:null,manifest,canonicalStamp,checkpoint:source?.last_commit??null,input,cloneBudget:0};
+          beforeHash:before?.digest??null,afterHash:null,manifest,canonicalStamp,checkpoint:source?.last_commit??null,sourceRemoteUrl:source?.config.remote_url as string??null,input,cloneBudget:0};
         recovery.cloneBudget=reserved-oldBytes-Buffer.byteLength(JSON.stringify(recovery))-65_536;
         if(recovery.cloneBudget<65_536)throw new OperationError('request_too_large','The old checkout leaves insufficient configured recovery space for a staged clone.');
         if(!currentBinding){
@@ -101,7 +107,8 @@ export async function runManagedSourceClone(engine:BrainEngine,input:SourceLifec
           {operation:input.operation,source_id:input.sourceId,source_incarnation:incarnation,invalidated_requests:invalidated},recovery as unknown as Record<string,unknown>,reserved);
       });
       if(accepted.state!=='recovering')return topologyReceipt(accepted);
-      const recovery=accepted.recovery as unknown as TopologyCloneRecovery;
+      const admission=accepted;
+      const recovery=admission.recovery as unknown as TopologyCloneRecovery;
       await hooks.boundary?.('reserved');
       await withFilesystemPublication([target,recovery.stage,recovery.aside],async()=>{
         mkdirSync(dirname(target),{recursive:true});flushTopologyDirectory(dirname(target));
@@ -123,7 +130,7 @@ export async function runManagedSourceClone(engine:BrainEngine,input:SourceLifec
         if(recovery.manifest&&candidate.digest!==recovery.manifest.digest)throw new OperationError('writer_manifest_mismatch','The cloned checkout differs from the verified canonical manifest, including deletions.');
         flushTopologyTree(recovery.stage);flushTopologyDirectory(dirname(recovery.stage));
         recovery.afterHash=candidate.digest;recovery.phase='prepared';recovery.manifest={...candidate,canonical_stamp:recovery.canonicalStamp};
-        if(oldBytes+stageBytes+Buffer.byteLength(JSON.stringify(recovery))+65_536>Number(accepted.recovery_bytes))
+        if(oldBytes+stageBytes+Buffer.byteLength(JSON.stringify(recovery))+65_536>Number(admission.recovery_bytes))
           throw new OperationError('request_too_large','The complete staged clone and recovery metadata exceed the reserved capacity.');
         await topologyTransaction(engine,async tx=>{
           await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");

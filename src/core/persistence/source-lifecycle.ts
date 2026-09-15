@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import { OperationError } from '../ops/contract.ts';
 import { isValidSourceId } from '../source-id.ts';
+import { parseSourceConfig } from '../sources-load.ts';
 import { discoverGitRoot } from '../sync-git.ts';
 import { isInsideGitRepo, hasTrackedContent } from '../git-remote.ts';
 import { containsPath, getWorktreeBinding, type WorktreeBinding, worktreeManifest } from './ownership.ts';
@@ -105,6 +106,7 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
     await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
     const sources=await lockTopologyRows(tx,input.sourceId,bindings);
     const [source]=await tx.executeRaw<SourceState>('SELECT id,incarnation,archived,local_path,config,name,last_commit FROM sources WHERE id=$1',[input.sourceId]);
+    if(source)source.config=parseSourceConfig(source.config);
     const repeated=await priorTopologyChange(tx,principal,requestId,intent);
     if(repeated){await lockTopologyPrincipal(tx,principal);return topologyReceipt(repeated);}
     if((source?.incarnation??null)!==(before?.incarnation??null)) throw new OperationError('source_changed','The source changed during lifecycle preparation.');
@@ -130,6 +132,8 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
     // path rebind may never substitute stale or incomplete canonical bytes.
     if(input.operation==='rebind'){
       const binding=bindings.find(value=>value.source_id===input.sourceId);
+      if(!binding&&source?.local_path===null)throw new OperationError('writer_registration_required','This source has no canonical filesystem binding.',
+        `Use gbrain sources writer claim ${input.sourceId} --path <directory> for its first binding.`);
       if(!binding?.local_path || !existsSync(binding.local_path)) throw new OperationError('recovery_required','The original checkout is unavailable; recover its last verified manifest before rebinding.');
       if(manifests.get(binding.local_path)!.digest!==manifests.get(root!.worktree)!.digest) throw new OperationError('writer_manifest_mismatch','The new checkout differs from the current canonical manifest, including deletions.');
     }
@@ -142,15 +146,15 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
       let pagesDeleted=0;
       if(input.operation==='add'||input.operation==='claim'){
         if(root&&input.createDirectory&&!existsSync(root.source)){mkdirSync(root.source,{recursive:true});flushTopologyDirectory(dirname(root.source));}
-        if(source) await tx.executeRaw("UPDATE sources SET local_path=$2,name=COALESCE($3,name),config=COALESCE(config,'{}'::jsonb)||$4::text::jsonb WHERE id=$1",
-          [input.sourceId,root!.source,input.name??null,JSON.stringify(input.config??{})]);
+        if(source) await tx.executeRaw("UPDATE sources SET local_path=$2,name=COALESCE($3,name),config=$4::text::jsonb WHERE id=$1",
+          [input.sourceId,root!.source,input.name??null,JSON.stringify({...source.config,...input.config})]);
         else await tx.executeRaw('INSERT INTO sources(id,name,local_path,config,incarnation) VALUES($1,$2,$3,$4::text::jsonb,$5::uuid)',
           [input.sourceId,input.name??input.sourceId,root?.source??null,JSON.stringify(input.config??{}),incarnation]);
         if(root){const id=await installTopologyBinding(tx,input.sourceId,incarnation,root,bindings);if(!worktrees.includes(id))worktrees.push(id);}
       }else if(input.operation==='archive') await tx.executeRaw(`UPDATE sources SET archived=true,archived_at=COALESCE(archived_at,now()),
-        archive_expires_at=COALESCE(archive_expires_at,now()+interval '72 hours'),config=COALESCE(config,'{}'::jsonb)||'{"federated":false}'::jsonb WHERE id=$1`,[input.sourceId]);
+        archive_expires_at=COALESCE(archive_expires_at,now()+interval '72 hours'),config=$2::text::jsonb WHERE id=$1`,[input.sourceId,JSON.stringify({...source?.config,federated:false})]);
       else if(input.operation==='restore') await tx.executeRaw(`UPDATE sources SET archived=false,archived_at=NULL,archive_expires_at=NULL,
-        config=COALESCE(config,'{}'::jsonb)||$2::text::jsonb WHERE id=$1`,[input.sourceId,JSON.stringify({federated:input.refederate!==false})]);
+        config=$2::text::jsonb WHERE id=$1`,[input.sourceId,JSON.stringify({...source?.config,federated:input.refederate!==false})]);
       else if(input.operation==='rebind'){
         await tx.executeRaw('UPDATE sources SET local_path=$2 WHERE id=$1',[input.sourceId,root!.source]);
         const id=await installTopologyBinding(tx,input.sourceId,incarnation,root!,bindings);if(!worktrees.includes(id))worktrees.push(id);
@@ -172,7 +176,7 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
       await refreshManagedFilesystemRoots(tx,managedFilesystemDatastorePath(engine));
       return {operation:input.operation,source_id:input.sourceId,source_incarnation:incarnation,invalidated_requests:invalidated,
         ...(root?{local_path:root.source}:{}),...(['remove','purge'].includes(input.operation)?{storage_retained:true,local_path:ownedSourcePath??null,pages_deleted:pagesDeleted}:{}),
-        ...(input.operation==='add'?{name:input.name??source?.name??input.sourceId,config:input.config??source?.config??{},id:input.sourceId}: {})};
+        ...(input.operation==='add'?{name:input.name??source?.name??input.sourceId,config:{...source?.config,...input.config},id:input.sourceId}: {})};
     });
     const row=await recordTopologyChange(tx,{principal,requestId,intent,operation:input.operation,sourceId:input.sourceId,incarnation:source?.incarnation??String(result.source_incarnation),worktrees},result);
     return topologyReceipt(row);
