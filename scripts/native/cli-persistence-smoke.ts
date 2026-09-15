@@ -95,9 +95,9 @@ let owner: Bun.Subprocess<'pipe', 'pipe', 'pipe'> | undefined;
 let ownerReads: Promise<unknown>[] = [];
 async function stopOwner() {
   if (!owner) return;
-  if (owner.exitCode === null) owner.kill('SIGTERM');
+  if (owner.exitCode === null) await owner.stdin.end();
   let forced = false;
-  const timer = setTimeout(() => { forced = true; owner?.kill('SIGKILL'); }, 15000);
+  const timer = setTimeout(() => { forced = true; owner?.kill('SIGKILL'); }, 30000);
   try {
     const code = await owner.exited;
     await Promise.all(ownerReads);
