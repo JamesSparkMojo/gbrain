@@ -41,6 +41,13 @@ addon and runs the compiled smoke on its two release platforms. Rebuild
 instructions and the precise packaging/runtime distinction are in
 `native/locks/README.md`.
 
+For platform-only feedback, dispatch
+`gh workflow run test.yml --ref <branch> -f native_only=true`. This explicit manual option uses a separate concurrency
+group so it does not cancel an ongoing full persistence soak. Its
+`native-only-validation-scope` artifact records the exact commit and
+`full_ci: false`; it never emits the required `test-status` check for unrun full
+CI. Omitting the option preserves every normal PR, push and full manual gate.
+
 ### Datastore shutdown and lease ownership
 
 `test/pglite-lock.test.ts` proves process pause/crash handoff, metadata damage,
