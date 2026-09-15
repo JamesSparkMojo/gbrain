@@ -2244,7 +2244,7 @@ export interface BrainEngine {
    */
   listFactsNeedingEmbedding(opts: { limit: number; afterId?: number; sourceId?: string | null }): Promise<StaleFactRow[]>;
 
-  /** Persist embeddings for active fact rows; expired rows are ignored. Wrapped in `batchRetry` like updateTakeEmbeddings. */
+  /** Fill embeddings for active fact rows whose embedding is still NULL; expired rows and rows another writer already filled are skipped (a late writer can never overwrite a successor). Wrapped in `batchRetry` like updateTakeEmbeddings. */
   updateFactEmbeddings(rows: FactEmbeddingInput[], opts?: BatchOpts): Promise<number>;
 
   // Versions

@@ -244,9 +244,10 @@ describeBoth('facts embedding backfill parity — listFactsNeedingEmbedding / up
     };
     await Promise.all(arms.map(check));
 
-    // Idempotent: same batch again → same count, same state.
+    // Fill-only: the same batch again matches nothing (the two rows already
+    // carry a vector), so a late writer can never overwrite a successor; state unchanged.
     const [plAgain, pgAgain] = await both((arm) => arm.engine.updateFactEmbeddings(batchOf(arm)));
-    expect(pgAgain).toBe(2);
+    expect(pgAgain).toBe(0);
     expect(plAgain).toBe(pgAgain);
     await Promise.all(arms.map(check));
 

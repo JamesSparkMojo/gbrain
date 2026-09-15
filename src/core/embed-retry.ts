@@ -299,6 +299,8 @@ export function transientBackoffMs(attempt: number, rng: () => number = Math.ran
  * @internal exported for unit tests.
  */
 export function isTransientNetworkEmbedError(e: unknown): boolean {
+  // Configuration-class errors are never transient (see isEmbedRetriableError).
+  if (e instanceof AIConfigError) return false;
   const TRANSIENT_CODES = /^(DNS_ETIMEOUT|ETIMEOUT|ETIMEDOUT|ESOCKETTIMEDOUT|ECONNRESET|EPIPE|ECONNABORTED|EAI_AGAIN|UND_ERR_CONNECT_TIMEOUT|UND_ERR_HEADERS_TIMEOUT|UND_ERR_BODY_TIMEOUT|UND_ERR_SOCKET)$/;
   let cur: unknown = e;
   for (let depth = 0; depth < 5 && cur !== undefined && cur !== null; depth++) {

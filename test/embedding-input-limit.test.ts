@@ -177,6 +177,7 @@ describe('the per-input 400 is non-transient (#4530)', () => {
       'Embedding provider returned a zero-norm vector for model text-embedding-3-large at batch index 0 (input sha256 4290502a, 503 chars); it cannot be indexed for vector search.',
       'Retry the import after checking provider health.',
     ))).toBe(false);
+    expect(isTransientNetworkEmbedError(new AIConfigError('provider returned a non-finite vector (input sha256 ecff11aa, 12 chars)', undefined, { code: 'ECONNRESET' }))).toBe(false);
     expect(isTransientNetworkEmbedError(nvidia400())).toBe(false);
   });
 

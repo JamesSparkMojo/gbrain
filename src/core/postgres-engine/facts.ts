@@ -767,7 +767,7 @@ async function _updateFactEmbeddingsOnce(
           SET embedding = v.embedding${castSuffix},
               embedded_at = now()
          FROM jsonb_to_recordset(($1::jsonb)->'rows') AS v(fact_id bigint, embedding text)
-        WHERE f.id = v.fact_id AND f.expired_at IS NULL
+        WHERE f.id = v.fact_id AND f.expired_at IS NULL AND f.embedding IS NULL
         RETURNING f.id
      )
      SELECT id FROM updated`,
