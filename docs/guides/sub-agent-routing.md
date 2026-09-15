@@ -7,8 +7,8 @@ multiples on cost without sacrificing quality.
 
 ## What the User Gets
 
-Without this: every sub-agent runs on your most expensive model. Entity
-detection fires on every message at top-tier rates; research tasks cost
+Without this: every sub-agent runs on your most expensive model. Consented
+entity detection runs at top-tier rates; research tasks cost
 several dollars each.
 
 With this: entity detection runs on a cheap fast model, research execution
@@ -70,7 +70,7 @@ on_every_message(text):
     1. IDEAS FIRST: Is the user expressing an original thought?
        If yes -> create/update brain/originals/ with EXACT phrasing
     2. ENTITIES: Extract person names, company names, media titles
-       For each -> check brain, create/enrich if notable
+       For each -> check brain; enrich only with separate authorization
     3. FACTS: New info about existing entities -> update timeline
     4. CITATIONS: Every fact needs [Source: ...] attribution
     5. Sync changes to brain repo`,
@@ -130,8 +130,8 @@ fraction of the main session model's cost.
    message while entity detection completes. Spawn and forget. The user sees
    a response immediately.
 
-3. **Cost optimization is multiplicative.** Entity detection runs on every
-   single message, so the per-call price difference compounds across 50+
+3. **Cost optimization is multiplicative.** After capture opt-in, entity
+   detection on covered messages can compound the per-call price across 50+
    messages/day. Routing detection from Opus-class ($5/MTok in) to
    Haiku-class ($1/MTok in) is a flat 5x cut on your highest-frequency LLM
    call — over a month, the wrong model choice for detection alone costs
@@ -139,7 +139,7 @@ fraction of the main session model's cost.
 
 ## How to Verify
 
-1. **Spawn a signal detector and check the model.** Send a message and verify
+1. **After capture opt-in, check the detector's model.** Send a covered message and verify
    the sub-agent was spawned on Sonnet-class, not Opus. Check the model field
    in the sub-agent config or logs.
 

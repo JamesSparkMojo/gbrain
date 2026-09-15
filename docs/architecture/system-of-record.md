@@ -40,16 +40,16 @@ This means:
 
 ## The three categories
 
-Every table in the gbrain schema belongs to exactly one of three
-categories. The category determines how it gets rebuilt during
-disaster recovery.
+Use these categories to distinguish reconstructible file-backed records
+from state that needs a database backup. A table can contain both: the
+facts table, for example, also holds unresolved facts without a fence.
 
 ### FS-canonical (markdown is the source of truth)
 
-These are user-authored knowledge. The DB row is a derived index over
-the markdown — wipe the table and `gbrain extract` rebuilds it
-identically. The CI gate keeps direct DB writes from drifting away
-from the markdown contract.
+For knowledge preserved in canonical files, the DB row is a derived index
+over the Markdown. Reconciliation rebuilds the represented fields; it does
+not promise identical database rows or recover records absent from the files.
+The CI gate constrains direct DB writes to the documented paths.
 
 | Category | How it's stored in markdown | Derived DB table | Reconciler |
 |---|---|---|---|
@@ -75,9 +75,9 @@ chunker + embedder rebuild these on import.
 
 ### DB-only by design (named exceptions)
 
-These hold runtime / infrastructure state that's intentionally not in
-the repo. The architectural rule still holds — these aren't
-"user knowledge" — but they're DB-only by design.
+These hold runtime or infrastructure state intentionally kept outside the
+repo. This list does not cover every DB-only record: pages and facts can
+also contain knowledge absent from canonical files and must be backed up.
 
 | Category | Why it's OK to be DB-only |
 |---|---|
