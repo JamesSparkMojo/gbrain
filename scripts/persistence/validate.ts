@@ -6,21 +6,22 @@ import { dirname, join, resolve } from 'node:path';
 import postgres from 'postgres';
 import { assertSafeE2eDatabaseUrl } from '../../test/helpers/db-guard.ts';
 import { distribution, type HarnessConfig } from './harness.ts';
+import { keylessBrainEnv } from '../../test/helpers/provider-env.ts';
 
 export interface ValidationOptions {
   engine: 'pglite' | 'postgres'; schedules?: number; operations?: number; seed?: number;
   crashes?: boolean; databaseUrl?: string; manifest?: string;
 }
 interface Event { event: string; [key: string]: any; }
-function childEnvironment(home: string): Record<string, string> {
+export function childEnvironment(home: string): Record<string, string> {
   // Preserve the runtime executable/search paths, never an operator's brain or provider configuration.
   const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined &&
     !/^(GBRAIN_|CONDUCTOR_|MCP_|OPENCLAW_|ANTHROPIC_|OPENAI_|DATABASE_URL$)/.test(key))) as Record<string, string>;
-  return { ...env, GBRAIN_HOME: home, HOME: home, GBRAIN_CI_DISABLE_TEST_ENV_FILE: '1' };
+  return keylessBrainEnv(env, home, { GBRAIN_CI_DISABLE_TEST_ENV_FILE: '1' });
 }
-function spawnWorker(configPath: string, home: string, role: string, ...args: string[]) {
+export function spawnWorker(configPath: string, home: string, role: string, args: string[] = [], environment: Record<string, string> = {}) {
   const child = Bun.spawn([process.execPath, '--no-env-file', resolve(import.meta.dir, 'worker.ts'), role, configPath, ...args],
-    { env: childEnvironment(home), stdin: 'ignore', stdout: 'pipe', stderr: 'inherit' });
+    { env: { ...childEnvironment(home), ...environment }, stdin: 'ignore', stdout: 'pipe', stderr: 'inherit' });
   const events: Event[] = []; const waiters = new Set<() => void>(); let ended = false; let tail = '';
   const reading = (async () => {
     const decoder = new TextDecoder(); let pending = '';
@@ -34,7 +35,7 @@ function spawnWorker(configPath: string, home: string, role: string, ...args: st
     }
     ended = true; for (const wake of waiters) wake();
   })();
-  async function event(name: string, timeoutMs = 2_400_000): Promise<Event> {
+  async function event(name: string, timeoutMs = 5_400_000): Promise<Event> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const index = events.findIndex(e => e.event === name); if (index >= 0) return events.splice(index, 1)[0];
@@ -87,7 +88,7 @@ export async function runValidation(options: ValidationOptions) {
         sourceIds: Array.from({ length: 4 }, (_, i) => `persistence-test-${i}`), principalIds: Array.from({ length: 4 }, () => randomUUID()) };
       const path = join(root, 'config.json'); writeFileSync(path, JSON.stringify(config), { mode: 0o600 }); return { config, path };
     }
-    function start(path: string, role: string, ...args: string[]) { const child = spawnWorker(path, home, role, ...args); children.push(child); return child; }
+    function start(path: string, role: string, ...args: string[]) { const child = spawnWorker(path, home, role, args); children.push(child); return child; }
     if (options.crashes !== false) for (const boundary of ['admitted', 'prepared', 'before_publication', 'after_publication', 'before_commit', 'after_commit']) {
       const { path } = await phase(`crash-${boundary}`); const requestId = randomUUID();
       const child = start(path, 'crash', boundary, requestId); const reached = await child.event('boundary');

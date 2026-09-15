@@ -20,6 +20,12 @@ if (mode === 'initialize') {
   const engine = await openEngine(config, true); await initializeFixtures(engine, config); await engine.disconnect(); emit({ event: 'done' });
 } else if (mode === 'schedules') {
   emit({ event: 'done', result: await runSchedules(config) });
+} else if (mode === 'runtime-matrix') {
+  const { runtimeCase } = await import('./matrix-cases.ts');
+  emit({ event: 'done', result: await runtimeCase(config as import('./matrix-cases.ts').RuntimeCase) });
+} else if (mode === 'ownership-matrix') {
+  const { ownershipCases } = await import('./matrix-cases.ts');
+  emit({ event: 'done', result: await ownershipCases(config) });
 } else if (mode === 'crash') {
   const engine = await openEngine(config, true); await initializeFixtures(engine, config);
   const sources = await fixtures(engine, config); const source = sources[0];

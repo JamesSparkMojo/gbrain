@@ -65,3 +65,23 @@ storage and process counts before setting or changing latency budgets.
 under Bun 1.3.11 and 1.3.13 and uploads every manifest. Native OS/architecture
 coverage is separately required by `native-locks.yml`; its configured matrix
 must not be mistaken for locally executed runtime evidence.
+
+The same workflow executes `scripts/persistence/matrix.ts`, requiring both
+`DATABASE_URL` (direct test connection) and `GBRAIN_PGBOUNCER_URL` (a real
+transaction-mode pooler with wildcard database routing). Its 24 cells cover
+direct/pooler transport, RLS on/off under a non-superuser role, ordinary pools
+1/2/3 and shared pools versus a separate direct pool of size one. Each cell
+proves short control progress while the production bulk reservation API
+holds every permitted long-running slot. Size one keeps canonical work
+queued with `writer_pool_capacity`; sizes two and three commit the same
+request after bulk work drains. A separate fixture checks manifest-verified
+transfer between distinct host identities/checkouts, stale-owner refusal,
+retained coordination paths across root replacement and source-incarnation
+fencing. The default matrix manifest is
+`.context/persistence-runtime-matrix.json`; missing mandatory URLs fail the
+standalone gate. The ordinary E2E entry skips outside a configured pooler
+lane and refuses to skip when `GBRAIN_CI_REQUIRE_PGBOUNCER=1`.
+
+The heavy process worker allows 90 minutes; its CI job allows 110 minutes.
+This accommodates disk-PGLite durability on slower VM storage without
+reducing the 10,000 actual mutation requirement.

@@ -90,7 +90,9 @@ export async function runSchedules(config: HarnessConfig) {
         const unrelated = await admitWrite(engine, admission(config, other, slug, body, principal));
         const claimed = (await Promise.all([claimNextWrite(engine, config.hostId), claimNextWrite(engine, config.hostId), claimNextWrite(engine, config.hostId)])).filter((r): r is WriteRequest => r !== null);
         assert.deepEqual(new Set(claimed.map(r => r.id)), new Set([first.id, unrelated.id]));
-        await Promise.all(claimed.map(commit)); assert.equal((await claim()).id, second.id); await commit((await getWriteRequestById(engine, second.id))!);
+        if (engine.kind === 'pglite') for (const row of claimed) await commit(row);
+        else await Promise.all(claimed.map(commit));
+        assert.equal((await claim()).id, second.id); await commit((await getWriteRequestById(engine, second.id))!);
       } else if (type === 'coherent_read') {
         const initial = { ...a, requestId: randomUUID(), callerIntent: { content: `${body}-old` }, intent: { content: `${body}-old` } };
         await admitWrite(engine, initial); await commit(await claim());

@@ -71,6 +71,16 @@ engine under Bun 1.3.11 and 1.3.13 and uploads actual executed-case manifests.
 See [`scripts/persistence/README.md`](../scripts/persistence/README.md) for
 workloads, reruns, performance measurements and the process-crash scope.
 
+`test/e2e/persistence-runtime-matrix.test.ts` additionally requires the real
+transaction-mode PgBouncer fixture. Its 24 cells exercise direct/pooler
+connections, enforced RLS under a non-bypass role, ordinary pool sizes 1/2/3,
+and shared pools or a separate one-connection direct route. It verifies
+reserved short control capacity while bulk connections remain held, then
+drains and commits the original request. Ownership cases cover mismatched
+successor manifests, stale owners, root replacement under a held kernel
+lock, and actual source deletion/recreation. The reusable persistence lane
+runs this matrix on both supported Bun versions and uploads its manifest.
+
 ### PGLite schema snapshot (default-on)
 
 `scripts/build-pglite-snapshot.ts` (`bun run build:pglite-snapshot`) bakes a

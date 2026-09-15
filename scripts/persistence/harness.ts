@@ -16,12 +16,13 @@ export interface HarnessConfig {
   kind: 'pglite' | 'postgres'; root: string; dataDir: string; databaseUrl?: string;
   hostId: string; seed: number; schedules: number; operations: number;
   sourceIds: string[]; principalIds: string[];
+  poolSize?: number;
 }
 export async function openEngine(config: HarnessConfig, initialize = false): Promise<BrainEngine> {
   const engine: BrainEngine = config.kind === 'pglite' ? new PGLiteEngine() : new PostgresEngine();
   if (engine instanceof PostgresEngine) {
     assertSafeE2eDatabaseUrl(config.databaseUrl!);
-    await engine.connect({ database_url: config.databaseUrl!, poolSize: 4 });
+    await engine.connect({ database_url: config.databaseUrl!, poolSize: config.poolSize ?? 4 });
   } else await engine.connect({ database_path: config.dataDir });
   if (initialize) await engine.initSchema();
   return engine;
