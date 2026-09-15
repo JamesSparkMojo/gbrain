@@ -2173,9 +2173,8 @@ Each was explicitly deferred in the pass's CEO/eng/outside-voice reviews.
   Postgres and no TRUNCATE-race protection — run them in a parallel lane; default
   the existing SHARD support (only ci-local uses it). Fold into the Postgres
   template-database entry below in this file (CREATE DATABASE … TEMPLATE, ~50ms).
-  **Why deferred:** e2e is off the CI critical path after the workflow restructure;
-  ci-local + nightly benefit only. **Effort:** M. **Priority:** P2.
-- [ ] **Second PGLite snapshot keyed by dims/model.** **What:** ~34 test files
+  **Current status:** selected E2E is on the measured PR critical path. Four isolated weighted CI workers now address it without moving tests between lanes; PGLite-only lane moves remain deferred. **Effort:** M. **Priority:** P2.
+- [ ] **Second PGLite snapshot keyed by dims/model.** Implemented for BrainBench default-profile CLI children in the CI optimization pass; extending reuse to other deliberately reconfigured tests remains deferred. **What:** ~34 test files
   configure zembed/1280 and always cold-init (the snapshot's shape gate correctly
   refuses the 1536 fixture). Bake a second snapshot per shape; the version-file
   format already carries dims/model. **Why deferred:** moderate effort, small win,
@@ -2374,8 +2373,19 @@ review-deferred, not fix-now). Grouped by component.
 
 ### Test infra (master-owned)
 
-- [ ] **P1 — Test-infra pass Ships 2+3: serial burn-down, e2e lane moves + CI
-  sharding, weights re-mine.** **What:** the approved test-infra plan
+- [x] **CI speed pass: weighted selected E2E and serial matrices.** Selected E2E
+  now freezes one selection across up to four isolated workers; serial uses four
+  weighted partitions with exclusive ownership and unique coverage artifacts.
+  Unit/serial weights were re-mined, E2E weights added, and the miner now captures
+  complete lane timings plus provenance. Local unit/E2E use the same scheduler.
+  The duplicate entity-card performance invocation was removed from unit shards.
+  The ten-way unit matrix remains: the 12-way increase and test reclassification
+  below are still deferred. Measured post-change workflow results must accompany
+  the shipping report; the 4–5 minute target is not an observed result yet.
+
+
+- [ ] **P1 — Test-infra pass Ships 2+3: remaining serial burn-down and E2E lane
+  moves.** **What:** the approved test-infra plan
   (`~/.claude/plans/system-instruction-you-are-working-sprightly-bee.md`, Ship 1
   landed as the v0.47.7.0 wave) deliberately split into 3 ships for regression
   attribution. Remaining: Phase 4 serial-lane burn-down (38 rename-safe
@@ -2386,11 +2396,11 @@ review-deferred, not fix-now). Grouped by component.
   moving the ~52 PGLite-only `test/e2e/` files into the unit matrix (behavioral
   move criterion: direct PGLite ctor + no e2e/helpers import + no
   hasDatabase/DATABASE_URL gate + header read; lockstep: e2e-test-map rows,
-  e2e-unmapped-baseline shrink, classify-tests, seeded weights) + 4-way
-  `SHARD=N/M` matrix for `selected-e2e`/`coverage-full-e2e` with one postgres
-  service per matrix job, and Phase 6 `mine-shard-weights` re-mine (381 files
-  unweighted; add a `weights:mine` package script + documented cadence) then
-  matrix 10→12. Graduated batch gates: 5×-green first batch per class, 2×+CI
+  e2e-unmapped-baseline shrink, classify-tests, seeded weights), a possible
+  four-way `coverage-full-e2e` nightly matrix, and unit matrix 10→12.
+  The selected-E2E matrix, timing refresh, `weights:mine` command, and refresh
+  cadence are completed by the CI speed pass above. Graduated batch gates:
+  5×-green first batch per class, 2×+CI
   after. **Why:** the remaining ~half of the measured win: serial lane 220→~130
   files, e2e 60-min worst-case lane → ~15-25 min, honest weights. **Effort:** L
   (spread over 2 ships).

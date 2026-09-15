@@ -33,7 +33,7 @@ Eight test command tiers, each with a clear scope:
 | `bun run test:full` | `verify && bun run test && bun run test:slow && [smart e2e]`. Smart e2e runs only when `DATABASE_URL` is set and propagates its failure; otherwise it prints a skip notice to stderr. Use `ci:local` to provision the databases and require PgBouncer execution. | ~3-5min depending on slow + e2e | Pre-merge sanity, before opening a PR. |
 | `bun run ci:local` | Independent host gitleaks scans, then frozen dependencies, guards/typecheck, the complete serial and slow lanes, and four unit/E2E shards inside Docker. Each E2E shard has its own pgvector database; selected PgBouncer tests must execute against the transaction-mode pooler. Unit, serial, and slow lanes have database URL overrides unset. Any failed stage fails the command. Complete shard logs survive container teardown under `.context/ci-local-shards/`. `ci:local:diff` narrows E2E selection; `--no-shard` runs unit/E2E sequentially. Doc-only diffs still require successful gitleaks scans. | Depends on the full corpus | Full local gate before shipping. |
 | `bun run test:slow` | Just the `*.slow.test.ts` set (intentional cold-path correctness checks). | seconds-to-minutes | When touching slow-path code. |
-| `bun run test:serial` | Just the `*.serial.test.ts` set (cross-file-contention quarantine; one bun process per file for true module-registry isolation), run through a POOL of concurrent per-file processes — the isolation is per-process, not per-machine. Dispatch is heaviest-first (LPT) from the advisory `scripts/serial-weights.json` (seconds; mined from the `.context/serial-durations.txt` table each run banks; absent/corrupt weights fall back to discovery order, absent keys to the corpus p75 — scheduling only, never correctness; LPT order + the corrupt-weights fail-soft are pinned by `test/scripts/run-serial-pool.test.ts`). Pool defaults to `min(detect_cpus, 4)` then memory-adapts (same doctrine as the parallel runner); a small growth-guarded set of files (machine-global state or contention-critical timing — see the justified `EXCLUSIVE_FILES` list in `scripts/run-serial-tests.sh`, capped at 3 by `test/scripts/serial-files.test.ts`) runs on a sequential EXCLUSIVE lane after the pool. Per-test timeout 120s (pooled contention headroom); each pooled file is wall-clock-killed at 300s (`timeout -k`, exit-hang containment). Externally-killed files (exit 143/137 or a missing exit sentinel — sibling-workspace cleanup, memory jetsam) get ONE sequential rescue re-run, mirroring the parallel runner's doctrine: phantoms stay green with a rescue note, real failures stay red. Prints per-file PASS lines plus a top-10 slowest-files list. Knobs: `GBRAIN_SERIAL_POOL=N` (explicit pool width — bypasses the memory clamp; `1` restores fully-sequential), `GBRAIN_SERIAL_FILE_TIMEOUT`. | a few minutes for all ~220 files at pool=4 | Debugging quarantined files; CI's serial-tests job. |
+| `bun run test:serial` | Just the `*.serial.test.ts` set (cross-file-contention quarantine; one bun process per file for true module-registry isolation), run through a POOL of concurrent per-file processes — the isolation is per-process, not per-machine. Dispatch is heaviest-first (LPT) from the advisory `scripts/serial-weights.json` (seconds; mined from the `.context/serial-durations.txt` table each run banks; absent/corrupt weights fall back to discovery order, absent keys to the corpus p75 — scheduling only, never correctness; LPT order + the corrupt-weights fail-soft are pinned by `test/scripts/run-serial-pool.test.ts`). Pool defaults to `min(detect_cpus, 4)` then memory-adapts (same doctrine as the parallel runner); a small growth-guarded set of files (machine-global state or contention-critical timing — see the justified `EXCLUSIVE_FILES` list in `scripts/run-serial-tests.sh`, capped at 3 by `test/scripts/serial-files.test.ts`) runs on a sequential EXCLUSIVE lane after the pool. Per-test timeout 120s (pooled contention headroom); each pooled file is wall-clock-killed at 300s (`timeout -k`, exit-hang containment). `SHARD=N/M` partitions pooled files by duration; the three exclusive files run only on shard 1. Unset runs the complete corpus. Routing variables are cleared before tests start, so nested runners remain independent. Externally-killed files (exit 143/137 or a missing exit sentinel — sibling-workspace cleanup, memory jetsam) get ONE sequential rescue re-run, mirroring the parallel runner's doctrine: phantoms stay green with a rescue note, real failures stay red. Prints per-file PASS lines plus a top-10 slowest-files list. Knobs: `GBRAIN_SERIAL_POOL=N` (explicit pool width — bypasses the memory clamp; `1` restores fully-sequential), `GBRAIN_SERIAL_FILE_TIMEOUT`. | a few minutes for all ~220 files at pool=4 | Debugging quarantined files; CI's serial-tests job. |
 | `bun run test:e2e` | Real Postgres E2E. Requires Docker + `DATABASE_URL`. Sequential within a shard; `SHARD=N/M` fans out against separate databases (ci-local runs 4 containers). Activates the PGLite snapshot like every other runner (per-file cold-path opt-outs where the test asserts the path TO post-initSchema state), exporting it as an ABSOLUTE path so CLI children spawned with varying cwd still find it. | ~5-10min | Pre-ship; nightly. |
 | `bun run test:compile-smoke` | Self-update integrity verify under a REAL `bun build --compile` binary, offline (sets `GBRAIN_SELFUPDATE_COMPILE_SMOKE=1`). The unit suite mocks the network seams; this proves the dependency-free crypto/base64/JSON verify path survives compilation — the failure mode `sigstore-js` would have hit. | ~5s (one compile) | When touching `src/core/binary-self-update.ts`; pre-ship on self-update changes. |
 
@@ -70,14 +70,12 @@ migration, ~3.1s each on a CI shard). Properties:
   handler changes invalidate the fixture; coverage instrumentation does not
   change the hash. Keep the dependency list in `computeSnapshotSchemaHash`
   and the CI cache keys aligned when adding another schema helper.
-- **Concurrency-safe.** Parallel shard runners / sibling workspaces serialize
-  on an atomic `mkdir` lock (`test/fixtures/.pglite-snapshot.lock`) with
-  staleness-verified takeover of a crashed builder; the tar is written first
-  and the version file last, so a crash can never leave a fresh-looking torn
-  fixture. `GBRAIN_SNAPSHOT_LOCK_TIMEOUT_MS` (default 120000) bounds the
-  waiter; an exhausted waiter facing a still-live lock proceeds unlocked as a
-  last resort (the loader gate below validates the version file, not the tar
-  bytes).
+- **Concurrency-safe.** Each profile has its own lock with a PID/token owner
+  and host/process-namespace identity. Only a confirmed dead local owner can
+  be reclaimed. Live, foreign, or ownerless locks time
+  out without building; callers visibly fall back to cold initialization.
+  Temporary tar/version files are atomically renamed, with the version last.
+
 - **Never authoritative.** The loader (`tryLoadSnapshot` in
   `src/core/pglite-engine.ts`) verifies the schema hash AND the embedding
   shape the snapshot was baked with (`dims=` / `model=` lines in the version
@@ -89,6 +87,55 @@ migration, ~3.1s each on a CI shard). Properties:
 
 Pinned by `test/snapshot-shape-guard.test.ts` (hash + shape refusal matrix,
 imported SQL/handler dependency hash sensitivity).
+
+The builder accepts `--profile legacy|default` (legacy remains the default).
+Legacy uses the unit preload's embedding shape. Default uses the CLI's canonical
+embedding shape and writes `pglite-snapshot-default.tar` plus its `.version`.
+The artifacts, locks, and CI caches are separate. `ensure_default_pglite_snapshot`
+exports an absolute `GBRAIN_TEST_DEFAULT_SNAPSHOT`; BrainBench applies it only
+to CLI children, including `run-all`. The parent unit process retains its legacy
+snapshot. The slow runner and direct BrainBench test invocation prepare the
+default profile automatically. `GBRAIN_NO_SNAPSHOT=1` clears both paths and
+survives test preloads.
+
+### Keeping CI partitions balanced
+
+Required CI runs ten weighted unit workers, four serial workers with bounded
+per-file pools, and up to four selected E2E workers. E2E selection and exclusions
+run once before setup; the resulting file lists are frozen and executed against
+separate Postgres services. An explicit empty selection launches no tests;
+selection errors, failed workers, cancellations, and unexpected skips fail the
+existing aggregate checks. Nightly full-corpus lanes remain separate.
+
+Refresh after a large test wave or when the longest shard repeatedly exceeds
+the mean shard execution time by 25%:
+
+```bash
+bun run weights:mine --lane unit --run <successful-test-run>
+bun run weights:mine --lane serial --run <successful-test-run>
+bun run weights:mine --lane e2e --run <successful-e2e-run>
+```
+
+The miner accepts `--from-file` or stdin for timestamped GitHub-format logs and
+`--out` for inspection before replacing a checked-in map. Unit timing uses only
+unit matrix jobs, includes `evals/`, and closes the final file at the Bun summary.
+Serial timing uses runner durations, never timestamps of buffered output. E2E
+uses each file's Bun summary and merges partial selections into known weights.
+File/stdin imports also merge unobserved entries; only a complete GitHub unit or
+serial run replaces that lane's entire map. Captured artifacts need their final
+successful completion marker, and GitHub imports verify every expected job.
+Incomplete or failed inputs leave the existing map intact. Sidecar metadata
+records the source run/commit, units, and counts. Unit/E2E weights are milliseconds;
+serial weights remain seconds. New files receive the corpus p75 estimate. Empty
+maps and zero-cost ties distribute files deterministically; corrupt serial
+weights warn and retain safe fallback scheduling.
+
+CI retains timestamped unit/E2E logs, frozen E2E selection, and serial attempt
+records for 14 days. Compare push-to-required-green time including queueing,
+first failure, rescues/reruns, runner minutes, unique file counts, and coverage
+completeness. Compare cold and warm caches separately. Snapshot timings and
+partition estimates are projections until matched workflow runs confirm them;
+successful test results are never cached.
 
 ### Guard registry and self-test
 
@@ -169,8 +216,8 @@ there even though they pass on Linux and macOS.
 
 ### CI vs local: intentionally divergent file sets
 
-- **CI matrix** (`.github/workflows/test.yml`) runs `scripts/test-shard.sh` across 10 matrix shards partitioned by weight-aware LPT bin-packing (`scripts/sharding.ts`; files with no mined weight fall back to the p75 file weight so a new unweighted file can't silently unbalance a shard) and INCLUDES `*.slow.test.ts` (the three outlier slow files — longmemeval, entity-resolve-perf, brainbench-e2e — run as dedicated jobs alongside the matrix) plus `evals/**/*.test.ts` (keyless-allowlist-gated — `test/scripts/evals-collection.test.ts`). Each shard's bun process is bounded by `--max-concurrency` (`GBRAIN_TEST_MAX_CONCURRENCY`, default 4). Every bun-test job — matrix shards, serial-tests, verify, the slow/eval jobs — activates the PGLite schema snapshot (built in-runner via `scripts/lib/test-env.sh`; the brainbench gate brings its own in-memory PGLite and skips it; the ~42MB tar is also cached across jobs via actions/cache, with the runner's own hash check staying authoritative). CI EXCLUDES `*.serial.test.ts` from the shards and runs them in the pooled `serial-tests` job via `bun run test:serial` — one bun process per file preserves the `mock.module` quarantine; the pool runs those processes concurrently. `bun run verify` gets its own job too, as does the BrainBench memory-conformance gate (`brainbench` job → `scripts/ci-brainbench-gate.sh`, hermetic in-memory PGLite, ~15s), which compares HEAD's fresh run against master's committed baseline (`evals/brainbench/baselines/main.json`) — the `test-status` aggregate checks its result explicitly. E2E (`.github/workflows/e2e.yml`) always runs its applicable execution lanes, with the jsonb-parity job in front of tier2 as the token-spend gate, and aggregates through `e2e-status`. Scheduled runs also require the full-corpus lanes, including each slow suite excluded from the coverage shards (longmemeval, entity-resolve-perf, and brainbench-e2e). Both aggregates reject failures, cancellations, and unexpected skips. Dependency caches and validated PGLite snapshots remain; successful test results are never reused. CI is the ground truth for "did everything pass."
-- **Local fast loop** (`scripts/run-unit-shard.sh` via the parallel wrapper) uses round-robin-by-index sharding and EXCLUDES `*.slow.test.ts` AND `*.serial.test.ts`. Local trades coverage for inner-loop speed; CI catches what local skips.
+- **CI matrix** (`.github/workflows/test.yml`) runs `scripts/test-shard.sh` across 10 matrix shards partitioned by weight-aware LPT bin-packing (`scripts/sharding.ts`; files with no mined weight fall back to the p75 file weight so a new unweighted file can't silently unbalance a shard) and INCLUDES `*.slow.test.ts` (the four dedicated slow files — longmemeval, entity-resolve-perf, entity-card-perf, brainbench-e2e — run as dedicated jobs alongside the matrix) plus `evals/**/*.test.ts` (keyless-allowlist-gated — `test/scripts/evals-collection.test.ts`). Each shard's bun process is bounded by `--max-concurrency` (`GBRAIN_TEST_MAX_CONCURRENCY`, default 4). Every bun-test job — matrix shards, serial-tests, verify, the slow/eval jobs — activates the PGLite schema snapshot (built in-runner via `scripts/lib/test-env.sh`; the BrainBench gate uses the separate default-profile snapshot for its in-memory PGLite; the ~42MB tar is also cached across jobs via actions/cache, with the runner's own hash check staying authoritative). CI EXCLUDES `*.serial.test.ts` from the shards and runs them across four `serial-tests` workers via `bun run test:serial` — one bun process per file preserves the `mock.module` quarantine; the pool runs those processes concurrently. `bun run verify` gets its own job too, as does the BrainBench memory-conformance gate (`brainbench` job → `scripts/ci-brainbench-gate.sh`, hermetic in-memory PGLite, ~15s), which compares HEAD's fresh run against master's committed baseline (`evals/brainbench/baselines/main.json`) — the `test-status` aggregate checks its result explicitly. E2E (`.github/workflows/e2e.yml`) always runs its applicable execution lanes, with the jsonb-parity job in front of tier2 as the token-spend gate, and aggregates through `e2e-status`. Scheduled runs also require the full-corpus lanes, including each slow suite excluded from the coverage shards (longmemeval, entity-resolve-perf, and brainbench-e2e). Both aggregates reject failures, cancellations, and unexpected skips. Dependency caches and validated PGLite snapshots remain; successful test results are never reused. CI is the ground truth for "did everything pass."
+- **Local fast loop** (`scripts/run-unit-shard.sh` via the parallel wrapper) uses the same weighted partitioner as CI and EXCLUDES `*.slow.test.ts` AND `*.serial.test.ts`. Local trades coverage for inner-loop speed; CI catches what local skips.
 
 This divergence is intentional. Don't try to make them equal — the two scripts deliberately solve different problems. The regression test at `test/scripts/run-unit-shard.test.ts` pins what the local fast loop should and shouldn't include, and that no unit-lane file spawning the CLI through `test/helpers/cli-spawn.ts` hand-pins a per-test timeout below the bunfig default (an explicit `test(name, fn, N)` ceiling overrides bun's `--timeout`, so `GBRAIN_TEST_TIMEOUT_MULTIPLIER` never reaches it — inherit the default instead; cli-spawn's own kill timer still reaps a hung child); `test/scripts/run-unit-parallel.test.ts` pins the wrapper's memory-adaptive concurrency, and the OOM/external-kill serial rescue pass, and operator-interrupt teardown (a Ctrl-C / SIGTERM to the wrapper while shards are live TERMs then KILLs every shard descendant, so a cancelled run cannot leave gtimeout/bun alive until the shard cap).
 
@@ -196,8 +243,8 @@ non-`GBRAIN_`-prefixed so the hermetic env scrub keeps them.
 
 **Two corpora.**
 
-- **PR corpus** (`prCorpus`) — the 14 coverage-collecting lanes in
-  `.github/workflows/test.yml`: the 10 matrix shards, `serial-tests`, and the
+- **PR corpus** (`prCorpus`) — the 17 coverage-collecting lanes in
+  `.github/workflows/test.yml`: the 10 matrix shards, four `serial-tests` partitions, and the
   three dedicated slow jobs (`slow-eval-longmemeval`,
   `slow-entity-resolve-perf`, `slow-brainbench-e2e`). Deterministic (runs identically on every PR); this
   is the corpus the gates run against.
@@ -213,7 +260,9 @@ non-`GBRAIN_`-prefixed so the hermetic env scrub keeps them.
 repo-relative, and emits a merged lcov plus a summary JSON: src-only
 totals/per-dir/per-file percentages, a `lineHits` map (the diff gate's input),
 and the never-loaded src file list. `--manifest-expect lane,lane,...` pins the
-expected lane set; a missing or `complete: false` manifest, an unparseable
+expected lane set (`serial-1` through `serial-4` for PRs, `serial` nightly).
+The merger checks commit SHA (`--sha` overrides checkout HEAD for offline
+artifacts), duplicate identities, and actual per-lane LCOV counts; a missing or `complete: false` manifest, an unparseable
 lcov, or a `shard` lane with `lcovCount != 1` marks the summary
 `degraded: true`. Degraded is data, not failure: the merge never aborts (exit
 0), and both gates print `WOULD PASS`/`WOULD FAIL` and exit 0 on a degraded
@@ -782,6 +831,12 @@ When asked to "run all E2E tests" or "run tests", that means ALL tiers:
 - Always spin up the test DB, source zshrc, run everything, tear down.
 
 ### E2E test DB lifecycle (ALWAYS follow this)
+
+`setupDB()` clears rows while preserving physical schema. Fixtures that seed
+fixed legacy-width text vectors use `setupLegacyEmbeddingDB()` instead: it
+establishes the canonical test shape after clearing the database, including
+facts and takes, so a preceding CLI-init test cannot change their assumptions.
+Custom-dimension and migration tests continue using ordinary `setupDB()`.
 
 You are responsible for spinning up and tearing down the test Postgres container.
 Do not leave containers running after tests. Do not skip E2E tests, do not ask
