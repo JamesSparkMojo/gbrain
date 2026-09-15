@@ -20,6 +20,7 @@ export class PersistenceConsumer {
   private effectsWorker: Promise<void> | undefined;
   private maintenanceWorker: Promise<unknown> | undefined;
   private nextMaintenance = 0;
+  private lastError: { code: string; at: string } | undefined;
   private abort = new AbortController();
   readonly hostId: string;
   constructor(readonly engine: BrainEngine, readonly config: GBrainConfig, readonly prepare: PrepareMutation,
@@ -39,7 +40,7 @@ export class PersistenceConsumer {
   }
   private async doTick(): Promise<void> {
     if (this.stopping) return;
-    await refreshManagedFilesystemRoots(this.engine);
+    await refreshManagedFilesystemRoots(this.engine, this.engine.kind === 'pglite' ? this.config.database_path : undefined);
     if (!this.effectsWorker) this.effectsWorker = runPersistenceEffects(this.engine, this.config,
       { hostId: this.hostId, limit: 2, signal: this.abort.signal }).catch(error => this.report(error))
       .finally(() => { this.effectsWorker = undefined; });
@@ -82,7 +83,13 @@ export class PersistenceConsumer {
       this.active.add(task);
     }
   }
+  status(): { accepting: boolean; active_preparations: number; active_worktrees: number; last_error?: { code: string; at: string } } {
+    return { accepting: !this.stopping, active_preparations: this.active.size, active_worktrees: this.activeRoots.size,
+      ...(this.lastError ? { last_error: { ...this.lastError } } : {}) };
+  }
   private report(error: unknown): void {
+    const code = (error as { code?: unknown })?.code;
+    this.lastError = { code: typeof code === 'string' && /^[a-zA-Z0-9_]{1,64}$/.test(code) ? code : 'storage_error', at: new Date().toISOString() };
     if (this.opts.onError) this.opts.onError(error);
     else process.stderr.write('[persistence] Consumer paused after a storage error; inspect writer status.\n');
   }

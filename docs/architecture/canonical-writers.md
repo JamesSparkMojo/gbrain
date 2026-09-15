@@ -19,13 +19,45 @@ unchanged-file skips acquire the same page guard and compare revisions.
 Unsupported direct writers fail closed after managed activation. SQL triggers
 cover pages, tags, slug aliases, free-text aliases, facts, takes, timeline entries
 and sources. Physical embeddings/index telemetry remain projections. Import,
-source clone/remove/reclone/archive/restore/purge, connector sync, legacy sync,
+source clone/remove/reclone/archive/restore/purge, connector sync, unmanaged import variants,
 engine migration, manual link edits, schema link rewrites, synthesis, patterns
 and phantom redirect refuse before their first canonical side effect. Legacy
 maintenance that reaches a canonical engine mutation is rejected by the SQL
 trigger. Extracted links are derived projections; manually authored link API
 writes remain refused until a coordinator callback exists. Links authored in
 Markdown are reconciled by the coordinated import transaction.
+
+Managed Markdown sync runs on the registered filesystem owner with
+`gbrain sync --source <source-id> --no-pull`. Discovery freezes the target Git
+commit, source incarnation, owner epoch, topology generation and page
+identities/revisions. Attached repositories import committed Git content;
+`--working-tree` opts into uncommitted files and detached repositories include
+them automatically. Source-relative exclusions retain their existing meaning.
+Each file's bytes and fingerprint are frozen before its journal request is
+admitted. Import leaves the original bytes intact unless canonical sanitization
+or retained tags require an explicit recoverable file publication.
+
+A durable cursor uses a singleton JSON-array envelope under the private
+`managed-sync` operation in `op_checkpoints`; the immutable manifest is stored
+separately so advancing one page never rewrites the entire discovered file list. Only one page is admitted ahead of
+the scan, and the scan yields after at most 25 pages or 250 milliseconds between
+page publications. Foreground requests on the same root are serviced before the
+next admission. Interruption or a pending owner leaves the cursor and source
+checkpoint intact. A later invocation resumes the frozen target; a newer Git
+HEAD is a separate subsequent sync. A revision/file conflict blocks the cursor.
+After inspecting the conflict, `--retry-failed` can start a fresh discovery once
+all earlier admitted requests are terminal. `--skip-failed` cannot advance a
+managed checkpoint past failed receipts.
+
+The source checkpoint commits only after the entire selected cursor is exhausted
+and every admitted page has a committed receipt. It takes the source-exclusive
+guard before authentication/request/page locks and checks the original anchor,
+source incarnation, topology and owner epoch. Code/image importers, ignored-file
+walks and Git pull/rebase remain explicitly refused in managed mode until their
+own prepared publication and recovery paths exist. Remote sync retains the
+original `submit_job` principal, admin/source/operation ceiling and normalized
+payload; runtime options cannot expand that grant and current revocation is
+checked before publication.
 
 Filesystem helpers check managed roots before atomic writes, frontmatter backup,
 schema-pack replacement, clone, staging, pull or rebase. The registry stores one

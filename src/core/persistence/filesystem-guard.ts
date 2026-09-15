@@ -1,3 +1,4 @@
+import { localHostId } from './identity.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { OperationError } from '../ops/contract.ts';
@@ -24,8 +25,8 @@ export async function refreshManagedFilesystemRoots(engine: SqlEngine, databaseP
   const [brain] = await engine.executeRaw<{ brain_id: string; enabled: boolean }>('SELECT brain_id,enabled FROM persistence_brain WHERE singleton=1');
   if (!brain) return;
   const roots = brain.enabled ? await engine.executeRaw<ManagedRootRecord>(`SELECT h.local_path,s.source_id,s.source_incarnation,s.worktree_id,s.topology_generation
-      FROM persistence_host_bindings h JOIN persistence_source_bindings s ON s.worktree_id=h.worktree_id
-      UNION SELECT local_path,id,incarnation,NULL,NULL FROM sources WHERE local_path IS NOT NULL`) : [];
+      FROM persistence_host_bindings h JOIN persistence_source_bindings s ON s.worktree_id=h.worktree_id WHERE h.host_id=$1::uuid
+      UNION SELECT local_path,id,incarnation,NULL,NULL FROM sources WHERE local_path IS NOT NULL`, [localHostId()]) : [];
   if (brain.enabled && databasePath) roots.push({ local_path: databasePath });
   if (brain.enabled) recordManagedRoots(brain.brain_id, roots);
   managedRoots.set(brain.brain_id, new Set(roots.map(row => resolve(row.local_path))));

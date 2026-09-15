@@ -19,6 +19,7 @@ import { queuePublicationEffects } from './effect-journal.ts';
 import { authorizePageVisibility } from './page-visibility.ts';
 
 export interface PreparedMutation {
+  sourceExclusive?: boolean;
   observedRevision: string | null;
   additionalPageKeys?: readonly {sourceId:string;slug:string}[];
   file?: { path: string; root: string; content: string | Uint8Array | null; expectedBeforeHash?: string | null };
@@ -131,6 +132,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
     const done = await engine.transaction(async tx => {
       await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout','1s',true),set_config('statement_timeout','5s',true)");
       const liveBinding = await guardOwnership(tx, row, hostId);
+      if (prepared.sourceExclusive) await tx.executeRaw('SELECT id FROM sources WHERE id=$1 FOR UPDATE', [row.source_id]);
       if (binding && String(liveBinding?.owner_epoch) !== String(binding.owner_epoch)) throw new OperationError('owner_unavailable', 'Owner epoch changed before publication.');
       await authorizeStoredRequest(tx, row, true);
       await lockCounters(tx, ['brain', principalKey(requestPrincipal(row)), ...(row.worktree_id ? [`worktree:${row.worktree_id}`] : [])]);

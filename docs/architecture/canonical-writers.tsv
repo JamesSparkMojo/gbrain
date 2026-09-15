@@ -16,7 +16,7 @@ src/commands/reconcile-links.ts	2	engine_guard	Canonical table SQL trigger requi
 src/commands/reindex-aliases.ts	1	engine_guard	Canonical table SQL trigger requires coordinator capability; legacy calls fail before canonical DB publication.
 src/commands/sources-set-path.ts	1	engine_guard	Canonical table SQL trigger requires coordinator capability; legacy calls fail before canonical DB publication.
 src/commands/sources.ts	10	engine_guard	Canonical table SQL trigger requires coordinator capability; legacy calls fail before canonical DB publication.
-src/commands/sync.ts	11	early_refusal	Managed mode refuses this legacy entry point before its canonical filesystem/provider effects.
+src/commands/sync.ts	11	coordinator	Managed Markdown sync routes to immutable page requests and an exhausted-cursor checkpoint; unsupported Git pull, code/image and connector paths refuse early.
 src/core/agent-install/setup.ts	1	engine_guard	Canonical table SQL trigger requires coordinator capability; legacy calls fail before canonical DB publication.
 src/core/atomic-write.ts	0	filesystem_guard	Atomic page replacement checks the managed root before temporary bytes are written.
 src/core/backfill-effective-date.ts	1	projection	Derived indexing, retrieval telemetry, or source settings; canonical fields remain guarded by SQL triggers.
@@ -111,3 +111,4 @@ src/commands/files.ts	0	filesystem_guard	Attachment copying, redirection, restor
 src/commands/schema.ts	0	filesystem_guard	Schema manifest scaffolding and forks check managed roots before creating files; separate config settings are control data.
 src/core/ingestion/sources/inbox-folder.ts	0	filesystem_guard	Inbox archive moves refuse managed canonical input paths before emitting the event or moving source bytes.
 src/core/persistence/links-preparation.ts	2	coordinator	Automatic graph projections publish inside canonical page transactions; delayed reconciliation locks all affected page keys and compares the originating revision.
+src/core/persistence/sync-prepare.ts	3	coordinator	Managed imports and deletes validate the recorded raw file hash plus enumerated page identity/revision; the source-exclusive final checkpoint requires every selected receipt to be committed.

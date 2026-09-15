@@ -1,4 +1,3 @@
-import { assertUnmanagedCanonicalWriter } from '../core/persistence/maintenance.ts';
 import { assertManagedFilesystemWrite } from '../core/persistence/filesystem-guard.ts';
 import { readSourceFileSync, hasSourceFilesystemLock, withSourceFilesystemLock, currentSourceFilesystemSignal, assertSourceFilesystemActive } from '../core/minions/source-filesystem.ts';
 import { currentJobSignal } from '../core/minions/submission-authority.ts';
@@ -297,7 +296,7 @@ export interface SyncResult {
    * cron operators can disambiguate timeout vs pull-timeout in monitoring.
    */
   filesImported?: number;
-  reason?: 'timeout' | 'pull_timeout' | 'pull_failed' | 'stall_timeout' | 'checkpoint_unavailable';
+  reason?: 'timeout' | 'pull_timeout' | 'pull_failed' | 'stall_timeout' | 'checkpoint_unavailable' | 'writer_pending';
   /**
    * v0.42.x (#1794): cumulative file paths durably banked to the checkpoint
    * across THIS run + prior resumed runs. Surfaced on every partial/blocked
@@ -608,7 +607,8 @@ See also:
 export { SyncLockBusyError, runBreakLock } from '../core/sync-lock.ts';
 
 export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<SyncResult> {
-  await assertUnmanagedCanonicalWriter(engine, 'legacy sync');
+  const [managed] = await engine.executeRaw<{ enabled: boolean }>('SELECT enabled FROM persistence_brain WHERE singleton=1');
+  if (managed?.enabled) return (await import('../core/persistence/sync-run.ts')).performManagedSync(engine, opts);
   assertSourceFilesystemActive(true);
   const jobSignal = currentJobSignal();
   if (jobSignal?.aborted) throw jobSignal.reason ?? new Error('Sync job cancelled');

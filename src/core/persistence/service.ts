@@ -21,6 +21,7 @@ export function startPersistenceConsumer(engine: BrainEngine, config: GBrainConf
   const consumer = new PersistenceConsumer(engine, config, async (e, row, cfg) => {
     const registered = preparers.get(row.operation);
     if (registered) return registered(e, row, cfg);
+    if (row.operation === 'submit_job' && String(row.intent?.kind).startsWith('managed_sync_')) return (await import('./sync-prepare.ts')).prepareManagedSyncMutation(e, row, cfg);
     if (row.operation === 'remember') return (await import('./memory-mutations.ts')).prepareMemoryMutation(e, row, cfg);
     if (['takes_add','takes_update','takes_supersede','takes_resolve'].includes(row.operation)) return (await import('./takes-prepare.ts')).prepareTakesMutation(e,row,cfg);
     return (['add_tag','remove_tag','add_timeline_entry'].includes(row.operation) ? prepareSemanticPageMutation : preparePageMutation)(e, row, cfg);
@@ -41,6 +42,11 @@ export async function stopPersistenceConsumer(engine: BrainEngine): Promise<void
 export async function disposePersistenceConsumer(engine: BrainEngine): Promise<void> {
   await stopPersistenceConsumer(engine);
   services.delete(engine);
+}
+export function persistenceConsumerStatus(engine: BrainEngine) {
+  const service = services.get(engine);
+  return service ? { state: service.stopping ? 'closing' : 'open', ...service.consumer.status() }
+    : { state: 'not_running', accepting: false, active_preparations: 0, active_worktrees: 0 };
 }
 export function assertPersistenceAccepting(engine: BrainEngine): void {
   if (services.get(engine)?.stopping) throw new OperationError('unavailable', 'The persistence owner is closing. Retry the same request_id after restart.');
