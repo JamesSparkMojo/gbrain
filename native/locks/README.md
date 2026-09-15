@@ -32,8 +32,11 @@ v22.15.0. `darwin-abi.h` declares the narrow public Darwin LP64 ABI needed
 for SDK-free cross-compilation, with constants/layout checked against Apple
 XNU tag `xnu-11215.81.4`; macOS CI compiles `abi-check.c` against the actual
 SDK. The x86_64 `fstat$INODE64` symbol and arm64 `fstat` symbol are distinct.
-No Apple SDK is redistributed. Windows imports only the used Node-API
-symbols through `node.def`.
+No Apple SDK is redistributed. Windows resolves its used Node-API symbols
+from the running executable through `windows-napi.h`, including renamed
+compiled CLIs. It never loads a separate `node.exe`. A process-wide once
+guard publishes the complete function table before any API call; missing
+exports refuse registration without borrowing another runtime's environment.
 
 Use the pinned Zig 0.14.1 compiler. Archive URLs, SHA-256 hashes and sizes
 are in `scripts/native/toolchain.json`; setup verifies them before extracting.

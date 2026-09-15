@@ -11,11 +11,40 @@ function verify(root: string) {
   return spawnSync(process.execPath, ['scripts/native/verify.ts'], { cwd: root, encoding: 'utf8' });
 }
 
+function windowsImports(binary: Buffer): string[] {
+  const pe = binary.readUInt32LE(0x3c);
+  expect(binary.toString('ascii', pe, pe + 4)).toBe('PE\0\0');
+  const optional = pe + 24;
+  expect(binary.readUInt16LE(optional)).toBe(0x20b);
+  const sectionTable = optional + binary.readUInt16LE(pe + 20);
+  const offset = (rva: number) => {
+    for (let i = 0; i < binary.readUInt16LE(pe + 6); i++) {
+      const section = sectionTable + i * 40;
+      const start = binary.readUInt32LE(section + 12);
+      const length = Math.max(binary.readUInt32LE(section + 8), binary.readUInt32LE(section + 16));
+      if (rva >= start && rva < start + length) return binary.readUInt32LE(section + 20) + rva - start;
+    }
+    throw new Error(`PE import RVA ${rva} has no section`);
+  };
+  const names: string[] = [];
+  for (let entry = offset(binary.readUInt32LE(optional + 120)); binary.readUInt32LE(entry + 12); entry += 20) {
+    const start = offset(binary.readUInt32LE(entry + 12));
+    names.push(binary.toString('ascii', start, binary.indexOf(0, start)).toLowerCase());
+  }
+  return names;
+}
+
 describe('native lock distribution integrity', () => {
   test('all eight vendored binaries match the current source and hash manifest', () => {
     const result = verify(repo);
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain('Verified 8 native lock prebuilds');
+  });
+
+  test.each(['win32-x64', 'win32-arm64'])('%s binds Node-API to its host without loading another runtime', target => {
+    const imports = windowsImports(readFileSync(join(repo, `native/locks/prebuilds/${target}.node`)));
+    expect(imports.length).toBeGreaterThan(0);
+    expect(imports.filter(name => name.endsWith('.exe') || name === 'node.dll' || name === 'libnode.dll')).toEqual([]);
   });
 
   test.each(['binary', 'source'])('verification rejects changed %s bytes', (changed) => {

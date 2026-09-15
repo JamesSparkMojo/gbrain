@@ -16,6 +16,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include "windows-napi.h"
 typedef HANDLE os_handle;
 #define INVALID_LOCK_HANDLE INVALID_HANDLE_VALUE
 #else
@@ -214,6 +215,10 @@ static napi_value close_lock(napi_env env, napi_callback_info info) {
 }
 
 NAPI_MODULE_INIT() {
+#ifdef _WIN32
+  /* Missing exports reject registration before any Node-API call. */
+  if (!gbrain_initialize_napi()) return NULL;
+#endif
   lock_state *state = calloc(1, sizeof(*state));
   if (!state) return fail(env, "allocate", 0);
   state->references = 1;
