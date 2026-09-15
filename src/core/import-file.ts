@@ -920,7 +920,10 @@ export async function importFromContent(
         contextual_retrieval_mode: row.contextual_retrieval_mode ?? null,
         trust_frontmatter_overrides: row.trust_frontmatter_overrides === true,
       };
-    } catch {
+    } catch (error) {
+      // Accepted coordinated writes must retry a failed policy read; falling
+      // back here could commit a different source's wrapping convention.
+      if (opts.prepare) throw error;
       // Source row missing ('default' not seeded on a fresh brain) — the
       // stub stands, matching pre-#3885 behavior.
     }
