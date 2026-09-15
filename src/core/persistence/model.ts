@@ -13,6 +13,7 @@ export interface WriteAuthority {
   slugPrefixes: string[] | null;
   delegatedPrefixes?: string[] | null;
   delegated?: boolean;
+  takesHolders?: string[] | null;
 }
 export interface RecoveryRecord {
   version: 1;

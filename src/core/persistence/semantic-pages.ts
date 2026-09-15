@@ -7,6 +7,8 @@ import { extractTimelineFromContent } from '../timeline-extract.ts';
 import { preparePageMutation } from './page-prepare.ts';
 import type { PreparedMutation } from './coordinator.ts';
 import type { WriteRequest } from './model.ts';
+import { assertPageRevision } from '../page-state/types.ts';
+import { engineMutationPrecondition, parseMutationPrecondition } from './preconditions.ts';
 
 function hasExactBlock(text: string, block: string): boolean {
   const wanted = block.trimEnd().split('\n');
@@ -17,6 +19,7 @@ export async function prepareSemanticPageMutation(engine: BrainEngine, row: Writ
   const snapshot = await engine.readPageSnapshot(row.slug, { sourceId: row.source_id });
   if (!snapshot || snapshot.page.id !== row.page_id) throw new OperationError('page_identity_changed', 'The accepted page no longer exists.');
   const p = row.intent!;
+  if (p.expected_revision !== undefined) assertPageRevision(snapshot,engineMutationPrecondition(parseMutationPrecondition(p)));
   if (row.operation === 'add_tag' || row.operation === 'remove_tag') {
     if (typeof p.tag !== 'string' || !p.tag.trim()) throw new OperationError('invalid_params', 'A tag must be nonempty.');
     const tag = p.tag.trim();

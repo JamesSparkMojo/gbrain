@@ -9,6 +9,10 @@ export const WRITE_ERROR_CODES = [
   'writer_lock_unavailable', 'writer_pool_capacity', 'owner_unavailable',
   'recovery_required', 'queue_capacity', 'revision_required', 'revision_conflict',
   'idempotency_conflict', 'source_changed', 'write_pending', 'storage_error', 'cancelled',
+  'permission_denied', 'scope_denied', 'invalid_params', 'not_found', 'page_not_found',
+  'page_identity_changed', 'write_claim_lost', 'request_too_large', 'response_too_large',
+  'writer_registration_required', 'writer_identity_invalid', 'writer_not_initialized',
+  'writer_coordinator_required', 'fact_already_expired',
 ] as const;
 
 export type WriteErrorCode = typeof WRITE_ERROR_CODES[number];

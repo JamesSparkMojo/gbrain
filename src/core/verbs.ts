@@ -155,7 +155,8 @@ const remember: Operation = {
     }
 
     const { submitRememberMutation } = await import('./persistence/memory-mutations.ts');
-    return submitRememberMutation(ctx, { ...p, fact, provenance, kind, visibility });
+    const { runMemoryWrite } = await import('./persistence/verb-errors.ts');
+    return runMemoryWrite(() => submitRememberMutation(ctx, { ...p, fact, provenance, kind, visibility }));
   },
   cliHints: { name: 'remember', positional: ['fact'] },
 };
@@ -372,7 +373,8 @@ const forget: Operation = {
     }
 
     const { submitForgetMutation } = await import('./persistence/memory-mutations.ts');
-    return submitForgetMutation(ctx, 'forget', { ...p, id: rawId, ...(reason ? { reason } : {}) });
+    const { runMemoryWrite } = await import('./persistence/verb-errors.ts');
+    return runMemoryWrite(() => submitForgetMutation(ctx, 'forget', { ...p, id: rawId, ...(reason ? { reason } : {}) }));
   },
   // NO cliHints: `gbrain forget` is a CLI_ONLY command (recall.ts runForget)
   // that dispatches BEFORE cliOps — a cliHint here would be silently

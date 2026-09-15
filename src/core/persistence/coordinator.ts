@@ -14,6 +14,7 @@ import type { NativeLockHandle } from './native-lock.ts';
 import { withCoordinatedWrite } from './context.ts';
 import { withFilesystemPublication } from './filesystem-guard.ts';
 import { mayReprepare } from './semantic.ts';
+import { tryAcquirePublicationCapacity } from './pool-capacity.ts';
 
 export interface PreparedMutation {
   observedRevision: string | null;
@@ -70,6 +71,7 @@ export async function finishUnpublishedFailure(engine: BrainEngine, row: WriteRe
 export async function publishMutation(engine: BrainEngine, row: WriteRequest, prepared: PreparedMutation,
   hostId = localHostId(), hooks: PublicationHooks = {}): Promise<WriteRequest> {
   let lock: NativeLockHandle | null = null;
+  let releaseCapacity: (() => void) | null = null;
   let binding: WorktreeBinding | null = null;
   let recovery: RecoveryRecord | null = null;
   let published = false;
@@ -86,6 +88,11 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
         await releaseUnpublishedClaim(engine, row, 'writer_busy');
         return (await getWriteRequestById(engine, row.id))!;
       }
+    }
+    releaseCapacity = tryAcquirePublicationCapacity(engine);
+    if (!releaseCapacity) {
+      await releaseUnpublishedClaim(engine, row, 'writer_pool_capacity');
+      return (await getWriteRequestById(engine, row.id))!;
     }
     if (prepared.file && !prepared.noop) {
       if (!binding || !lock || !isWriteTargetContained(prepared.file.path, prepared.file.root)) throw new OperationError('storage_error', 'Filesystem publication requires a confined canonical owner.');
@@ -159,7 +166,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       return (await getWriteRequestById(engine, row.id))!;
     }
     return finishUnpublishedFailure(engine, row, error);
-  } finally { await lock?.release(); }
+  } finally { releaseCapacity?.(); await lock?.release(); }
 }
 
 export async function recoverPublication(engine: BrainEngine, id: string, hostId = localHostId(), alreadyLocked = false,

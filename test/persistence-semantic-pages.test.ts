@@ -49,3 +49,23 @@ test('timeline replay is an exact no-op in Markdown, revision, versions and stru
   expect(await engine.executeRaw('SELECT id FROM page_versions WHERE page_id=$1', [before.page.id])).toEqual(versions);
   expect(await engine.getTimeline('page', { sourceId })).toHaveLength(1);
 });
+
+test('concurrent takes append, supersession and resolution publish one canonical row set', async () => {
+  const added = await Promise.all(Array.from({ length: 4 }, (_, i) => submit('takes_add', {
+    slug:'page',claim:`Example belief ${i}`,kind:'take',holder:'world',weight:0.6,
+  })));
+  expect(new Set(added.map(result=>result.row_num)).size).toBe(4);
+  const superseded=await submit('takes_supersede',{slug:'page',row_num:added[0].row_num,claim:'Updated example belief'});
+  const request_id=randomUUID();
+  const resolve={slug:'page',row_num:superseded.new_row,quality:'correct',evidence:'Example evidence',request_id};
+  const committed=await submit('takes_resolve',resolve);
+  const before=(await engine.readPageSnapshot('page',{sourceId}))!;
+  const result=await submit('takes_resolve',resolve);
+  expect(result.revision).toBe(committed.revision);
+  expect((await engine.readPageSnapshot('page',{sourceId}))!.revision).toBe(before.revision);
+  const rows=await engine.executeRaw<{ row_num:number; active:boolean; resolved_quality:string|null }>('SELECT row_num,active,resolved_quality FROM takes WHERE page_id=$1 ORDER BY row_num',[before.page.id]);
+  expect(rows).toHaveLength(5);
+  expect(rows.find(row=>row.row_num===Number(superseded.old_row))!.active).toBe(false);
+  expect(rows.find(row=>row.row_num===Number(superseded.new_row))!.resolved_quality).toBe('correct');
+  expect((await engine.getChunks('page',{sourceId})).map(chunk=>chunk.chunk_text).join('\n')).not.toContain('Example belief');
+});

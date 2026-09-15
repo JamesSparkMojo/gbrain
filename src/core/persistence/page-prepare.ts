@@ -86,6 +86,17 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
     }
     content = serializePageToMarkdown(page, tags);
   }
+  // Detect an exact canonical no-op before ingestion can invoke any provider.
+  // Revision/identity checks above still apply to stale identical replacements.
+  if (snapshot && snapshot.page.deleted_at == null && typeof content === 'string') {
+    const incoming = parseMarkdown(content,row.slug);
+    const tags = versionTags ?? [...new Set([...snapshot.tags,...incoming.tags])].sort();
+    if (digest(canonical(snapshot.page,snapshot.tags)) === digest(canonical(incoming,tags))) {
+      return {observedRevision,noop:true,file:await prepareFileTarget(engine,row,snapshot,serializePageToMarkdown(snapshot.page,snapshot.tags)),
+        apply:async()=>({status:'skipped',slug:row.slug,source_id:row.source_id,noop:true,chunks:0,
+          ...(row.operation==='capture'?{channel:'capture',content_hash:p.capture_hash}:{})})};
+    }
+  }
   let prepared: PreparedContentImport | undefined;
   const result = await importFromContent(engine, row.slug, content, {
     ...source, noEmbed: true, remote: row.authority.remote,

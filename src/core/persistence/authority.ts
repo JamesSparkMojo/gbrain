@@ -3,7 +3,7 @@ import type { OperationContext } from '../ops/contract.ts';
 import { OperationError } from '../ops/contract.ts';
 import { slugUnderBoundPrefixes, matchesSlugAllowList } from '../ops/context.ts';
 import { hasScope } from '../scope.ts';
-import { coerceLegacyPermissions, normalizeTokenScopes, parseLegacyTokenScope } from '../legacy-token-scope.ts';
+import { coerceLegacyPermissions, normalizeTokenScopes, parseLegacyTokenScope, parseTakesHoldersAllowList } from '../legacy-token-scope.ts';
 import { readLocalWriter, currentVerifiedLocalWriter, verifyLocalWriter, type LocalGrant } from './identity.ts';
 import type { Principal, SqlEngine, WriteAuthority, WriteRequest } from './model.ts';
 
@@ -28,6 +28,7 @@ export async function submissionAuthority(ctx: OperationContext, operation: stri
   }
   const a: WriteAuthority = {
     version: 1, principal, remote: ctx.remote !== false, sourceId, sourceIncarnation,
+    takesHolders: ctx.remote === false ? null : [...(ctx.takesHoldersAllowList ?? ['world'])],
     scopes: [...(ctx.auth?.scopes ?? localGrant?.scopes ?? [])],
     operations: ctx.auth?.allowedOperations ? [...ctx.auth.allowedOperations] : localGrant?.operations ?? null,
     slugPrefixes: ctx.auth?.boundSlugPrefixes ? [...ctx.auth.boundSlugPrefixes] : localGrant?.slugPrefixes ?? null,
@@ -95,4 +96,18 @@ export async function ownRequestAccessible(ctx: OperationContext, row: WriteRequ
     if (error instanceof OperationError && ['permission_denied','source_changed','writer_registration_required'].includes(error.code)) return false;
     throw error;
   }
+}
+
+
+/** Caller holds the same principal guard as revocation/rescoping. */
+export async function authorizeTakeHolder(engine: SqlEngine, authority: WriteAuthority, holder: string): Promise<void> {
+  if (!authority.remote) return;
+  if (!(authority.takesHolders ?? ['world']).includes(holder)) deny('The take holder exceeds the original grant.');
+  let current = ['world'];
+  if (authority.principal.kind === 'legacy_token') {
+    const [row] = await engine.executeRaw<{ permissions: unknown }>('SELECT permissions FROM access_tokens WHERE id=$1 AND revoked_at IS NULL', [authority.principal.id]);
+    if (!row) deny('The owning token is revoked.');
+    current = parseTakesHoldersAllowList(coerceLegacyPermissions(row.permissions)?.takes_holders) ?? ['world'];
+  }
+  if (!current.includes(holder)) deny('The current holder grant excludes this write.');
 }

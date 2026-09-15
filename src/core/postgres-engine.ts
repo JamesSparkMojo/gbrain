@@ -1,3 +1,4 @@
+import { tryAcquirePoolLongHold, PoolCapacityError } from './pool-budget.ts';
 import { mutatePageTag } from './page-state/tags.ts';
 import type { PageKey, PageSnapshot, PageSnapshotOptions, PageWriteOptions } from './page-state/types.ts';
 import { assertPageRevision } from './page-state/types.ts';
@@ -581,55 +582,21 @@ export class PostgresEngine implements BrainEngine {
     }
   }
 
-  /**
-   * issue #6 (reserved-connection routing): concurrent DIRECT-pool reserves
-   * are capped at directPoolSize - 1 so the claim/renewLock heartbeats always
-   * keep >= 1 direct slot; overflow falls back to the READ pool — exactly the
-   * pre-routing behavior, so this change is strictly never-worse than the
-   * status quo (deliberate rejection of queue-for-a-permit: that would block
-   * migrations behind multi-minute CREATE INDEX holds). Per-process by
-   * design: each process owns its own direct pool, so a CLI migration's
-   * reserves cannot starve a worker's heartbeats.
-   */
-  private _reservedDirectInFlight = 0;
-
+  /** Long holds share a budget across every engine that uses the same physical pool. */
   async withReservedConnection<T>(fn: (conn: ReservedConnection) => Promise<T>): Promise<T> {
-    // Long-hold reserved work (CREATE INDEX CONCURRENTLY, transaction:false
-    // migration DDL, backfill BEGIN..COMMIT batches) belongs on the DIRECT
-    // session lane: 30-min statement_timeout + maintenance_work_mem GUCs and
-    // it stops pinning the worker's shared read pool (the observed 353s
-    // COMMIT in issue #6 was a reserved read-pool slot). Never reroute inside
-    // an open transaction (same guard shape as executeRawDirect).
-    const inTransaction = this._sql !== null && this.connectionManager?.peekReadPool() !== this._sql;
     let pool = this.sql;
-    let fromDirect = false;
-    if (!inTransaction && this.connectionManager?.isDualPoolActive()) {
-      const size = this.connectionManager.describeMode().direct_pool_size ?? DEFAULT_DIRECT_POOL_SIZE;
-      // NO floor on the cap (red-team finding): at direct_pool_size=1 a
-      // Math.max(1, ...) floor would let a multi-minute reserve consume the
-      // ONLY direct session and starve claim/renewLock heartbeats — the
-      // exact #6 class, reintroduced on the direct pool. cap <= 0 means the
-      // direct lane has no spare capacity for reserves: use the read pool
-      // (the true status quo).
-      const cap = size - 1;
-      if (cap >= 1 && this._reservedDirectInFlight < cap) {
-        // Take the permit in the SAME synchronous frame as the check — a
-        // check-then-increment spanning `await ddl()` is a TOCTOU that lets
-        // same-tick concurrent reserves overshoot the cap and starve the
-        // heartbeat slot the cap exists to protect (adversarial-review P2).
-        this._reservedDirectInFlight += 1;
-        fromDirect = true;
-        try {
-          pool = await this.connectionManager.ddl();
-        } catch {
-          // ddl() failure flips its own kill switch; fall back to the read
-          // pool (status quo) rather than failing the caller.
-          this._reservedDirectInFlight -= 1;
-          fromDirect = false;
-          pool = this.sql;
-        }
+    let releasePermit: (() => void) | null = null;
+    if (!this._pageTransaction && this.connectionManager?.isDualPoolActive()) {
+      try {
+        const direct = await this.connectionManager.ddl();
+        releasePermit = tryAcquirePoolLongHold(direct, this.connectionManager.describeMode().direct_pool_size ?? DEFAULT_DIRECT_POOL_SIZE);
+        if (releasePermit) pool = direct;
+      } catch {
+        // A disabled direct route falls back to the same bounded ordinary pool.
       }
     }
+    releasePermit ??= tryAcquirePoolLongHold(pool);
+    if (!releasePermit) throw new PoolCapacityError();
     // Gauge BEFORE reserve(): a reserve() stuck waiting for a free slot is
     // exactly the in-flight pressure the probe diagnostics should surface.
     this.checkoutGauge.acquire('reserved');
@@ -638,7 +605,7 @@ export class PostgresEngine implements BrainEngine {
       reserved = await pool.reserve();
     } catch (e) {
       this.checkoutGauge.release('reserved');
-      if (fromDirect) this._reservedDirectInFlight -= 1;
+      releasePermit();
       throw e;
     }
     try {
@@ -670,7 +637,7 @@ export class PostgresEngine implements BrainEngine {
         // best-effort; the pool's own lifecycle handles a broken reservation
       }
       this.checkoutGauge.release('reserved');
-      if (fromDirect) this._reservedDirectInFlight -= 1;
+      releasePermit();
     }
   }
 

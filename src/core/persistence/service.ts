@@ -22,6 +22,7 @@ export function startPersistenceConsumer(engine: BrainEngine, config: GBrainConf
     const registered = preparers.get(row.operation);
     if (registered) return registered(e, row, cfg);
     if (row.operation === 'remember') return (await import('./memory-mutations.ts')).prepareMemoryMutation(e, row, cfg);
+    if (['takes_add','takes_update','takes_supersede','takes_resolve'].includes(row.operation)) return (await import('./takes-prepare.ts')).prepareTakesMutation(e,row,cfg);
     return (['add_tag','remove_tag','add_timeline_entry'].includes(row.operation) ? prepareSemanticPageMutation : preparePageMutation)(e, row, cfg);
   });
   services.set(engine, { consumer, stopping: false });

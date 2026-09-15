@@ -1,5 +1,19 @@
-import { verbError, type OperationError } from '../ops/contract.ts';
-import { isTerminalWriteState, type WriteErrorCode, type WriteReceipt } from './types.ts';
+import { verbError, OperationError } from '../ops/contract.ts';
+import { isTerminalWriteState, isWriteErrorCode, type WriteErrorCode, type WriteReceipt } from './types.ts';
+
+/** Apply the frozen contract at the verb boundary for CLI and every transport. */
+export async function runMemoryWrite<T>(run: () => Promise<T>): Promise<T> {
+  try { return await run(); } catch (error) {
+    if (!(error instanceof OperationError)) throw error;
+    if (error.writeRequest) throw frozenVerbWriteError(error.writeRequest, error.writeError);
+    const code = ['permission_denied','scope_denied','source_changed','writer_registration_required'].includes(error.code)
+      ? 'scope_denied' : ['revision_required','revision_conflict','idempotency_conflict','invalid_params','page_identity_changed'].includes(error.code)
+        ? 'invalid_params' : 'unavailable';
+    const frozen = verbError(code,error.message,error.suggestion ?? 'Inspect writer status before retrying.');
+    if (isWriteErrorCode(error.code)) frozen.writeError=error.code;
+    throw frozen;
+  }
+}
 
 /** Queue states are additive detail; frozen MEMORY_VERBS v1 error codes never widen. */
 export function frozenVerbWriteError(receipt: WriteReceipt, reason?: WriteErrorCode): OperationError {
@@ -7,8 +21,8 @@ export function frozenVerbWriteError(receipt: WriteReceipt, reason?: WriteErrorC
   const writeError = reason ?? (pending ? 'write_pending'
     : receipt.state === 'conflict' ? 'revision_conflict'
       : receipt.state === 'cancelled' ? 'cancelled' : 'storage_error');
-  const code = writeError === 'source_changed' ? 'scope_denied'
-    : ['revision_required', 'revision_conflict', 'idempotency_conflict'].includes(writeError)
+  const code = ['source_changed','permission_denied','scope_denied','writer_registration_required'].includes(writeError) ? 'scope_denied'
+    : ['revision_required', 'revision_conflict', 'idempotency_conflict','invalid_params','page_identity_changed'].includes(writeError)
       ? 'invalid_params' : 'unavailable';
   const suggestion = pending
     ? `Retry the same verb with the same arguments and request_id ${receipt.request_id}${receipt.retry_after_ms === null ? ' after checking writer availability' : ` after ${receipt.retry_after_ms} ms`}. Do not submit a new request_id for this write.`

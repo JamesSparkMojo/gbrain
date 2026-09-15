@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { OperationContext } from '../ops/contract.ts';
 import { OperationError } from '../ops/contract.ts';
 import { enforceClientSlugFence, enforceSubagentSlugFence, normalizeSlugPrefix, validatePageSlug } from '../ops/context.ts';
@@ -48,7 +50,8 @@ export async function submitPageMutation(ctx: OperationContext,
     'SELECT incarnation,archived,local_path FROM sources WHERE id=$1', [sourceId]);
   if (!source || source.archived) throw new OperationError('source_changed', 'The write source is not active.');
   let slug = typeof p.slug === 'string' ? p.slug.toLowerCase() : '';
-  const intent = { ...p };
+  const intent = ['takes_add','takes_update','takes_supersede','takes_resolve'].includes(input.operation)
+    ? await (await import('./takes-prepare.ts')).normalizeTakesIntent(ctx,p) : { ...p };
   delete intent.request_id;
   if (input.operation === 'capture') {
     if (typeof p.content !== 'string' || !normalizeForHash(p.content) || detectBinaryNullByte(Buffer.from(p.content)) !== -1) {
@@ -79,6 +82,13 @@ export async function submitPageMutation(ctx: OperationContext,
   let binding = await getWorktreeBinding(ctx.engine, sourceId);
   const writeThrough = !/^(false|0|off|no)$/i.test(await ctx.engine.getConfig('sync.write_through') ?? 'true');
   const root = source.local_path || (sourceId === 'default' ? await ctx.engine.getConfig('sync.repo_path') : null);
+  if (p.local_dir !== undefined) {
+    if (ctx.remote !== false || typeof p.local_dir !== 'string' || !root
+      || realpathSync(resolve(p.local_dir)) !== realpathSync(resolve(root))) {
+      throw new OperationError('invalid_params', 'The CLI directory must match the selected source canonical root.',
+        'Register the source canonical path, then omit --dir or use that same path.');
+    }
+  }
   if (writeThrough && root && !binding) {
     if (ctx.engine.kind !== 'pglite') throw new OperationError('owner_unavailable', 'This source has no designated canonical owner.', 'Register its owner with sources writer claim before accepting writes.');
     binding = await claimWorktree(ctx.engine, sourceId, root);

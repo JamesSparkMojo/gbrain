@@ -6,6 +6,7 @@ import { localHostId } from './identity.ts';
 import { isTerminal, type WriteRequest } from './model.ts';
 import { refreshManagedFilesystemRoots } from './filesystem-guard.ts';
 import { rebuildPendingPageProjections } from '../page-state/projections.ts';
+import { publicationConcurrency } from './pool-capacity.ts';
 
 export type PrepareMutation = (engine: BrainEngine, row: WriteRequest, config: GBrainConfig) => Promise<PreparedMutation>;
 export class PersistenceConsumer {
@@ -48,7 +49,12 @@ export class PersistenceConsumer {
     await this.engine.executeRaw(`UPDATE persistence_requests r SET state='queued',execution_token=NULL,claim_expires_at=NULL
       WHERE r.state='running' AND r.recovery IS NULL AND r.claim_expires_at<now()
       AND (r.worktree_id IS NULL OR EXISTS (SELECT 1 FROM persistence_worktrees w WHERE w.id=r.worktree_id AND w.owner_host_id=$1::uuid))`, [this.hostId]);
-    const concurrency = this.opts.concurrency ?? (this.engine.kind === 'postgres' ? 2 : 1);
+    if (publicationConcurrency(this.engine) === 0) {
+      await this.engine.executeRaw(`UPDATE persistence_requests SET blocked_reason='writer_pool_capacity'
+        WHERE state='queued' AND blocked_reason IS DISTINCT FROM 'writer_pool_capacity'`);
+      return;
+    }
+    const concurrency = this.opts.concurrency ?? 2;
     const attemptedRoots = new Set(this.activeRoots);
     while (!this.stopping && this.active.size < concurrency) {
       const row = await claimNextWrite(this.engine, this.hostId, 30_000, [...attemptedRoots]);
