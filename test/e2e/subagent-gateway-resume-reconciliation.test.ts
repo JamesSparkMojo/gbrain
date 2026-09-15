@@ -143,8 +143,8 @@ describe('gateway resume reconciliation', () => {
     const registry: ToolDef[] = [{ name: 'brain_put_page', description: 'p', input_schema: { type: 'object' }, idempotent: true,
       execute: async input => {
         const id = (input as Record<string, unknown>).request_id; identities.push(id);
-        expect(typeof id).toBe('string');
-        expect(String(id)).toMatch(/^[0-9a-f-]{36}$/);
+        if (typeof id !== 'string') throw new Error('Tool write identity must be persisted before execution');
+        expect(id).toMatch(/^[0-9a-f-]{36}$/);
         const [row] = await engine.executeRaw<{ request_id: string }>("SELECT input->>'request_id' AS request_id FROM subagent_tool_executions WHERE job_id=$1", [jobId]);
         expect(row.request_id).toBe(id);
         return { request_id: id, state: pending ? 'queued' : 'committed', retry_after_ms: pending ? 100 : null };
