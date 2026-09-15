@@ -83,6 +83,7 @@ describe('native lock distribution integrity', () => {
       expect(lockTests).toBeDefined();
       expect(lockTests!).toMatch(/--timeout(?:=|\s+)[1-9]\d*\b/);
       expect(lockTests!).toContain('test/pglite-lock.test.ts');
+      expect(lockTests!).toContain('test/local-ipc-path.test.ts');
       expect(script).toContain('bun scripts/native/compiled-smoke.ts');
       expect(script).toContain('bun scripts/native/verify.ts --rebuilt');
       for (const target of matrix.target) {
