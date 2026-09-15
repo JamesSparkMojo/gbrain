@@ -6,13 +6,14 @@ import { isNullLikeEntity } from '../facts/write-single.ts';
 import { recordFactWithdrawal } from '../facts/withdrawal.ts';
 import { initializeLocalPersistence, requestPrincipalForContext } from './page-mutations.ts';
 import { authorizeStoredRequest, submissionAuthority } from './authority.ts';
-import { admitWrite, assertPageRequestIdentity, assertReplayIntent, completeWrite, getWriteRequest, intentDigest } from './journal.ts';
+import { admitWrite, admitWriteInTransaction, assertPageRequestIdentity, assertReplayIntent, completeWrite, getWriteRequest, intentDigest } from './journal.ts';
 import { assertPersistenceAccepting, registerMutationPreparer, waitForWrite, writeResponse } from './service.ts';
 import { claimWorktree, getWorktreeBinding } from './ownership.ts';
 import { parseMutationPrecondition } from './preconditions.ts';
 import { withCoordinatedWrite } from './context.ts';
 import { isTerminal, type WriteRequest } from './model.ts';
 import { prepareMemoryMutation } from './memory-prepare.ts';
+import { retryWriteAdmission } from './admission-retry.ts';
 
 export { prepareMemoryMutation } from './memory-prepare.ts';
 /** Only semantic appends without an explicit caller revision can be recomputed. */
@@ -100,8 +101,11 @@ export async function submitForgetMutation(ctx: OperationContext, operation: 'fo
   const reason = typeof p.reason === 'string' && p.reason.trim() ? p.reason.trim() : null;
   if (!Number.isSafeInteger(id) || id <= 0) throw verbError(operation === 'forget' ? 'not_found' : 'fact_not_found',
     `No fact with id "${rawId}".`, 'Pass the fact id returned by remember or recall.');
-  const done = await ctx.engine.transaction(async tx => {
-    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout','1s',true),set_config('statement_timeout','5s',true)");
+  // Retry the whole withdrawal, so source/principal guards and the connection
+  // are released before backoff. Admission must not retry a nested savepoint.
+  const done = await retryWriteAdmission(requestId, remaining => ctx.engine.transaction(async tx => {
+    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout',$1,true),set_config('statement_timeout',$2,true)",
+      [`${Math.min(1000, remaining)}ms`, `${remaining}ms`]);
     // Source -> current grant -> counters/request -> sorted page keys -> facts.
     // Do not acquire a shared source lock first and upgrade it after admission.
     const [source] = await tx.executeRaw<{ incarnation: string; archived: boolean }>(
@@ -122,7 +126,7 @@ export async function submitForgetMutation(ctx: OperationContext, operation: 'fo
     const slug = fact.source_markdown_slug ?? fact.entity_slug ?? 'memory/unattributed';
     enforceClientSlugFence(ctx, slug, operation); enforceSubagentSlugFence(ctx, slug, operation);
     const authority = await submissionAuthority({ ...ctx, engine: tx }, operation, sourceId, source.incarnation, slug);
-    const row = await admitWrite(tx, { principal, operation, sourceId, sourceIncarnation: source.incarnation,
+    const row = await admitWriteInTransaction(tx, { principal, operation, sourceId, sourceIncarnation: source.incarnation,
       slug, requestId, callerIntent, intent: { ...callerIntent, reason }, authority });
     if (isTerminal(row)) return row;
     return withCoordinatedWrite(tx, [sourceId], async () => {
@@ -139,6 +143,6 @@ export async function submitForgetMutation(ctx: OperationContext, operation: 'fo
         : { id, expired: true, path: 'legacy_db', reason: reason ?? 'forgotten' };
       return completeWrite(tx, row, 'committed', { ...outcome, persistence: { mode: 'database' } });
     });
-  });
+  }));
   return writeResponse(done);
 }

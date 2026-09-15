@@ -71,15 +71,25 @@ export function assertReplayIntent(row: WriteRequest, expectedDigest: string): W
   return row;
 }
 export async function admitWrite(engine: BrainEngine, input: WriteAdmission, overrides?: Partial<JournalLimits>): Promise<WriteRequest> {
+  const { requestId, apply } = await prepareAdmission(engine, input, overrides);
+  return retryWriteAdmission(requestId, remaining => engine.transaction(async tx => {
+    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout',$1,true),set_config('statement_timeout',$2,true)",
+      [`${Math.min(1000, remaining)}ms`, `${remaining}ms`]);
+    return apply(tx);
+  }));
+}
+/** Caller owns the transaction and retries its entire unit of work after rollback. */
+export async function admitWriteInTransaction(tx: BrainEngine, input: WriteAdmission, overrides?: Partial<JournalLimits>): Promise<WriteRequest> {
+  return (await prepareAdmission(tx, input, overrides)).apply(tx);
+}
+async function prepareAdmission(engine: BrainEngine, input: WriteAdmission, overrides?: Partial<JournalLimits>) {
   const limits = await readJournalLimits(engine,overrides);
   const requestId = requireUuid(input.requestId ?? randomUUID());
   const fingerprint = intentDigest(input);
   const bytes = jsonBytes(input.intent) + jsonBytes(input.authority);
   const terminalBytes = input.terminalReservation ?? Math.max(16_384,jsonBytes(input.authority)+8192);
   if (!Number.isSafeInteger(terminalBytes) || terminalBytes < 1024) throw new TypeError('Invalid terminal receipt reservation.');
-  return retryWriteAdmission(requestId, remaining => engine.transaction(async tx => {
-    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout',$1,true),set_config('statement_timeout',$2,true)",
-      [`${Math.min(1000, remaining)}ms`, `${remaining}ms`]);
+  return { requestId, apply: async (tx: BrainEngine): Promise<WriteRequest> => {
     if (input.worktreeId) {
       await tx.executeRaw('SELECT id FROM persistence_worktrees WHERE id=$1::uuid FOR SHARE', [input.worktreeId]);
       const binding = await tx.executeRaw(`SELECT source_id FROM persistence_source_bindings WHERE source_id=$1
@@ -119,7 +129,7 @@ export async function admitWrite(engine: BrainEngine, input: WriteAdmission, ove
     for (const c of counters) await tx.executeRaw(`UPDATE persistence_counters SET outstanding_count=outstanding_count+1,
       intent_bytes=intent_bytes+$2,lifetime_ids=lifetime_ids+1,terminal_bytes=terminal_bytes+$3 WHERE key=$1`, [c.key, bytes, terminalBytes]);
     return row;
-  }));
+  } };
 }
 
 /** Claims commit before OS-lock waits. An unresolved head blocks its entire root. */

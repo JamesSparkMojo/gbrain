@@ -43,6 +43,13 @@ jobs:
         run: cc -std=c11 native/locks/abi-check.c -o "${{ runner.temp }}/native-abi-check"
       - run: bun test test/native-lock.test.ts test/pglite-lock.test.ts
       - run: bun scripts/native/compiled-smoke.ts
+      - name: Build the published CLI platforms and verify persistent writes
+        if: matrix.target == 'linux-x64-glibc' || matrix.target == 'darwin-arm64'
+        timeout-minutes: 8
+        run: |
+          bun build --compile --outfile bin/gbrain-native-validation src/cli.ts
+          bun scripts/native/compiled-smoke.ts --binary bin/gbrain-native-validation
+          bun scripts/native/cli-persistence-smoke.ts --binary bin/gbrain-native-validation
 
   musl:
     name: ${{ matrix.target }} / Bun ${{ matrix.bun }}
