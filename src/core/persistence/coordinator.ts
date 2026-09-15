@@ -177,7 +177,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       catch { /* database outage: durable recovery record remains discoverable */ }
       if (lock) {
         try { return await recoverPublication(engine, row.id, hostId, true,
-          failure); }
+          failure, releaseCapacity !== null); }
         catch { /* hold durable recovering state; next owner loop retries */ }
       }
       try { return await getWriteRequestById(engine, row.id) ?? { ...row, state: 'recovering', blocked_reason: 'database_unavailable' }; }
@@ -192,15 +192,22 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
 }
 
 export async function recoverPublication(engine: BrainEngine, id: string, hostId = localHostId(), alreadyLocked = false,
-  terminalError?: { code: string; message: string }): Promise<WriteRequest> {
+  terminalError?: { code: string; message: string }, capacityAlreadyHeld = false): Promise<WriteRequest> {
   let row = await getWriteRequestById(engine, id);
   if (!row) throw new OperationError('not_found', 'Write request not found.');
   if (!row.recovery) return row;
+  if (isTerminal(row)) { await clearResolvedRecovery(engine, id); return (await getWriteRequestById(engine, id))!; }
   const binding = await getWorktreeBinding(engine, row.source_id, hostId);
   if (!binding || binding.owner_host_id !== hostId) throw new OperationError('owner_unavailable', 'Recovery requires the canonical owner.');
   const lock = alreadyLocked ? null : await acquireWorktree(binding);
   if (!alreadyLocked && !lock) return row;
+  const releaseCapacity = capacityAlreadyHeld ? null : tryAcquirePublicationCapacity(engine);
   try {
+    if (!capacityAlreadyHeld && !releaseCapacity) {
+      const [blocked] = await engine.executeRaw<WriteRequest>(`UPDATE persistence_requests SET blocked_reason='writer_pool_capacity',updated_at=now()
+        WHERE id=$1::uuid AND recovery IS NOT NULL AND state IN ('running','recovering') RETURNING *`, [id]);
+      return blocked ?? row;
+    }
     row = await engine.transaction(async tx => {
       await tx.executeRaw('SELECT id FROM persistence_worktrees WHERE id=$1::uuid FOR SHARE', [row!.worktree_id]);
       await lockCounters(tx, ['brain', principalKey(requestPrincipal(row!)), `worktree:${row!.worktree_id}`]);
@@ -210,7 +217,7 @@ export async function recoverPublication(engine: BrainEngine, id: string, hostId
       if (!isWriteTargetContained(record.path, record.root) || !binding.local_path || !isWriteTargetContained(record.path, binding.local_path)) throw new OperationError('recovery_required', 'Recovery file binding is no longer confined to this owner.');
       const actual = fileHash(record.path);
       if (actual !== record.beforeHash && actual !== record.afterHash) {
-        await tx.executeRaw(`UPDATE persistence_requests SET state='recovering',blocked_reason='unexpected_file_bytes' WHERE id=$1::uuid`, [id]);
+        await tx.executeRaw(`UPDATE persistence_requests SET state='recovering',blocked_reason='unexpected_file_bytes',updated_at=now() WHERE id=$1::uuid`, [id]);
         return { ...current, state: 'recovering' as const, blocked_reason: 'unexpected_file_bytes' };
       }
       if (actual === record.afterHash && actual !== record.beforeHash) {
@@ -229,5 +236,5 @@ export async function recoverPublication(engine: BrainEngine, id: string, hostId
     });
     if (isTerminal(row)) await clearResolvedRecovery(engine, id);
     return row;
-  } finally { await lock?.release(); }
+  } finally { releaseCapacity?.(); await lock?.release(); }
 }

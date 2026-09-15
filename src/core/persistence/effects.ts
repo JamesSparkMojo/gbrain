@@ -146,7 +146,7 @@ async function recordFailure(engine: BrainEngine, effect: PersistenceEffect, err
     const [source] = await engine.executeRaw<{ incarnation: string; archived: boolean }>('SELECT incarnation,archived FROM sources WHERE id=$1', [effect.source_id]);
     if (!current?.recovering && (!source || source.archived || source.incarnation !== effect.source_incarnation)) { await failEffect(engine, effect, code); return; }
   }
-  await retryEffect(engine, effect, code, ['projection_pending', 'revision_conflict', 'writer_busy'].includes(code) ? 250 : 30_000);
+  await retryEffect(engine, effect, code, ['projection_pending', 'revision_conflict', 'writer_busy', 'writer_pool_capacity'].includes(code) ? 250 : 30_000);
 }
 
 /** Bounded, idempotent work. Recovery obtains kernel exclusion before a DB claim. */

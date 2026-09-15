@@ -17,6 +17,7 @@ export class PersistenceConsumer {
   private active = new Set<Promise<void>>();
   private activeRoots = new Set<string>();
   private foregroundCounts = new Map<string, number>();
+  private recoveryRetryAfter = new Map<string, number>();
   private projectionWorker: Promise<unknown> | undefined;
   private effectsWorker: Promise<void> | undefined;
   private maintenanceWorker: Promise<unknown> | undefined;
@@ -54,12 +55,29 @@ export class PersistenceConsumer {
       .catch(error => this.report(error)).finally(() => { this.projectionWorker = undefined; });
     // Recover only our owner roots. Kernel exclusion, not elapsed heartbeat,
     // proves that a previous process can no longer be publishing this root.
+    const now = Date.now();
+    for (const [root, retryAt] of this.recoveryRetryAfter) if (retryAt <= now) this.recoveryRetryAfter.delete(root);
+    const excluded = [...this.activeRoots, ...this.recoveryRetryAfter.keys()];
     const recovery = await this.engine.executeRaw<WriteRequest>(`SELECT r.* FROM persistence_requests r
       JOIN persistence_worktrees w ON w.id=r.worktree_id
-      WHERE w.owner_host_id=$1::uuid AND r.recovery IS NOT NULL ORDER BY r.sequence LIMIT 16`, [this.hostId]);
+      WHERE w.owner_host_id=$1::uuid AND r.recovery IS NOT NULL AND NOT(r.worktree_id::text=ANY($2::text[]))
+      AND NOT EXISTS (SELECT 1 FROM persistence_requests earlier WHERE earlier.worktree_id=r.worktree_id
+        AND earlier.recovery IS NOT NULL AND earlier.sequence<r.sequence)
+      ORDER BY r.updated_at,r.sequence LIMIT 16`, [this.hostId, excluded]);
     for (const row of recovery) {
-      if (this.activeRoots.has(row.worktree_id!)) continue;
-      await recoverPublication(this.engine, row.id, this.hostId);
+      const root = row.worktree_id!;
+      // Always skip at least the next scheduled poll for an unresolved root.
+      // This preserves its FIFO head while allowing the next root into LIMIT 16.
+      const delay = Math.max(1000, (this.opts.pollMs ?? 250) * 2);
+      this.recoveryRetryAfter.set(root, Date.now() + delay);
+      try {
+        const recovered = await recoverPublication(this.engine, row.id, this.hostId);
+        if (!recovered.recovery) this.recoveryRetryAfter.delete(root);
+        else if (recovered.blocked_reason === 'unexpected_file_bytes') this.recoveryRetryAfter.set(root, Date.now() + Math.max(delay, 30_000));
+      } catch (error) {
+        this.recoveryRetryAfter.set(root, Date.now() + Math.max(delay, 30_000));
+        this.report(error);
+      }
     }
     await this.engine.executeRaw(`UPDATE persistence_requests r SET state='queued',execution_token=NULL,claim_expires_at=NULL
       WHERE r.state='running' AND r.recovery IS NULL AND r.claim_expires_at<now()

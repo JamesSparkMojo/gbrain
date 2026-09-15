@@ -12,6 +12,7 @@ import { getWorktreeBinding, type WorktreeBinding } from './ownership.ts';
 import { withFilesystemPublication } from './filesystem-guard.ts';
 import { persistenceFileHash, publishPersistenceFile } from './coordinator.ts';
 import type { EffectRecovery, PersistenceEffect } from './effect-model.ts';
+import { tryAcquirePublicationCapacity } from './pool-capacity.ts';
 
 export async function guardEffectSource(tx: BrainEngine, effect: PersistenceEffect, hostId: string): Promise<WorktreeBinding | null> {
   if (effect.worktree_id) {
@@ -67,7 +68,9 @@ async function clearRecovery(tx: BrainEngine, effect: PersistenceEffect): Promis
 /** Under the native lock: finish forward, never restore withdrawn bytes. */
 export async function recoverEffectPublication(engine: BrainEngine, effect: PersistenceEffect, hostId: string,
   hooks: { boundary?: (name: 'before_mirror_file' | 'after_mirror_file' | 'before_mirror_commit') => Promise<void> } = {}): Promise<void> {
-  await engine.transaction(async tx => {
+  const releaseCapacity = tryAcquirePublicationCapacity(engine);
+  if (!releaseCapacity) throw new OperationError('writer_pool_capacity', 'Mirror recovery is waiting for publication capacity.');
+  try { await engine.transaction(async tx => {
     await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
     const binding = await guardEffectSource(tx, effect, hostId);
     await lockCounters(tx, ['brain', `worktree:${effect.worktree_id}`]);
@@ -107,5 +110,5 @@ export async function recoverEffectPublication(engine: BrainEngine, effect: Pers
     await tx.executeRaw(`UPDATE persistence_effects SET state='queued',data=jsonb_set(data,'{after_slug}',to_jsonb($2::text)),
       execution_token=NULL,claim_expires_at=NULL,next_attempt_at=now(),error_code=NULL,updated_at=now() WHERE id=$1`, [current.id, record.slug]);
     await hooks.boundary?.('before_mirror_commit');
-  });
+  }); } finally { releaseCapacity(); }
 }

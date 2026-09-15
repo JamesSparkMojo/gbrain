@@ -10,9 +10,8 @@ import type { OperationContext } from '../src/core/ops/contract.ts';
 import { submissionAuthority } from '../src/core/persistence/authority.ts';
 import { claimWorktree, prepareWriterTransfer, acceptWriterTransfer, acquireWorktree } from '../src/core/persistence/ownership.ts';
 import { registerLocalWriter } from '../src/core/persistence/identity.ts';
-import { admitWrite, claimNextWrite, prepareRecovery, getWriteRequestById } from '../src/core/persistence/journal.ts';
+import { admitWrite, claimNextWrite, prepareRecovery, getWriteRequestById, completeWrite, clearResolvedRecovery } from '../src/core/persistence/journal.ts';
 import { cancelWriteRequest } from '../src/core/persistence/control.ts';
-import { recoverPublication } from '../src/core/persistence/coordinator.ts';
 import { sha256 } from '../src/core/persistence/digest.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -88,10 +87,15 @@ test('recovery, cancellation, transfer drain and successor epoch force durable c
         before: Buffer.from(before).toString('base64'), beforeHash: sha256(before), afterHash: sha256('After'),
         mode: 0o600, ownerEpoch: String(binding.owner_epoch), attempt: row.execution_token! }, 4096));
     } finally { await lock?.release(); }
-    await recoverPublication(engine, row.id, hostId);
-    const cancelled = await durable(engine, observed => cancelWriteRequest(observed, authority.principal, row.request_id));
+    // This fixture reserved recovery without publishing any bytes. Complete its
+    // known pre-publication failure; a size-one pool intentionally cannot run physical recovery.
+    await engine.transaction(tx => completeWrite(tx, row, 'failed', {}));
+    await clearResolvedRecovery(engine, row.id);
+    const cancellation = await admitWrite(engine, { principal: authority.principal, authority, operation: 'put_page', sourceId,
+      sourceIncarnation: binding.source_incarnation, slug: 'page', callerIntent: { content: 'Cancel' }, intent: { content: 'Cancel' } });
+    const cancelled = await durable(engine, observed => cancelWriteRequest(observed, authority.principal, cancellation.request_id));
     expect(cancelled?.state).toBe('cancelled');
-    expect((await getWriteRequestById(engine, row.id))?.state).toBe('cancelled');
+    expect((await getWriteRequestById(engine, cancellation.id))?.state).toBe('cancelled');
     const transfer = await durable(engine, observed => prepareWriterTransfer(observed, sourceId, hostId));
     await durable(engine, observed => acceptWriterTransfer(observed, sourceId, root, transfer.owner_epoch, transfer.manifest.digest, hostId));
     const [owner] = await engine.executeRaw<{ owner_epoch: string; state: string }>('SELECT owner_epoch,state FROM persistence_worktrees WHERE id=$1::uuid', [binding.worktree_id]);
