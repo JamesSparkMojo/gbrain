@@ -1569,7 +1569,7 @@ export class PostgresEngine implements BrainEngine {
           -- doesn't drown text-page hits. Image search runs a separate
           -- vector path on embedding_image.
           AND cc.modality = 'text'
-        ORDER BY score DESC
+        ORDER BY score DESC, page_id ASC, chunk_id ASC
         LIMIT ${innerLimitParam}
       ),
       ${buildBestPerPagePoolCte('ranked_chunks')}
@@ -1579,7 +1579,7 @@ export class PostgresEngine implements BrainEngine {
         chunk_id, chunk_index, chunk_text, chunk_source, score,
         false AS stale
       FROM best_per_page
-      ORDER BY score DESC
+      ORDER BY score DESC, page_id ASC, chunk_id ASC
       LIMIT ${limitParam}
       OFFSET ${offsetParam}
     `;
@@ -1895,7 +1895,7 @@ export class PostgresEngine implements BrainEngine {
         ${sourceClause}
         ${hardExcludeClause}
         ${visibilityClause}
-      ORDER BY score DESC
+      ORDER BY score DESC, page_id ASC, chunk_id ASC
       LIMIT ${limitParam}
       OFFSET ${offsetParam}
     `;

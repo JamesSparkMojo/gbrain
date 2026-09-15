@@ -2513,7 +2513,7 @@ export class PGLiteEngine implements BrainEngine {
            -- OCR text doesn't drown text-page hits. Image-similarity queries
            -- run a separate vector path on embedding_image.
            AND cc.modality = 'text'
-         ORDER BY score DESC
+         ORDER BY score DESC, page_id ASC, chunk_id ASC
          LIMIT $2
        ),
        ${buildBestPerPagePoolCte('ranked')}
@@ -2801,7 +2801,7 @@ export class PGLiteEngine implements BrainEngine {
        JOIN pages p ON p.id = cc.page_id
        JOIN sources s ON s.id = p.source_id
        WHERE cc.search_vector @@ websearch_to_tsquery('${ftsLang}', $1) ${detailFilter}${extraFilter} ${hardExcludeClause} ${visibilityClause}
-       ORDER BY score DESC
+       ORDER BY score DESC, page_id ASC, chunk_id ASC
        LIMIT $2 OFFSET $3`,
       params
     );
