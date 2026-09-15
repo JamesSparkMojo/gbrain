@@ -6,6 +6,7 @@ import { hasScope } from '../scope.ts';
 import { coerceLegacyPermissions, normalizeTokenScopes, parseLegacyTokenScope, parseTakesHoldersAllowList } from '../legacy-token-scope.ts';
 import { readLocalWriter, currentVerifiedLocalWriter, verifyLocalWriter, type LocalGrant } from './identity.ts';
 import type { Principal, SqlEngine, WriteAuthority, WriteRequest } from './model.ts';
+import { authorizePageVisibility, excludesPrivateWrites } from './page-visibility.ts';
 
 function deny(message: string): never { throw new OperationError('permission_denied', message, 'Inspect the current writer registration and source/operation grants.'); }
 function strings(value: unknown): value is string[] { return Array.isArray(value) && value.every(v => typeof v === 'string'); }
@@ -28,6 +29,7 @@ export async function submissionAuthority(ctx: OperationContext, operation: stri
   }
   const a: WriteAuthority = {
     version: 1, principal, remote: ctx.remote !== false, sourceId, sourceIncarnation,
+    excludePrivate: await excludesPrivateWrites(ctx.engine, ctx.remote !== false),
     takesHolders: ctx.remote === false ? null : [...(ctx.takesHoldersAllowList ?? ['world'])],
     scopes: [...(ctx.auth?.scopes ?? localGrant?.scopes ?? [])],
     operations: ctx.auth?.allowedOperations ? [...ctx.auth.allowedOperations] : localGrant?.operations ?? null,
@@ -37,6 +39,7 @@ export async function submissionAuthority(ctx: OperationContext, operation: stri
   if (ctx.auth?.sourceId != null && ctx.auth.sourceId !== sourceId) deny('The source is outside this writer grant.');
   if (!prefixAllowed(a.slugPrefixes, slug)) deny('The target is outside this writer grant.');
   await authorizeWrite(ctx.engine, a, operation, slug);
+  await authorizePageVisibility(ctx.engine, a, slug);
   return a;
 }
 
@@ -85,6 +88,7 @@ export async function authorizeStoredRequest(engine: SqlEngine, row: WriteReques
     `SELECT incarnation,archived FROM sources WHERE id=$1${lock ? ' FOR SHARE' : ''}`, [row.source_id]);
   if (!source || source.archived || source.incarnation !== row.source_incarnation) throw new OperationError('source_changed', 'The accepted source is no longer active.');
   await authorizeWrite(engine, row.authority, row.operation, row.slug, lock);
+  await authorizePageVisibility(engine, row.authority, row.slug);
 }
 export async function ownRequestAccessible(ctx: OperationContext, row: WriteRequest): Promise<boolean> {
   try {
@@ -93,7 +97,7 @@ export async function ownRequestAccessible(ctx: OperationContext, row: WriteRequ
     await authorizeStoredRequest(ctx.engine, row);
     return true;
   } catch (error) {
-    if (error instanceof OperationError && ['permission_denied','source_changed','writer_registration_required'].includes(error.code)) return false;
+    if (error instanceof OperationError && ['permission_denied','source_changed','writer_registration_required','page_not_found'].includes(error.code)) return false;
     throw error;
   }
 }

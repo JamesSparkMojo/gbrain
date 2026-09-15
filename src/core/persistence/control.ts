@@ -36,7 +36,7 @@ export async function listWriteRequests(engine: BrainEngine, principal: Principa
       before = String(row.sequence);
       let allowed = false;
       try { await authorizeStoredRequest(engine, row); allowed = !opts.authorize || await opts.authorize(row); }
-      catch (error) { if (!(error instanceof OperationError && ['permission_denied','source_changed'].includes(error.code))) throw error; }
+      catch (error) { if (!(error instanceof OperationError && ['permission_denied','source_changed','page_not_found'].includes(error.code))) throw error; }
       if (allowed) visible.push(row);
       if (visible.length > limit) return { requests: visible.slice(0, limit), next: String(visible[limit - 1].sequence) };
     }

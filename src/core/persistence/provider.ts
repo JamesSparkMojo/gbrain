@@ -44,7 +44,7 @@ export async function createPersistenceIpcProvider(engine: BrainEngine, config: 
     const params = !unrestricted && request.operation === 'get_page' && request.params.source_id === undefined
       ? { ...request.params, source_id: sourceId } : request.params;
     const result = await dispatchToolCall(engine, request.operation, params, {
-      remote: verified.remote, transport: verified.remote ? 'stdio' : undefined, sourceId, auth,
+      config, remote: verified.remote, transport: verified.remote ? 'stdio' : undefined, sourceId, auth,
       ...(unrestricted ? {} : { localFederatedSourceIds: verified.grant.sourceIds }),
     });
     const body = JSON.parse(result.content[0].text) as Record<string, unknown>;

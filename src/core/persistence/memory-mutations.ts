@@ -63,14 +63,18 @@ export async function submitRememberMutation(ctx: OperationContext, params: Reco
   const authority = await submissionAuthority(ctx, 'remember', sourceId, source.incarnation, slug);
   const snapshot = await ctx.engine.readPageSnapshot(slug, { sourceId, includeDeleted: true });
   if (snapshot && (snapshot.page.deleted_at || ctx.remote !== false &&
-    !await ctx.engine.readPageSnapshot(slug, { sourceId, excludePrivate: true }))) {
+    !await ctx.engine.readPageSnapshot(slug, { sourceId, excludePrivate: authority.excludePrivate }))) {
     throw new OperationError('page_not_found', 'The target entity is not writable by this caller.');
   }
   // Preserve the stub guard: a fallback name remains DB-only until a real
   // entity page exists. No placeholder page is created by remember.
   const fence = entitySlug !== null && snapshot !== null;
   let binding = fence ? await getWorktreeBinding(ctx.engine, sourceId) : null;
-  const writeThrough = !/^(false|0|off|no)$/i.test(await ctx.engine.getConfig('sync.write_through') ?? 'true');
+  const sandbox = ctx.viaSubagent === true && !(ctx.allowedSlugPrefixes?.length);
+  const configuredWriteThrough = !/^(false|0|off|no)$/i.test(await ctx.engine.getConfig('sync.write_through') ?? 'true');
+  const writeThrough = configuredWriteThrough && !sandbox;
+  if (sandbox) authority.databaseOnlyReason = 'subagent_sandbox';
+  else if (!configuredWriteThrough) authority.databaseOnlyReason = 'disabled_by_config';
   const root = source.local_path || (sourceId === 'default' ? await ctx.engine.getConfig('sync.repo_path') : null);
   if (fence && writeThrough && root && !binding) {
     if (ctx.engine.kind !== 'pglite') throw new OperationError('owner_unavailable', 'This source has no designated canonical owner.');

@@ -80,8 +80,13 @@ export async function submitPageMutation(ctx: OperationContext,
   const authority = await submissionAuthority(ctx, input.operation, sourceId, source.incarnation, slug);
   const snapshot = await ctx.engine.readPageSnapshot(slug, { sourceId, includeDeleted: true });
   let binding = await getWorktreeBinding(ctx.engine, sourceId);
-  const writeThrough = !/^(false|0|off|no)$/i.test(await ctx.engine.getConfig('sync.write_through') ?? 'true');
+  const sandbox = ctx.viaSubagent === true && !(ctx.allowedSlugPrefixes?.length);
+  const configuredWriteThrough = !/^(false|0|off|no)$/i.test(await ctx.engine.getConfig('sync.write_through') ?? 'true');
+  const writeThrough = configuredWriteThrough && !sandbox;
   const root = source.local_path || (sourceId === 'default' ? await ctx.engine.getConfig('sync.repo_path') : null);
+  if (sandbox) authority.databaseOnlyReason = 'subagent_sandbox';
+  else if (!configuredWriteThrough) authority.databaseOnlyReason = 'disabled_by_config';
+  else if (!root && !binding) authority.databaseOnlyReason = 'no_repo_configured';
   if (p.local_dir !== undefined) {
     if (ctx.remote !== false || typeof p.local_dir !== 'string' || !root
       || realpathSync(resolve(p.local_dir)) !== realpathSync(resolve(root))) {

@@ -6,6 +6,9 @@ export interface WriteAuthority {
   version: 1;
   principal: Principal;
   remote: boolean;
+  /** Original page-visibility ceiling; current policy can only narrow it. */
+  excludePrivate?: boolean;
+  databaseOnlyReason?: 'subagent_sandbox' | 'disabled_by_config' | 'no_repo_configured';
   sourceId: string;
   sourceIncarnation: string;
   scopes: string[];
