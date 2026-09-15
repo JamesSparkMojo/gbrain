@@ -18,7 +18,7 @@
  * dispatcher bug where viaSubagent=true but subagentId is missing.
  *
  * In v0.15 every allow-list op is treated as idempotent for the two-phase
- * replay path. put_page with a deterministic slug is idempotent at the row
+ * replay path. put_page with its persisted request UUID is idempotent at the journal
  * level; repeats re-derive the same embedding over identical content.
  */
 
@@ -289,8 +289,8 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
       name: toolName,
       description: op.description,
       input_schema: schema,
-      // v0.15 ships only idempotent brain tools (every allow-listed op is
-      // deterministic over its input; put_page re-writes the same slug).
+      // The persisted tool dispatcher binds mutations to a stable request UUID;
+      // a replay returns the original durable receipt without another write.
       idempotent: true,
       // v0.41 Approach C: surface usage_hint to the system-prompt renderer.
       // Keyed by the unprefixed op name. Undefined when no hint is registered.

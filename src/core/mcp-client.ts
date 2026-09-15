@@ -17,6 +17,8 @@
  * attempt is also rejected with HTTP 401, surface auth_after_refresh.
  */
 
+import { randomUUID } from 'node:crypto';
+import { isPersistenceIpcMutation } from './persistence/ipc.ts';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { anySignal } from './abort-check.ts';
@@ -317,7 +319,8 @@ export function buildAbortController(opts: CallRemoteToolOptions): { signal: Abo
 
 /**
  * Call an MCP tool on the remote server. Handles auth refresh on 401 once.
- * Returns the parsed `result` payload from the tool response.
+ * Returns the parsed `result` payload from the tool response. Mutation calls
+ * retain a generated request_id on args for refresh and caller retries.
  *
  * Throws RemoteMcpError on:
  *   - missing remote_mcp config
@@ -333,6 +336,9 @@ export async function callRemoteTool(
   opts: CallRemoteToolOptions = {},
 ): Promise<unknown> {
   const remote = requireRemoteMcp(config);
+  // Retain on the caller's object so transport refresh and caller retries use
+  // the same durable identity. Explicit malformed IDs still reach validation.
+  if (isPersistenceIpcMutation(toolName) && args.request_id === undefined && args.dry_run !== true) args.request_id = randomUUID();
 
   // v0.31.1 (CDX-4): wrap the WHOLE call in normalize-on-error so the
   // exhaustive switch on RemoteMcpError.reason at the dispatcher is sound.

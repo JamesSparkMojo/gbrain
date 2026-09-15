@@ -43,6 +43,7 @@ let onHang: (() => void) | undefined;
 let onHangClosed: (() => void) | undefined;
 let toolExecutions = 0;
 let initializeTokens: string[] = [];
+let toolArguments: Record<string, unknown>[] = [];
 
 function intercept(stage: Stage, req: Request): Response | Promise<Response> | undefined {
   requests[stage] = (requests[stage] ?? 0) + 1;
@@ -89,6 +90,7 @@ beforeAll(() => {
       if (path === '/mcp' && req.method === 'POST') {
         const body = await req.json() as { id?: number; method: string; params?: { protocolVersion?: string } };
         if (body.method === 'initialize') initializeTokens.push(req.headers.get('authorization') ?? '');
+        if (body.method === 'tools/call') toolArguments.push((body.params as any)?.arguments ?? {});
         const intercepted = intercept(body.method as Stage, req);
         if (intercepted) return intercepted;
         if (body.id === undefined) return new Response(null, { status: 202 });
@@ -131,6 +133,7 @@ beforeEach(() => {
   initializeTokens = [];
   mcpResponseFor = () => ({ content: [{ type: 'text', text: JSON.stringify({ ok: true }) }] });
   _clearMcpClientTokenCache();
+  toolArguments = [];
 });
 
 function makeConfig(): GBrainConfig {
@@ -144,6 +147,21 @@ function makeConfig(): GBrainConfig {
     },
   };
 }
+
+describe('durable mutation identity across OAuth refresh', () => {
+  test('retains generated and explicit IDs through refresh and caller retries', async () => {
+    statusFor = (stage, attempt) => stage === 'tools/call' && attempt === 1 ? 401 : undefined;
+    const params: Record<string, unknown> = { slug: 'notes/refresh-fixture', content: 'fixture' };
+    await callRemoteTool(makeConfig(), 'put_page', params);
+    expect(params.request_id).toMatch(/^[0-9a-f-]{36}$/);
+    await callRemoteTool(makeConfig(), 'put_page', params);
+    expect(toolArguments).toHaveLength(3);
+    expect(toolArguments.every(args => args.request_id === params.request_id)).toBe(true);
+    const explicit = { ...params, request_id: 'c96cbb61-b862-4f8a-92bb-e79113f8ff19' };
+    await callRemoteTool(makeConfig(), 'put_page', explicit);
+    expect(toolArguments.at(-1)?.request_id).toBe(explicit.request_id);
+  });
+});
 
 describe('callRemoteTool — happy path', () => {
   test('returns the tool response for a simple call', async () => {
