@@ -93,6 +93,10 @@ printf '%s:%s\\n' "$stage" "\${DATABASE_URL-unset}" >> "$TRACE"
     for (const script of ['check-jsonb-pattern.sh', 'check-progress-to-stdout.sh', 'check-trailing-newline.sh', 'check-wasm-embedded.sh']) {
       put(`scripts/${script}`, 'exit 0');
     }
+    put('scripts/check-bun-test-timeout.sh', `
+printf 'timeout_guard:%s\\n' "\${DATABASE_URL-unset}" >> "$TRACE"
+[ "$FAIL_STAGE" != timeout_guard ] || exit 7
+`);
     put('scripts/run-unit-shard.sh', `
 printf 'unit:%s:%s\\n' "\${SHARD-all}" "\${DATABASE_URL-unset}" >> "$TRACE"
 printf '%s\\n' 'early diagnostic retained beyond summary tail' >&2
@@ -140,7 +144,7 @@ describe('ci-local execution coverage', () => {
       test(`serial and slow precede unit/E2E with live target forwarding (no-shard=${noShard}, diff=${diff})`, () => {
         const result = runPhases(noShard, diff);
         expect(result.status, result.stdout + result.stderr).toBe(0);
-        expect(result.trace.slice(0, 3)).toEqual(['verify:ambient-fixture', 'serial:unset', 'slow:unset']);
+        expect(result.trace.slice(0, 4)).toEqual(['timeout_guard:ambient-fixture', 'verify:ambient-fixture', 'serial:unset', 'slow:unset']);
         const units = result.trace.filter(line => line.startsWith('unit:'));
         const e2e = result.trace.filter(line => line.startsWith('e2e:'));
         expect(units).toHaveLength(noShard ? 1 : 4);
@@ -158,15 +162,16 @@ describe('ci-local execution coverage', () => {
     }
   }
 
-  for (const failStage of ['verify', 'serial', 'slow', 'unit', 'e2e']) {
+  for (const failStage of ['timeout_guard', 'verify', 'serial', 'slow', 'unit', 'e2e']) {
     test(`a failed ${failStage} stage cannot produce a green local CI result`, () => {
       const result = runPhases(false, false, failStage);
       expect(result.status).not.toBe(0);
       expect(result.stdout).not.toContain('All 4 shards passed');
       if (failStage !== 'e2e') expect(result.trace.some(line => line.startsWith('e2e:'))).toBe(false);
-      if (['verify', 'serial', 'slow'].includes(failStage)) {
+      if (['timeout_guard', 'verify', 'serial', 'slow'].includes(failStage)) {
         expect(result.status).toBe(7);
         expect(result.trace.some(line => line.startsWith('unit:'))).toBe(false);
+        if (failStage === 'timeout_guard') expect(result.trace.some(line => line.startsWith('verify:'))).toBe(false);
       } else {
         for (const log of result.archivedLogs) {
           expect(log).toContain('early diagnostic retained beyond summary tail');
