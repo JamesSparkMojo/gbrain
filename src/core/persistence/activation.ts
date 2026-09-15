@@ -49,7 +49,7 @@ async function validatedBindings(engine: BrainEngine, sources: SourceRoot[], hos
 /** Explicit coordinated-upgrade boundary. Refusal records become durable before enabled does. */
 export async function activatePersistence(engine: BrainEngine, opts: { confirmQuiesced?: boolean; dryRun?: boolean } = {}): Promise<ActivationReport> {
   if (opts.confirmQuiesced !== true) throw quiescence();
-  if (Number(await engine.getConfig('version')) < 156) throw new OperationError('writer_upgrade_required', 'Apply the canonical writer guard and outbox migrations before activation.');
+  if (Number(await engine.getConfig('version')) < 157) throw new OperationError('writer_upgrade_required', 'Apply the canonical writer guard, outbox, and source lifecycle migrations before activation.');
   const native = await nativeLockCapability();
   const probe = await tryAcquireNativeLock(join(persistenceHome(), 'locks', 'activation-probe.lock'));
   if (!probe) throw new OperationError('writer_lock_unavailable', 'Another activation probe is running.');

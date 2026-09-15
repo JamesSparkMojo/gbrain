@@ -1,3 +1,4 @@
+import { topologyTransaction } from './topology-transaction.ts';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -14,8 +15,9 @@ import { withFilesystemPublication } from './filesystem-guard.ts';
 import { lockTopologyRows, settleTopologyRequests, topologyCanonicalStamp, withTopologyLocks } from './topology-locks.ts';
 import { priorTopologyChange, recordTopologyChange, topologyReceipt, type TopologyChange } from './topology-receipts.ts';
 import { readJournalLimits } from './limits.ts';
-import { cloneTopologyCheckout, flushTopologyDirectory, flushTopologyTree, topologyDirectoryBytes } from './topology-filesystem.ts';
+import { cloneTopologyCheckout, flushTopologyDirectory, flushTopologyTree, topologyDirectoryBytes, topologyDirectoryIdentity } from './topology-filesystem.ts';
 import { finishTopologyClone } from './topology-recovery.ts';
+import { reservePhysicalRoot, preparePhysicalRootReplacement, readPhysicalRootReservation } from './physical-root.ts';
 
 /** Provider seam only for deterministic storage-boundary tests. */
 export interface CloneLifecycleHooks {
@@ -42,13 +44,14 @@ export async function runManagedSourceClone(engine:BrainEngine,input:SourceLifec
   if(input.operation==='add'&&existsSync(target))throw new OperationError('source_changed','Clone destination already exists. Register its existing path explicitly.');
   if(input.dryRun)return {dry_run:true,operation:input.operation,source_id:input.sourceId,path:target,source_incarnation:source?.incarnation??null};
   return withTopologyLocks(engine,input.sourceId,async bindings=>{
-    if(input.operation==='add'&&bindings.length)throw new OperationError('overlapping_path','A new clone cannot replace or nest inside an existing canonical worktree.');
+    if(input.operation==='add'&&bindings.some(binding=>!binding.unbound||binding.local_path!==target))throw new OperationError('overlapping_path','A new clone cannot replace or nest inside an existing canonical worktree.');
     const currentBinding=bindings.find(value=>value.source_id===input.sourceId);
     if(input.operation==='reclone'&&(!currentBinding||currentBinding.worktree_id!==binding!.worktree_id))throw new OperationError('source_changed','The canonical clone binding changed.');
-    const worktreeId=currentBinding?.worktree_id??randomUUID();
-    const coordination=currentBinding?.coordination_path??join(persistenceHome(),'locks',`${worktreeId}.lock`);
+    const reservedIdentity=readPhysicalRootReservation(target);
+    const worktreeId=currentBinding?.worktree_id??reservedIdentity?.worktreeId??randomUUID();
+    const coordination=currentBinding?.coordination_path??reservedIdentity?.coordinationPath??join(persistenceHome(),'locks',`${worktreeId}.lock`);
     let newLock:NativeLockHandle|null=null;
-    if(!currentBinding){newLock=await acquireNativeLock(coordination!,{timeoutMs:5000});if(!newLock)throw new OperationError('writer_lock_unavailable','The new clone coordination lock is busy.');}
+    if(!bindings.some(binding=>binding.worktree_id===worktreeId)){newLock=await acquireNativeLock(coordination!,{timeoutMs:5000});if(!newLock)throw new OperationError('writer_lock_unavailable','The new clone coordination lock is busy.');}
     let accepted:TopologyChange|undefined;
     try{
       const before=existsSync(target)?worktreeManifest(target):null;
@@ -56,8 +59,19 @@ export async function runManagedSourceClone(engine:BrainEngine,input:SourceLifec
       const reserved=Math.min(limits.worktreeRecoveryBytes,limits.brainRecoveryBytes);
       const oldBytes=existsSync(target)?await topologyDirectoryBytes(target,reserved):0;
       const token=randomUUID(),stage=join(dirname(target),`.gbrain-clone-${basename(target)}-${token}`),aside=`${target}.gbrain-old-${token}`;
-      accepted=await engine.transaction(async tx=>{
+      accepted=await topologyTransaction(engine,async tx=>{
         await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
+        await tx.executeRaw('SELECT singleton FROM persistence_brain WHERE singleton=1 FOR UPDATE');
+        const [preparedOwner]=currentBinding?[]:await tx.executeRaw<{owner_host_id:string;owner_epoch:string;state:string}>(
+          'SELECT owner_host_id,owner_epoch,state FROM persistence_worktrees WHERE id=$1::uuid FOR UPDATE',[worktreeId]);
+        if(preparedOwner){
+          const members=await tx.executeRaw('SELECT source_id FROM persistence_source_bindings WHERE worktree_id=$1::uuid LIMIT 1',[worktreeId]);
+          const [host]=await tx.executeRaw<{local_path:string;coordination_path:string}>(
+            'SELECT local_path,coordination_path FROM persistence_host_bindings WHERE worktree_id=$1::uuid AND host_id=$2::uuid',[worktreeId,localHostId()]);
+          if(preparedOwner.owner_host_id!==localHostId()||preparedOwner.state!=='active'||members.length
+            ||host?.local_path!==target||host.coordination_path!==coordination)
+            throw new OperationError('recovery_required','The reserved checkout is still bound, recovering, or has a different physical identity.');
+        }
         const sources=await lockTopologyRows(tx,input.sourceId,bindings);
         const [current]=await tx.executeRaw<{incarnation:string;last_commit:string|null}>('SELECT incarnation,last_commit FROM sources WHERE id=$1',[input.sourceId]);
         const replay=await priorTopologyChange(tx,principal,requestId,intent);if(replay)return replay;
@@ -71,13 +85,14 @@ export async function runManagedSourceClone(engine:BrainEngine,input:SourceLifec
           throw new OperationError('recovery_required','The missing checkout has no current verified canonical manifest. Recover it from a verified checkpoint before recloning.');
         if(manifest&&Buffer.byteLength(JSON.stringify(manifest))>1_048_576)throw new OperationError('request_too_large','The canonical manifest exceeds the 1 MiB recovery metadata bound.');
         const recovery:TopologyCloneRecovery={version:1,kind:'clone',phase:'reserved',operation:input.operation as 'add'|'reclone',sourceId:input.sourceId,
-          incarnation,worktreeId,ownerHostId:localHostId(),ownerEpoch:String(currentBinding?.owner_epoch??1),target,stage,aside,
+          incarnation,worktreeId,ownerHostId:localHostId(),ownerEpoch:String(currentBinding?.owner_epoch??preparedOwner?.owner_epoch??1),target,stage,aside,
           beforeHash:before?.digest??null,afterHash:null,manifest,canonicalStamp,checkpoint:source?.last_commit??null,input,cloneBudget:0};
         recovery.cloneBudget=reserved-oldBytes-Buffer.byteLength(JSON.stringify(recovery))-65_536;
         if(recovery.cloneBudget<65_536)throw new OperationError('request_too_large','The old checkout leaves insufficient configured recovery space for a staged clone.');
         if(!currentBinding){
-          await tx.executeRaw("INSERT INTO persistence_worktrees(id,owner_host_id,owner_epoch,state) VALUES($1::uuid,$2::uuid,1,'recovering')",[worktreeId,localHostId()]);
-          await tx.executeRaw('INSERT INTO persistence_host_bindings(worktree_id,host_id,local_path,coordination_path) VALUES($1::uuid,$2::uuid,$3,$4)',[worktreeId,localHostId(),target,coordination]);
+          if(preparedOwner)await tx.executeRaw("UPDATE persistence_worktrees SET state='recovering' WHERE id=$1::uuid",[worktreeId]);
+          else await tx.executeRaw("INSERT INTO persistence_worktrees(id,owner_host_id,owner_epoch,state) VALUES($1::uuid,$2::uuid,1,'recovering')",[worktreeId,localHostId()]);
+          await tx.executeRaw('INSERT INTO persistence_host_bindings(worktree_id,host_id,local_path,coordination_path) VALUES($1::uuid,$2::uuid,$3,$4) ON CONFLICT(worktree_id,host_id) DO NOTHING',[worktreeId,localHostId(),target,coordination]);
           await tx.executeRaw('INSERT INTO persistence_source_bindings(source_id,source_incarnation,worktree_id) VALUES($1,$2::uuid,$3::uuid)',[input.sourceId,incarnation,worktreeId]);
         }else await tx.executeRaw("UPDATE persistence_worktrees SET state='recovering',manifest=$2::text::jsonb WHERE id=$1::uuid",[worktreeId,JSON.stringify(manifest)]);
         const [brain]=await tx.executeRaw<{brain_id:string}>('SELECT brain_id FROM persistence_brain WHERE singleton=1');
@@ -90,14 +105,29 @@ export async function runManagedSourceClone(engine:BrainEngine,input:SourceLifec
       await hooks.boundary?.('reserved');
       await withFilesystemPublication([target,recovery.stage,recovery.aside],async()=>{
         mkdirSync(dirname(target),{recursive:true});flushTopologyDirectory(dirname(target));
+        await topologyTransaction(engine,async tx=>{
+          await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
+          await reservePhysicalRoot(tx,target,{hostId:localHostId(),worktreeId,coordinationPath:coordination!});
+        });
+        if(existsSync(recovery.stage))throw new OperationError('recovery_required','The recorded staging path is already occupied.');
+        mkdirSync(recovery.stage,{mode:0o700});flushTopologyDirectory(dirname(recovery.stage));
+        recovery.stageIdentity=topologyDirectoryIdentity(recovery.stage);
+        await topologyTransaction(engine,async tx=>{
+          await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
+          await tx.executeRaw("UPDATE persistence_topology_changes SET recovery=$2::text::jsonb,updated_at=now() WHERE id=$1::uuid AND state='recovering'",[accepted!.id,JSON.stringify(recovery)]);
+        });
         await (hooks.clone??cloneTopologyCheckout)(url,recovery.stage,recovery.cloneBudget);
-        await topologyDirectoryBytes(recovery.stage,recovery.cloneBudget);
+        const stageBytes=await topologyDirectoryBytes(recovery.stage,recovery.cloneBudget);
         const candidate=worktreeManifest(recovery.stage);
+        if(Buffer.byteLength(JSON.stringify(candidate))>1_048_576)throw new OperationError('request_too_large','The cloned canonical manifest exceeds its 1 MiB recovery metadata bound.');
         if(recovery.manifest&&candidate.digest!==recovery.manifest.digest)throw new OperationError('writer_manifest_mismatch','The cloned checkout differs from the verified canonical manifest, including deletions.');
         flushTopologyTree(recovery.stage);flushTopologyDirectory(dirname(recovery.stage));
         recovery.afterHash=candidate.digest;recovery.phase='prepared';recovery.manifest={...candidate,canonical_stamp:recovery.canonicalStamp};
-        await engine.transaction(async tx=>{
+        if(oldBytes+stageBytes+Buffer.byteLength(JSON.stringify(recovery))+65_536>Number(accepted.recovery_bytes))
+          throw new OperationError('request_too_large','The complete staged clone and recovery metadata exceed the reserved capacity.');
+        await topologyTransaction(engine,async tx=>{
           await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
+          await preparePhysicalRootReplacement(tx,recovery.stage,target,{hostId:localHostId(),worktreeId,coordinationPath:coordination!});
           await tx.executeRaw("UPDATE persistence_topology_changes SET recovery=$2::text::jsonb,updated_at=now() WHERE id=$1::uuid AND state='recovering'",[accepted!.id,JSON.stringify(recovery)]);
         });
         await hooks.boundary?.('prepared');

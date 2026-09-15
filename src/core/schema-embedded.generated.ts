@@ -1934,11 +1934,13 @@ CREATE TABLE IF NOT EXISTS persistence_topology_changes (
   state text NOT NULL CHECK(state IN ('recovering','committed','failed')),
   recovery jsonb,
   recovery_bytes bigint NOT NULL DEFAULT 0 CHECK(recovery_bytes>=0),
+  intent_bytes bigint NOT NULL DEFAULT 0 CHECK(intent_bytes>=0),
   terminal_bytes bigint NOT NULL DEFAULT 2048 CHECK(terminal_bytes>=0),
   outcome jsonb,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(principal_id,request_id)
 );
+ALTER TABLE persistence_topology_changes ADD COLUMN IF NOT EXISTS intent_bytes bigint NOT NULL DEFAULT 0 CHECK(intent_bytes>=0);
 CREATE INDEX IF NOT EXISTS persistence_topology_recovering ON persistence_topology_changes(created_at) WHERE state='recovering';
 `;

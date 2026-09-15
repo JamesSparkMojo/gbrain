@@ -243,6 +243,39 @@ adjust; usage at or above 80% includes expansion guidance. Blocked requests carr
 a concrete next action. Diagnostics contain no request content, credentials or
 private checkout paths.
 
+## Source lifecycle
+
+After activation, source add, archive, restore, remove, purge, path rebind and
+managed reclone run through the same registered owner. They take the affected
+native locks, wait for publication and withdrawal mirrors to settle, then
+advance every membership in a shared root. Already accepted requests for its
+old topology finish with `source_changed`; their IDs remain permanently reserved.
+Removing and recreating a source gives it a new incarnation. Source removal
+retains local storage and never deletes old receipt identities.
+
+Lifecycle commands accept `--request-id` for exact replay after a lost
+acknowledgment and `--expected-incarnation` to reject a recreated source. These
+UUIDs share the CLI principal's page-write ID domain: reuse for a different
+operation conflicts. A lifecycle receipt can be `committed`, `recovering`, or
+`failed`. Keep its UUID when inspecting or retrying that exact intent. A new
+attempt after a terminal failure requires a new explicit UUID. `--dry-run`
+changes neither topology nor storage.
+
+A path rebind requires identical canonical content and deletions in a fresh
+candidate checkout; exclude GBrain ownership metadata when copying a candidate.
+A managed reclone reserves the configured recovery capacity before cloning and
+checks the full staged manifest before replacing the directory. If the old
+checkout is missing, its last verified manifest must still match the logical
+source; a stale remote is never accepted as recovery. Incomplete directory
+replacement blocks that root until its recorded recovery finishes. Neither
+recovery nor lifecycle administration reverses a committed fact withdrawal.
+
+Physical checkout identity lives in private durable markers in and beside the
+root. Copies, replaced directories, and competing homes cannot claim that same
+path as separate worktrees. Keep those markers: removing them does not grant
+ownership or authorize failover. Old paths retain their refusal records after
+rebind or removal.
+
 ## Bounded admission and retention
 
 Default admission limits are enforced atomically:

@@ -934,6 +934,15 @@ export async function removeSource(
     );
   }
 
+  if(await managedPersistenceEnabled(engine)){
+    const {runManagedSourceLifecycle}=await import('./persistence/source-lifecycle.ts');
+    const result=await runManagedSourceLifecycle(engine,{operation:'remove',sourceId:opts.id,confirmDestructive:opts.confirmDestructive||opts.yes,
+      dryRun:opts.dryRun,requestId:opts.requestId,expectedIncarnation:opts.expectedIncarnation});
+    if(!opts.dryRun)(await import('./persistence/managed-sources.ts')).assertTopologyCommitted(result);
+    return {id:opts.id,pages_deleted:Number(result.pages_deleted??0),clone_removed:false,
+      clone_path:typeof result.local_path==='string'?result.local_path:typeof result.path==='string'?result.path:null,dryRun:opts.dryRun===true};
+  }
+
   const src = await fetchSourceRow(engine, opts.id);
   if (!src) {
     throw new SourceOpError('not_found', `Source "${opts.id}" not found.`);
@@ -951,13 +960,6 @@ export async function removeSource(
     };
   }
 
-  if(await managedPersistenceEnabled(engine)){
-    const {runManagedSourceLifecycle}=await import('./persistence/source-lifecycle.ts');
-    const result=await runManagedSourceLifecycle(engine,{operation:'remove',sourceId:opts.id,confirmDestructive:opts.confirmDestructive||opts.yes,
-      requestId:opts.requestId,expectedIncarnation:opts.expectedIncarnation});
-    (await import('./persistence/managed-sources.ts')).assertTopologyCommitted(result);
-    return {id:opts.id,pages_deleted:pageCount,clone_removed:false,clone_path:src.local_path,dryRun:false};
-  }
 
   await assertUnmanagedCanonicalWriter(engine, 'sources remove');
 

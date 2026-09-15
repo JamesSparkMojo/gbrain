@@ -1,3 +1,4 @@
+import { topologyTransaction } from './topology-transaction.ts';
 import { existsSync, lstatSync, renameSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
@@ -12,7 +13,9 @@ import { withCoordinatedWrite } from './context.ts';
 import type { TopologyChange } from './topology-receipts.ts';
 import type { TopologyCloneRecovery } from './topology-clone-model.ts';
 import type { CloneLifecycleHooks } from './topology-clone.ts';
-import { flushTopologyDirectory } from './topology-filesystem.ts';
+import { flushTopologyDirectory, topologyDirectoryIdentity } from './topology-filesystem.ts';
+import { assertPhysicalRoot } from './physical-root.ts';
+import { assertPhysicalRootStamp, readPhysicalRootReservation } from './physical-root-record.ts';
 
 async function readChange(engine:BrainEngine,id:string):Promise<TopologyChange>{
   const [row]=await engine.executeRaw<TopologyChange>('SELECT * FROM persistence_topology_changes WHERE id=$1::uuid',[id]);
@@ -32,6 +35,25 @@ function treeHash(path:string):string|null{
   if(!existsSync(path))return null;
   if(lstatSync(path).isSymbolicLink())throw new OperationError('recovery_required','Recovery refuses a substituted symbolic link.');
   return worktreeManifest(path).digest;
+}
+function assertRetainedRoot(record:TopologyCloneRecovery,path:string):void{
+  const reservation=readPhysicalRootReservation(record.target);
+  if(!reservation||reservation.worktreeId!==record.worktreeId)throw new OperationError('recovery_required','The retained checkout identity cannot be verified.');
+  assertPhysicalRootStamp(path,reservation);
+}
+function assertStagingOwned(record:TopologyCloneRecovery):void{
+  if(!existsSync(record.stage))return;
+  const current=topologyDirectoryIdentity(record.stage),expected=record.stageIdentity;
+  if(!expected||current.device!==expected.device||current.inode!==expected.inode||current.birthNs!==expected.birthNs)
+    throw new OperationError('recovery_required','Unexpected staging directory identity; recovery retained its bytes.');
+  if(record.afterHash!==null){
+    if(treeHash(record.stage)!==record.afterHash)throw new OperationError('recovery_required','Unexpected staged clone bytes; recovery retained them.');
+    assertRetainedRoot(record,record.stage);
+  }
+}
+function removeOwnedStage(record:TopologyCloneRecovery):void{
+  assertStagingOwned(record);
+  if(existsSync(record.stage))rmSync(record.stage,{recursive:true,force:true});
 }
 async function guard(tx:BrainEngine,row:TopologyChange,record:TopologyCloneRecovery):Promise<string[]>{
   await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
@@ -57,27 +79,31 @@ async function releaseReservation(tx:BrainEngine,row:TopologyChange,record:Topol
 async function abortClone(engine:BrainEngine,row:TopologyChange,record:TopologyCloneRecovery,code:string):Promise<TopologyChange>{
   if(record.phase!=='aborting'){
     record={...record,phase:'aborting',failureCode:/^[a-z0-9_]{1,64}$/.test(code)?code:'storage_error'};
-    await engine.transaction(async tx=>{
+    await topologyTransaction(engine,async tx=>{
       await guard(tx,row,record);
       await tx.executeRaw("UPDATE persistence_topology_changes SET recovery=$2::text::jsonb,updated_at=now() WHERE id=$1::uuid AND state='recovering'",[row.id,JSON.stringify(record)]);
     });
   }
-  await engine.transaction(async tx=>{
+  await topologyTransaction(engine,async tx=>{
     await guard(tx,row,record);
     // Restore only this attempt's exact bytes. A newer withdrawal remains in
     // the database; its mirror resumes after the root becomes available.
+    assertStagingOwned(record);
     const aside=treeHash(record.aside),target=treeHash(record.target);
+    if(target!==null)assertPhysicalRoot(record.target,{worktreeId:record.worktreeId});
     if(aside!==null){
+      assertRetainedRoot(record,record.aside);
       if(aside!==record.beforeHash||target!==null&&target!==record.afterHash)throw new OperationError('recovery_required','Unexpected clone recovery bytes; nothing was overwritten.');
-      if(existsSync(record.stage))rmSync(record.stage,{recursive:true,force:true});
+      removeOwnedStage(record);
       if(target!==null){renameSync(record.target,record.stage);flushTopologyDirectory(dirname(record.target));}
       renameSync(record.aside,record.target);flushTopologyDirectory(dirname(record.target));
     }else if(record.beforeHash===null){
       if(target!==null&&target!==record.afterHash)throw new OperationError('recovery_required','Unexpected bytes occupy the interrupted clone destination.');
-      if(target!==null){if(existsSync(record.stage))rmSync(record.stage,{recursive:true,force:true});renameSync(record.target,record.stage);flushTopologyDirectory(dirname(record.target));}
+      if(target!==null){removeOwnedStage(record);renameSync(record.target,record.stage);flushTopologyDirectory(dirname(record.target));}
     }else if(target!==record.beforeHash)throw new OperationError('recovery_required','The original checkout cannot be proven intact.');
-    if(existsSync(record.stage))rmSync(record.stage,{recursive:true,force:true});
-    flushTopologyDirectory(dirname(record.target));
+    removeOwnedStage(record);
+    if(record.beforeHash!==null)assertPhysicalRoot(record.target,{worktreeId:record.worktreeId});
+    if(existsSync(dirname(record.target)))flushTopologyDirectory(dirname(record.target));
     await releaseReservation(tx,row,record,'failed');
   });
   return readChange(engine,row.id);
@@ -92,7 +118,7 @@ export async function finishTopologyClone(engine:BrainEngine,id:string,hooks:Clo
       return abortClone(engine,row,record,(failure as {code?:string}|undefined)?.code??record.failureCode??'clone_interrupted');
     if(row.state!=='committed'){
       try{
-        await engine.transaction(async tx=>{
+        await topologyTransaction(engine,async tx=>{
           const sources=await guard(tx,row,record);
           const [source]=await tx.executeRaw<{incarnation:string;last_commit:string|null}>('SELECT incarnation,last_commit FROM sources WHERE id=$1',[record.sourceId]);
           if(record.operation==='add'?!!source:!source||source.incarnation!==record.incarnation||source.last_commit!==record.checkpoint)
@@ -100,8 +126,12 @@ export async function finishTopologyClone(engine:BrainEngine,id:string,hooks:Clo
           if(record.operation==='reclone'&&await topologyCanonicalStamp(tx,record.worktreeId)!==record.canonicalStamp)
             throw new OperationError('source_changed','The logical source changed while cloning; retry after its mirrors finish.');
           await settleTopologyRequests(tx,sources,[record.worktreeId],row.principal_id);
+          assertStagingOwned(record);
           const stage=treeHash(record.stage),target=treeHash(record.target),aside=treeHash(record.aside);
           if(stage!==null){
+            assertRetainedRoot(record,record.stage);
+            if(aside!==null)assertRetainedRoot(record,record.aside);
+            if(target!==null)assertPhysicalRoot(record.target,{worktreeId:record.worktreeId});
             if(stage!==record.afterHash||aside!==null&&aside!==record.beforeHash)throw new OperationError('recovery_required','Staged clone bytes changed.');
             if(target!==null){
               if(target!==record.beforeHash||aside!==null)throw new OperationError('recovery_required','The active checkout changed during clone preparation.');
@@ -109,6 +139,7 @@ export async function finishTopologyClone(engine:BrainEngine,id:string,hooks:Clo
             }else if(record.beforeHash!==null&&aside!==record.beforeHash)throw new OperationError('recovery_required','The old checkout is missing from both recorded paths.');
             renameSync(record.stage,record.target);flushTopologyDirectory(dirname(record.target));await hooks.boundary?.('new_moved');
           }else if(target!==record.afterHash)throw new OperationError('recovery_required','Neither a verified stage nor the published clone is present.');
+          assertPhysicalRoot(record.target,{worktreeId:record.worktreeId});
           await tx.executeRaw("SELECT set_config('gbrain.topology_change','on',true)");
           await withCoordinatedWrite(tx,sources,async()=>{
             if(record.operation==='add')await tx.executeRaw('INSERT INTO sources(id,name,local_path,config,incarnation) VALUES($1,$2,$3,$4::text::jsonb,$5::uuid)',
@@ -133,23 +164,29 @@ export async function finishTopologyClone(engine:BrainEngine,id:string,hooks:Clo
         }
       }
     }
+    assertPhysicalRoot(record.target,{worktreeId:record.worktreeId});
     if(treeHash(record.target)!==record.afterHash)throw new OperationError('recovery_required','The committed clone changed before recovery cleanup.');
     const aside=treeHash(record.aside);
     if(aside!==null&&aside!==record.beforeHash)throw new OperationError('recovery_required','The retained old checkout changed; cleanup requires inspection.');
     if(existsSync(record.stage))throw new OperationError('recovery_required','Unexpected staging bytes remain after clone commitment.');
-    if(aside!==null)rmSync(record.aside,{recursive:true,force:true});
+    if(aside!==null){assertRetainedRoot(record,record.aside);rmSync(record.aside,{recursive:true,force:true});}
     flushTopologyDirectory(dirname(record.target));
-    await engine.transaction(async tx=>{await guard(tx,row,record);await releaseReservation(tx,row,record,'committed');});
+    await topologyTransaction(engine,async tx=>{await guard(tx,row,record);await releaseReservation(tx,row,record,'committed');});
     return readChange(engine,id);
   });
 }
 
-/** Opportunistic restart recovery skips native-busy roots without delaying siblings. */
+const recoveryCursors=new WeakMap<BrainEngine,string>();
+/** A bounded rotating scan keeps persistent conflicts from starving other roots. */
 export async function recoverSourceTopologies(engine:BrainEngine,opts:{hostId?:string;limit?:number}={}):Promise<number>{
-  const host=opts.hostId??localHostId();
-  const rows=await engine.executeRaw<TopologyChange>(`SELECT c.* FROM persistence_topology_changes c
+  const host=opts.hostId??localHostId(),limit=Math.max(1,Math.min(16,opts.limit??2));
+  const scan=async(after:string|null)=>engine.executeRaw<TopologyChange>(`SELECT c.* FROM persistence_topology_changes c
     JOIN persistence_worktrees w ON w.id=(c.recovery->>'worktreeId')::uuid
-    WHERE c.recovery IS NOT NULL AND w.owner_host_id=$1::uuid ORDER BY c.created_at LIMIT $2`,[host,opts.limit??2]);
+    WHERE c.recovery IS NOT NULL AND w.owner_host_id=$1::uuid AND ($2::uuid IS NULL OR c.id>$2::uuid)
+    ORDER BY c.id LIMIT $3`,[host,after,limit]);
+  let rows=await scan(recoveryCursors.get(engine)??null);
+  if(!rows.length){recoveryCursors.delete(engine);rows=await scan(null);}
+  if(rows.length)recoveryCursors.set(engine,rows[rows.length-1].id);
   let recovered=0;
   for(const row of rows){
     try{await withTopologyLocks(engine,row.source_id,async()=>{const done=await finishTopologyClone(engine,row.id);if(!done.recovery)recovered++;},undefined,0);}

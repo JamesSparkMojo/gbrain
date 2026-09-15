@@ -1,3 +1,4 @@
+import { topologyTransaction } from './topology-transaction.ts';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -5,8 +6,9 @@ import type { BrainEngine } from '../engine.ts';
 import { OperationError } from '../ops/contract.ts';
 import { isValidSourceId } from '../source-id.ts';
 import { discoverGitRoot } from '../sync-git.ts';
+import { isInsideGitRepo, hasTrackedContent } from '../git-remote.ts';
 import { containsPath, getWorktreeBinding, type WorktreeBinding, worktreeManifest } from './ownership.ts';
-import { localHostId, persistenceHome } from './identity.ts';
+import { localHostId } from './identity.ts';
 import { advanceTopology, lockTopologyPrincipal, lockTopologyRows, settleTopologyRequests, topologyCanonicalStamp, topologyPrincipal, withTopologyLocks } from './topology-locks.ts';
 import { priorTopologyChange, recordTopologyChange, topologyReceipt } from './topology-receipts.ts';
 import { isWriteRequestId } from './types.ts';
@@ -14,6 +16,7 @@ import { withCoordinatedWrite } from './context.ts';
 import { managedFilesystemDatastorePath, refreshManagedFilesystemRoots } from './filesystem-guard.ts';
 import { canonicalFilesystemPath } from './root-registry.ts';
 import { flushTopologyDirectory } from './topology-filesystem.ts';
+import { claimPhysicalRoot } from './physical-root.ts';
 
 export interface SourceLifecycleInput {
   operation:'add'|'claim'|'archive'|'restore'|'remove'|'purge'|'rebind'|'reclone';
@@ -22,6 +25,7 @@ export interface SourceLifecycleInput {
   remoteUrl?:string;
   createDirectory?:boolean;
   expiredOnly?:boolean;
+  requireGitContent?:boolean;
 }
 interface SourceState {id:string;incarnation:string;archived:boolean;local_path:string|null;config:Record<string,unknown>;name:string;last_commit:string|null;}
 
@@ -44,14 +48,14 @@ export async function installTopologyBinding(tx:BrainEngine,sourceId:string,inca
   const compatible=bindings.find(binding=>binding.local_path && containsPath(binding.local_path,root.worktree));
   const overlapping=bindings.find(binding=>binding.local_path && containsPath(root.worktree,binding.local_path));
   if(overlapping&&!compatible) throw new OperationError('topology_change_required','The proposed root encloses another registered worktree. Rebind those sources explicitly first.');
-  let id=compatible?.worktree_id;
-  let worktree=compatible?.local_path??root.worktree;
-  if(!id){
-    id=randomUUID();
-    await tx.executeRaw('INSERT INTO persistence_worktrees(id,owner_host_id,owner_epoch) VALUES($1::uuid,$2::uuid,1)',[id,localHostId()]);
-    await tx.executeRaw('INSERT INTO persistence_host_bindings(worktree_id,host_id,local_path,coordination_path) VALUES($1::uuid,$2::uuid,$3,$4)',
-      [id,localHostId(),worktree,join(persistenceHome(),'locks',`${id}.lock`)]);
-  }
+  const worktree=compatible?.local_path??root.worktree;
+  const physical=await claimPhysicalRoot(tx,worktree,{hostId:localHostId(),
+    ...(compatible?{worktreeId:compatible.worktree_id,coordinationPath:compatible.coordination_path!}:{})});
+  const id=physical.worktreeId;
+  const [existing]=await tx.executeRaw('SELECT id FROM persistence_worktrees WHERE id=$1::uuid',[id]);
+  if(!existing)await tx.executeRaw('INSERT INTO persistence_worktrees(id,owner_host_id,owner_epoch) VALUES($1::uuid,$2::uuid,1)',[id,localHostId()]);
+  await tx.executeRaw(`INSERT INTO persistence_host_bindings(worktree_id,host_id,local_path,coordination_path) VALUES($1::uuid,$2::uuid,$3,$4)
+    ON CONFLICT(worktree_id,host_id) DO NOTHING`,[id,localHostId(),worktree,physical.coordinationPath]);
   const rel=relative(worktree,root.source).split(sep).join('/');
   await tx.executeRaw(`INSERT INTO persistence_source_bindings(source_id,source_incarnation,worktree_id,relative_path,topology_generation)
     SELECT $1,$2::uuid,$3::uuid,$4,topology_generation FROM persistence_worktrees WHERE id=$3::uuid
@@ -63,7 +67,7 @@ export async function installTopologyBinding(tx:BrainEngine,sourceId:string,inca
 /** One source transition; shared-root members are fenced and invalidated together. */
 export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceLifecycleInput):Promise<Record<string,unknown>>{
   if(!['add','claim','archive','restore','remove','purge','rebind','reclone'].includes(input.operation)) throw new OperationError('invalid_params','Unknown source lifecycle operation.');
-  for(const key of ['dryRun','refederate','confirmDestructive','createDirectory','expiredOnly'] as const) if(input[key]!==undefined&&typeof input[key]!=='boolean') throw new OperationError('invalid_params',`${key} must be a boolean.`);
+  for(const key of ['dryRun','refederate','confirmDestructive','createDirectory','expiredOnly','requireGitContent'] as const) if(input[key]!==undefined&&typeof input[key]!=='boolean') throw new OperationError('invalid_params',`${key} must be a boolean.`);
   for(const key of ['path','name','expectedIncarnation','requestId','remoteUrl'] as const) if(input[key]!==undefined&&(typeof input[key]!=='string'||input[key]!.length>8192)) throw new OperationError('invalid_params',`${key} must be a bounded string.`);
   if(input.config!==undefined&&(!input.config||Array.isArray(input.config)||typeof input.config!=='object'||Buffer.byteLength(JSON.stringify(input.config))>8192)) throw new OperationError('invalid_params','Source configuration must be a bounded object.');
   if(!isValidSourceId(input.sourceId)) throw new OperationError('invalid_params','A valid explicit source ID is required.');
@@ -75,6 +79,8 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
   const intent={...input,requestId:undefined,dryRun:undefined};
   const prior=await priorTopologyChange(engine,principal,requestId,intent);
   if(prior) return topologyReceipt(prior);
+  if(input.requireGitContent&&input.path&&(!isInsideGitRepo(input.path)||!hasTrackedContent(input.path)))
+    throw new OperationError('not_a_git_repo','The source path must contain committed Git content. Use --force to register an ordinary directory.');
   if(input.operation==='reclone'||input.operation==='add'&&input.remoteUrl){
     const {runManagedSourceClone}=await import('./topology-clone.ts');
     return runManagedSourceClone(engine,input,principal,requestId,intent);
@@ -95,7 +101,7 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
       if(Buffer.byteLength(JSON.stringify(manifest))>1_048_576) throw new OperationError('request_too_large','The verified source manifest exceeds the 1 MiB administration metadata bound.');
       manifests.set(path,manifest);
     }
-    return engine.transaction(async tx=>{
+    return topologyTransaction(engine,async tx=>{
     await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
     const sources=await lockTopologyRows(tx,input.sourceId,bindings);
     const [source]=await tx.executeRaw<SourceState>('SELECT id,incarnation,archived,local_path,config,name,last_commit FROM sources WHERE id=$1',[input.sourceId]);
@@ -127,11 +133,13 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
       if(!binding?.local_path || !existsSync(binding.local_path)) throw new OperationError('recovery_required','The original checkout is unavailable; recover its last verified manifest before rebinding.');
       if(manifests.get(binding.local_path)!.digest!==manifests.get(root!.worktree)!.digest) throw new OperationError('writer_manifest_mismatch','The new checkout differs from the current canonical manifest, including deletions.');
     }
-    if(input.operation==='restore'&&source?.local_path&&!existsSync(source.local_path)) throw new OperationError('recovery_required','Restore requires the verified canonical checkout. Reclone it before restoring the source.');
+    const ownedSourcePath=currentBinding?.local_path?join(currentBinding.local_path,currentBinding.relative_path):source?.local_path;
+    if(input.operation==='restore'&&ownedSourcePath&&!existsSync(ownedSourcePath)) throw new OperationError('recovery_required','Restore requires the verified canonical checkout. Reclone it before restoring the source.');
     await refreshManagedFilesystemRoots(tx,managedFilesystemDatastorePath(engine));
     await tx.executeRaw("SELECT set_config('gbrain.topology_change','on',true)");
     const result=await withCoordinatedWrite(tx,sources,async()=>{
       let incarnation=source?.incarnation??randomUUID();
+      let pagesDeleted=0;
       if(input.operation==='add'||input.operation==='claim'){
         if(root&&input.createDirectory&&!existsSync(root.source)){mkdirSync(root.source,{recursive:true});flushTopologyDirectory(dirname(root.source));}
         if(source) await tx.executeRaw("UPDATE sources SET local_path=$2,name=COALESCE($3,name),config=COALESCE(config,'{}'::jsonb)||$4::text::jsonb WHERE id=$1",
@@ -149,6 +157,8 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
       }else{
         const refs=await tx.executeRaw('SELECT client_id FROM oauth_clients WHERE source_id=$1 LIMIT 1',[input.sourceId]);
         if(refs.length) throw new OperationError('source_referenced','OAuth clients still reference this source. Revoke and remove those registrations first.');
+        const [impact]=await tx.executeRaw<{count:string}>('SELECT count(*)::text AS count FROM pages WHERE source_id=$1',[input.sourceId]);
+        pagesDeleted=Number(impact.count);
         await tx.executeRaw('DELETE FROM sources WHERE id=$1 AND incarnation=$2::uuid',[input.sourceId,incarnation]);
         await tx.executeRaw('DELETE FROM persistence_source_bindings WHERE source_id=$1 AND source_incarnation=$2::uuid',[input.sourceId,incarnation]);
       }
@@ -161,7 +171,7 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
       // stale installations cannot write after a source moved or disappeared.
       await refreshManagedFilesystemRoots(tx,managedFilesystemDatastorePath(engine));
       return {operation:input.operation,source_id:input.sourceId,source_incarnation:incarnation,invalidated_requests:invalidated,
-        ...(root?{local_path:root.source}:{}),...(['remove','purge'].includes(input.operation)?{storage_retained:true}:{}),
+        ...(root?{local_path:root.source}:{}),...(['remove','purge'].includes(input.operation)?{storage_retained:true,local_path:ownedSourcePath??null,pages_deleted:pagesDeleted}:{}),
         ...(input.operation==='add'?{name:input.name??source?.name??input.sourceId,config:input.config??source?.config??{},id:input.sourceId}: {})};
     });
     const row=await recordTopologyChange(tx,{principal,requestId,intent,operation:input.operation,sourceId:input.sourceId,incarnation:source?.incarnation??String(result.source_incarnation),worktrees},result);
