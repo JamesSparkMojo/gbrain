@@ -32,7 +32,8 @@ import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { runMigrateEngine } from '../../src/commands/migrate-engine.ts';
 import { configureGateway, resetGateway } from '../../src/core/ai/gateway.ts';
 import type { BrainEngine } from '../../src/core/engine.ts';
-import { hasDatabase, setupDB, teardownDB, getEngine } from './helpers.ts';
+import { hasDatabase } from './helpers.ts';
+import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 
 const describePg = hasDatabase() ? describe : describe.skip;
 
@@ -94,6 +95,9 @@ describePg('migrate-engine whole-brain PGLite to Postgres (D2)', () => {
   };
 
   let source: PGLiteEngine | null = null;
+  let targetFixture: Awaited<ReturnType<typeof isolatedPersistencePostgres>>;
+  let targetUrl: string;
+  const getEngine = () => targetFixture.engine;
   let seeded: FixtureCounts;
   let factId1 = 0; // superseded by factId2
   let factId2 = 0;
@@ -102,8 +106,11 @@ describePg('migrate-engine whole-brain PGLite to Postgres (D2)', () => {
   beforeAll(async () => {
     if (!DB_URL) throw new Error('DATABASE_URL must be set for this e2e file');
 
-    // Postgres clean slate FIRST (helpers captured DATABASE_URL at import).
-    await setupDB();
+    // Permanent receipt IDs from other files cannot be truncated for a copy.
+    // Give this legacy-migration journey a fresh target brain.
+    targetFixture = await isolatedPersistencePostgres(DB_URL);
+    const [{ name }] = await targetFixture.engine.executeRaw<{ name: string }>('SELECT current_database() AS name');
+    const url = new URL(DB_URL); url.pathname = `/${name}`; targetUrl = url.toString();
 
     // Pin embedding sizing to the live Postgres schema (vector(1536)) so the
     // fresh PGLite brain sizes its columns identically.
@@ -227,7 +234,7 @@ describePg('migrate-engine whole-brain PGLite to Postgres (D2)', () => {
 
   afterAll(async () => {
     if (source) await source.disconnect().catch(() => {});
-    await teardownDB();
+    await targetFixture?.close();
     resetGateway();
     for (const [k, v] of Object.entries(origEnv)) {
       if (v === undefined) delete process.env[k];
@@ -277,7 +284,7 @@ describePg('migrate-engine whole-brain PGLite to Postgres (D2)', () => {
     expect(await tableCounts(source)).toEqual(seeded);
 
     // Real argv contract: `gbrain migrate --to supabase --url <url>`.
-    await runMigrateEngine(source, ['--to', 'supabase', '--url', DB_URL]);
+    await runMigrateEngine(source, ['--to', 'supabase', '--url', targetUrl]);
     await source.disconnect();
     source = null;
 
@@ -288,7 +295,7 @@ describePg('migrate-engine whole-brain PGLite to Postgres (D2)', () => {
     // Local config flipped to the postgres engine, preserving non-engine keys.
     const cfg = JSON.parse(readFileSync(configFile, 'utf-8'));
     expect(cfg.engine).toBe('postgres');
-    expect(cfg.database_url).toBe(DB_URL);
+    expect(cfg.database_url).toBe(targetUrl);
     expect(cfg.database_path).toBeUndefined();
     expect(cfg.embedding_dimensions).toBe(EMBED_DIMS); // pre-existing file keys preserved
 

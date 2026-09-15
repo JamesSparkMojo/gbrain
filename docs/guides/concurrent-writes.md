@@ -21,6 +21,10 @@ derived rebuilds do not. Reverting an older version creates a new revision;
 it does not reinstate an old revision token. Legacy partial versions preserve
 fields that the old version did not record.
 
+Facts, takes, and canonical timeline rows commit with their page. The legacy
+`auto_timeline` switch does not suppress that required projection; maintenance
+may report zero newly reconciled rows because publication already installed them.
+
 `get_page` and `fetch` assemble canonical page fields, tags, withdrawal state,
 and the reported revision from one committed database snapshot. While a
 publication is in progress, a reader may see the prior committed snapshot.

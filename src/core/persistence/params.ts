@@ -17,6 +17,10 @@ export const WRITE_REQUEST_PARAM: ParamDef = {
 };
 
 export const PAGE_MUTATION_PARAMS: Record<string, ParamDef> = {
+  source_id: {
+    type: 'string',
+    description: 'Source to mutate. Defaults to the selected source. Remote callers may only use their current write source.',
+  },
   expected_revision: {
     type: 'string',
     description: 'Revision returned by the page read. Required when replacing an existing page unless force is true. Omit both for create-only writes.',

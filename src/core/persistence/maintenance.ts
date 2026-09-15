@@ -13,6 +13,22 @@ export async function assertUnmanagedCanonicalWriter(engine: SqlEngine, operatio
     'Use supported persistence operations. Source topology and maintenance require a verified drain before migration.');
 }
 
+/** The legacy engine copier cannot transfer permanent IDs, withdrawals or ownership. */
+export async function assertLegacyEngineMigration(engine: SqlEngine): Promise<void> {
+  const tables = ['persistence_requests', 'fact_withdrawals', 'persistence_worktrees'] as const;
+  // Older migration sources can predate these tables. Do not interpret any
+  // other database failure as an empty history.
+  const present = await engine.executeRaw<{ name: string }>(
+    'SELECT name FROM unnest($1::text[]) AS t(name) WHERE to_regclass(name) IS NOT NULL', [tables]);
+  for (const table of tables) {
+    if (!present.some(row => row.name === table)) continue;
+    const [row] = await engine.executeRaw<{ present: boolean }>(`SELECT EXISTS(SELECT 1 FROM ${table}) AS present`);
+    if (row?.present) throw new OperationError('writer_coordinator_required',
+      'Engine migration cannot discard durable write history, withdrawal protection, or canonical ownership.',
+      'Keep this datastore. Use forward repair or a verified migration that preserves the complete persistence state.');
+  }
+}
+
 /** Legacy reinit may rename only after acquiring the stable sibling kernel lock. */
 export async function backupUnmanagedPglite(dataDir: string, backupDir: string): Promise<void> {
   assertManagedFilesystemWrite(dataDir);

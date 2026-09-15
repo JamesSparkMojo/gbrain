@@ -141,7 +141,8 @@ describeE2E('E2E: Page CRUD', () => {
   });
 
   test('delete_page removes page and others survive', async () => {
-    await callOp('delete_page', { slug: 'sources/crustdata-sarah-chen' });
+    const current = await callOp('get_page', { slug: 'sources/crustdata-sarah-chen' }) as any;
+    await callOp('delete_page', { slug: current.slug, expected_revision: current.revision });
     const stats = await callOp('get_stats') as any;
     expect(stats.page_count).toBe(15);
 
@@ -502,7 +503,9 @@ describeE2E('E2E: Versions', () => {
 
     // Revert to first version
     const firstVersion = versions[versions.length - 1];
-    await callOp('revert_version', { slug: 'people/sarah-chen', version_id: firstVersion.id });
+    const current = await callOp('get_page', { slug: 'people/sarah-chen' }) as any;
+    await callOp('revert_version', { slug: current.slug, version_id: firstVersion.id,
+      expected_revision: current.revision });
 
     const reverted = await callOp('get_page', { slug: 'people/sarah-chen' }) as any;
     expect(reverted.compiled_truth).not.toContain('(Modified)');

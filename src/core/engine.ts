@@ -2473,7 +2473,8 @@ export interface BrainEngine {
   // Deliberately scalar-only (no sourceIds[] widening): engine-internal with
   // zero remote-reachable callers (verified #2555 review), so the federated
   // read-scope contract doesn't apply. Widen only if an op ever exposes it.
-  getChunksWithEmbeddings(slug: string, opts?: { sourceId?: string }): Promise<Chunk[]>;
+  /** Raw preservation tools may include unverified chunks; retrieval leaves this false. */
+  getChunksWithEmbeddings(slug: string, opts?: { sourceId?: string; includeUnsealed?: boolean }): Promise<Chunk[]>;
 
   // Raw SQL (for Minions job queue and other internal modules)
   /**

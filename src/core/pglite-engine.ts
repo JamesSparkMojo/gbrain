@@ -5860,20 +5860,20 @@ export class PGLiteEngine implements BrainEngine {
     await this.db.exec(sql);
   }
 
-  async getChunksWithEmbeddings(slug: string, opts?: { sourceId?: string }): Promise<Chunk[]> {
+  async getChunksWithEmbeddings(slug: string, opts?: { sourceId?: string; includeUnsealed?: boolean }): Promise<Chunk[]> {
     const sourceId = opts?.sourceId;
     const { rows } = sourceId
       ? await this.db.query(
           `SELECT cc.* FROM content_chunks cc
            JOIN pages p ON p.id = cc.page_id
-           WHERE ${currentTextProjectionFilter('p')} AND p.slug = $1 AND p.source_id = $2
+           WHERE ${opts?.includeUnsealed ? 'TRUE' : currentTextProjectionFilter('p')} AND p.slug = $1 AND p.source_id = $2
            ORDER BY cc.chunk_index`,
           [slug, sourceId]
         )
       : await this.db.query(
           `SELECT cc.* FROM content_chunks cc
            JOIN pages p ON p.id = cc.page_id
-           WHERE ${currentTextProjectionFilter('p')} AND p.slug = $1
+           WHERE ${opts?.includeUnsealed ? 'TRUE' : currentTextProjectionFilter('p')} AND p.slug = $1
            ORDER BY cc.chunk_index`,
           [slug]
         );

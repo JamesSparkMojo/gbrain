@@ -22,6 +22,7 @@ import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 
 import { addSource } from '../../src/core/sources-ops.ts';
+import { claimWorktree } from '../../src/core/persistence/ownership.ts';
 import { loadCorpusPages } from '../helpers/bootstrap-corpus.ts';
 import { runEmbedCore } from '../../src/commands/embed.ts';
 import { hybridSearch } from '../../src/core/search/hybrid.ts';
@@ -316,6 +317,7 @@ describe.skipIf(!DATABASE_URL)('Postgres bootstrap verify (real Postgres)', () =
     // leftover pages/facts under it.
     await engine.executeRaw(`DELETE FROM sources WHERE id = 'workspace'`, []);
     await addSource(engine, { id: 'workspace', localPath: join(ws, 'brain'), force: true });
+    await claimWorktree(engine, 'workspace', join(ws, 'brain'));
   }, 60_000);
 
   afterAll(async () => {
@@ -338,7 +340,7 @@ describe.skipIf(!DATABASE_URL)('Postgres bootstrap verify (real Postgres)', () =
     });
 
     // The three probes the task targets — each must pass on real Postgres.
-    for (const c of res.checks.filter((c) => c.id === 'roundtrip')) expect(c.ok).toBe(true);
+    for (const c of res.checks.filter((c) => c.id === 'roundtrip')) expect(c.ok, c.detail).toBe(true);
     const graph = res.checks.find((c) => c.id === 'graph_floor');
     expect(graph?.ok).toBe(true);
     const magic = res.checks.find((c) => c.id === 'magic_moment');

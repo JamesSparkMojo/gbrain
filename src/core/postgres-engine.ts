@@ -5160,20 +5160,20 @@ export class PostgresEngine implements BrainEngine {
     await conn.unsafe(sqlStr);
   }
 
-  async getChunksWithEmbeddings(slug: string, opts?: { sourceId?: string }): Promise<Chunk[]> {
+  async getChunksWithEmbeddings(slug: string, opts?: { sourceId?: string; includeUnsealed?: boolean }): Promise<Chunk[]> {
     const conn = this.sql;
     const sourceId = opts?.sourceId;
     const rows = sourceId
       ? await conn`
           SELECT cc.* FROM content_chunks cc
           JOIN pages p ON p.id = cc.page_id
-          WHERE ${this.sql.unsafe(currentTextProjectionFilter('p'))} AND p.slug = ${slug} AND p.source_id = ${sourceId}
+          WHERE ${this.sql.unsafe(opts?.includeUnsealed ? 'TRUE' : currentTextProjectionFilter('p'))} AND p.slug = ${slug} AND p.source_id = ${sourceId}
           ORDER BY cc.chunk_index
         `
       : await conn`
           SELECT cc.* FROM content_chunks cc
           JOIN pages p ON p.id = cc.page_id
-          WHERE ${this.sql.unsafe(currentTextProjectionFilter('p'))} AND p.slug = ${slug}
+          WHERE ${this.sql.unsafe(opts?.includeUnsealed ? 'TRUE' : currentTextProjectionFilter('p'))} AND p.slug = ${slug}
           ORDER BY cc.chunk_index
         `;
     return rows.map((r) => rowToChunk(r as Record<string, unknown>, true));
