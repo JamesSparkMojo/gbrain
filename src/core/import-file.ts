@@ -294,6 +294,8 @@ export async function importFromContent(
   slug: string,
   content: string,
   opts: {
+    /** Coordinator seam: prepare without publishing, then commit under its guarded transaction. */
+    prepare?: (prepared: import('./persistence/prepared-import.ts').PreparedContentImport) => Promise<ImportResult>;
     noEmbed?: boolean;
     sourceId?: string;
     /**
@@ -729,6 +731,11 @@ export async function importFromContent(
   };
 
   if (existing?.content_hash === hash && !opts.forceRechunk) {
+    if (opts.prepare) {
+      const result: ImportResult = { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}) };
+      return opts.prepare({ slug, parsedPage, observedRevision: (existing as typeof existing & { knowledge_revision?: string }).knowledge_revision ?? null,
+        noop: true, result, apply: async () => {} });
+    }
     return { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}) };
   }
 
@@ -737,7 +744,7 @@ export async function importFromContent(
   // the content is unchanged — stamp the canonical hash via the narrow
   // refreshPageBody UPDATE (no chunk churn, no re-embed, no version snapshot)
   // and skip. The next import then hits the fast path above.
-  if (existing && !opts.forceRechunk && typeof engine.refreshPageBody === 'function') {
+  if (existing && !opts.prepare && !opts.forceRechunk && typeof engine.refreshPageBody === 'function') {
     const legacyHash = contentHashLegacy({
       title: parsed.title,
       type: parsed.type,
@@ -801,6 +808,11 @@ export async function importFromContent(
       const dupFmIdStr = typeof dupFmId === 'string' && dupFmId.length > 0 ? dupFmId : null;
       const sameExternalId = fmIdStr !== null && dupFmIdStr === fmIdStr;
       if (sameExternalId) {
+        if (opts.prepare) {
+          const result: ImportResult = { slug: dup.slug, status: 'skipped', chunks: 0, parsedPage };
+          return opts.prepare({ slug: dup.slug, parsedPage, observedRevision: (existing as (typeof existing & { knowledge_revision?: string }) | null)?.knowledge_revision ?? null,
+            noop: true, result, apply: async () => {} });
+        }
         // True duplicate (same external ID). Skip + log to stderr.
         process.stderr.write(
           `[import] skipping ${opts.sourcePath ?? slug}: identical to ${dup.slug} ` +
@@ -954,7 +966,7 @@ export async function importFromContent(
   // schema DEFAULT — required for multi-source brains; harmless ('default')
   // for single-source callers.
   const txOpts = { sourceId: sourceId ?? 'default' };
-  await engine.transaction(async (tx) => {
+  const applyPrepared = async (tx: BrainEngine) => {
     if (existing) await tx.createVersion(slug, txOpts);
 
     // v0.29.1 — compute effective_date from frontmatter precedence chain.
@@ -1098,7 +1110,18 @@ export async function importFromContent(
         );
       } catch { /* same reason — silent skip */ }
     }
-  }).catch(async (err: unknown) => {
+    // Alias projection and readback share the page commit. A later writer can
+    // no longer turn a successful import into a postcommit verification error.
+    await tx.setPageAliases(slug, sourceId ?? 'default', normalizeAliasList(parsed.frontmatter.aliases));
+    await verifyPageReadable(tx, slug, hash, sourceId, 'importFromContent');
+  };
+  if (opts.prepare) return opts.prepare({
+    slug, parsedPage, observedRevision: (existing as (typeof existing & { knowledge_revision?: string }) | null)?.knowledge_revision ?? null,
+    noop: false, result: { slug, status: 'imported', chunks: chunks.length, parsedPage,
+      ...(pageQuarantined ? { quarantined: true } : {}), ...(pageFlagged ? { flagged: true, flag_reason: pageFlagReason } : {}) },
+    apply: applyPrepared,
+  });
+  await engine.transaction(applyPrepared).catch(async (err: unknown) => {
     // #4287: name the dimension-mismatch rollback instead of letting the bare
     // pgvector message ("expected N dimensions, not M") surface with no code,
     // no consequence and no fix. S2: name the registry-ACTIVE column the
@@ -1115,37 +1138,6 @@ export async function importFromContent(
     throw decorateEmbeddingDimError(err, slug, activeColName);
   });
 
-  // T3 — project frontmatter `aliases:` into page_aliases (free-text alias
-  // resolution for search). Runs AFTER the page write commits so the slug
-  // exists. Fail-soft: a pre-v110 brain has no page_aliases table yet (the
-  // migration may not have run); an alias-write failure must NOT fail the
-  // import. Always called (even with []) so REMOVING an alias from frontmatter
-  // clears its row — the content_hash includes non-timestamp frontmatter, so
-  // an alias edit changes the hash and reaches this path (not the skip branch).
-  try {
-    const aliasNorms = normalizeAliasList((parsed.frontmatter as Record<string, unknown>).aliases);
-    await engine.setPageAliases(slug, sourceId ?? 'default', aliasNorms);
-  } catch (e) {
-    if (!isUndefinedTableError(e)) {
-      warnOncePerProcess(
-        'setPageAliases:failed',
-        `[import] page_aliases projection failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
-  }
-
-  // Post-write read-back verification.
-  //
-  // After the transaction commits, the page MUST be resolvable via getPage.
-  // If the read-back returns null (or a stale content_hash), the operation
-  // fails LOUDLY — a non-zero exit + error surfaced to the ingest log — rather
-  // than reporting success. A write is not "done" until it is readable.
-  //
-  // This catches the silent-desync class: the page file exists on disk (or the
-  // git commit landed) but the DB index silently never picked it up. Without
-  // this guard, the operation reports success and the page is invisible to all
-  // reads (get_page, search, query) until someone notices the gap manually.
-  await verifyPageReadable(engine, slug, hash, sourceId, 'importFromContent');
 
   return {
     slug,

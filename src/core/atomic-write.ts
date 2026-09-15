@@ -32,6 +32,8 @@ import { randomBytes } from 'crypto';
 import { dirname } from 'path';
 
 export interface AtomicWriteOpts {
+  /** Required by journaled publication: real directory durability errors propagate. */
+  durable?: boolean;
   /**
    * Called with the bytes read back from the tmp file BEFORE the rename.
    * Throw to abort the write — the tmp file is removed and the target is
@@ -41,7 +43,7 @@ export interface AtomicWriteOpts {
   verify?: (onDisk: string) => void;
 }
 
-export function atomicWriteFileSync(filePath: string, content: string, opts?: AtomicWriteOpts): void {
+export function atomicWriteFileSync(filePath: string, content: string | Uint8Array, opts?: AtomicWriteOpts): void {
   const tmpPath = `${filePath}.tmp.${process.pid}.${randomBytes(4).toString('hex')}`;
 
   // Preserve the target's mode across the rename (a fresh tmp file gets the
@@ -54,19 +56,20 @@ export function atomicWriteFileSync(filePath: string, content: string, opts?: At
   }
 
   try {
-    const fd = openSync(tmpPath, 'w', mode ?? 0o644);
+    const fd = openSync(tmpPath, 'wx', mode ?? 0o644);
     try {
       // Loop until every byte lands: writeSync may legally return a short
       // count under disk pressure/quotas, and a silent short write that
       // truncates AFTER valid frontmatter would pass a frontmatter-only
       // verifier and atomically install truncated content.
-      const buf = Buffer.from(content, 'utf-8');
+      const buf = typeof content === 'string' ? Buffer.from(content, 'utf-8') : Buffer.from(content);
       let off = 0;
       while (off < buf.length) {
         const n = writeSync(fd, buf, off, buf.length - off);
         if (n <= 0) throw new Error(`atomic-write: short write at offset ${off}/${buf.length}`);
         off += n;
       }
+      if (mode !== null) chmodSync(tmpPath, mode);
       fsyncSync(fd);
     } finally {
       closeSync(fd);
@@ -75,7 +78,6 @@ export function atomicWriteFileSync(filePath: string, content: string, opts?: At
     // 0644), so an explicit chmod is required to actually PRESERVE the
     // target's mode across the rename — the pre-wave in-place write kept the
     // inode's mode exactly; this keeps that property.
-    if (mode !== null) chmodSync(tmpPath, mode);
     if (opts?.verify) {
       opts.verify(readFileSync(tmpPath, 'utf-8'));
     }
@@ -87,8 +89,9 @@ export function atomicWriteFileSync(filePath: string, content: string, opts?: At
     try {
       const dfd = openSync(dirname(filePath), 'r');
       try { fsyncSync(dfd); } finally { closeSync(dfd); }
-    } catch {
-      /* best-effort */
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (opts?.durable && !(process.platform === 'win32' && ['EISDIR', 'EPERM', 'EINVAL', 'ENOTSUP'].includes(code ?? ''))) throw error;
     }
   } catch (err) {
     try {

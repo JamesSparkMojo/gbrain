@@ -1,3 +1,5 @@
+import { submitPageMutation } from '../persistence/page-mutations.ts';
+import { PAGE_MUTATION_PARAMS } from '../persistence/params.ts';
 /**
  * Page CRUD operation cluster — pure move from operations.ts (v0.46.x
  * tranche 1). Op consts stay module-private; `pagesOperations` below lists
@@ -139,63 +141,26 @@ const get_page: Operation = {
     // oracle), composing with — not replacing — the source-grant scope above.
     const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote);
 
-    let page = await ctx.engine.getPage(slug, { includeDeleted, excludePrivate, ...sourceOpts });
+    let snapshot = await ctx.engine.readPageSnapshot(slug, { includeDeleted, excludePrivate, ...sourceOpts, resolveAlias: true });
+    let page = snapshot?.page ?? null;
     if (page && excludePrivate && isPrivatePage(page.frontmatter)) page = null;
-    let resolved_slug: string | undefined;
-
-    // #4275: slug aliases are redirects — dedup/migration retires a slug and
-    // registers alias → canonical. Search and the wikilink resolver already
-    // follow them (resolveSlugWithAlias documents get_page as a consumer);
-    // the direct exact read 404ing on a retired slug made the surfaces
-    // disagree. Resolution runs ONLY on an exact-read miss, so a live page at
-    // the requested slug (or, with include_deleted, its recoverable shell —
-    // restore workflows need the shell, not a redirect) always wins, and it
-    // runs BEFORE fuzzy (the alias table is authoritative; fuzzy is a guess).
-    // Scope: federated grants consult only granted sources' alias rows, so an
-    // out-of-grant alias behaves exactly like a missing page; a scalar scope
-    // consults that source (the remote '__all__' literal matches no real
-    // source and fail-closes); the trusted UNSCOPED read consults every LIVE
-    // source (archived sources are excluded everywhere else in the ladder; their
-    // alias rows count only when include_deleted asks for retired material).
-    // The canonical is then read in the source that OWNS the alias row: a
-    // federated getPage prefers the anchor source, so an unrelated live page at
-    // the canonical slug in another granted source would otherwise shadow it.
-    // No catch here: a pre-v104 brain (no slug_aliases table) is the ENGINE's
-    // contract to absorb (resolveSlugWithAliasDetailed → null); anything else
-    // (connection reset, timeout) must surface, not degrade to page_not_found.
-    if (!page) {
-      const aliasScope: string | readonly string[] = sourceOpts.sourceIds?.length
-        ? sourceOpts.sourceIds
-        : sourceOpts.sourceId !== undefined
-          ? sourceOpts.sourceId
-          : (await ctx.engine.listAllSources({ includeArchived: includeDeleted })).map(s => s.id);
-      const hit = await ctx.engine.resolveSlugWithAliasDetailed(slug, aliasScope, { excludePrivate });
-      if (hit) {
-        const aliasPage = await ctx.engine.getPage(hit.canonical_slug, { includeDeleted, excludePrivate, sourceId: hit.source_id });
-        if (aliasPage && !(excludePrivate && isPrivatePage(aliasPage.frontmatter))) {
-          page = aliasPage;
-          resolved_slug = hit.canonical_slug;
-        }
-      }
-    }
+    let resolved_slug: string | undefined = page && page.slug !== slug ? page.slug : undefined;
 
     if (!page && fuzzy) {
-      let candidates = await ctx.engine.resolveSlugs(slug, { ...fuzzyScope, excludePrivate });
-      // #4352: the ambiguous_slug candidate list must not enumerate private slugs.
-      if (excludePrivate && candidates.length > 0) {
-        candidates = await dropPrivateSlugs(ctx.engine, candidates, fuzzyScope, includeDeleted);
-      }
-      if (candidates.length === 1) {
-        const fuzzyPage = await ctx.engine.getPage(candidates[0], { includeDeleted, excludePrivate, ...sourceOpts });
-        // Multi-source backstop: the slug may still resolve to a private
-        // variant (same slug private in one source, world in another —
-        // getPage returns the first in-scope match).
-        if (fuzzyPage && !(excludePrivate && isPrivatePage(fuzzyPage.frontmatter))) {
-          page = fuzzyPage;
-          resolved_slug = candidates[0];
+      const fallback = await ctx.engine.transaction(async tx => {
+        await tx.executeRaw('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+        let candidates = await tx.resolveSlugs(slug, { ...fuzzyScope, excludePrivate });
+        if (excludePrivate && candidates.length > 0) {
+          candidates = await dropPrivateSlugs(tx, candidates, fuzzyScope, includeDeleted);
         }
-      } else if (candidates.length > 1) {
-        return { error: 'ambiguous_slug', candidates };
+        return { candidates, snapshot: candidates.length === 1
+          ? await tx.readPageSnapshot(candidates[0], { includeDeleted, excludePrivate, ...sourceOpts }) : null };
+      });
+      if (fallback.candidates.length > 1) return { error: 'ambiguous_slug', candidates: fallback.candidates };
+      if (fallback.snapshot && !(excludePrivate && isPrivatePage(fallback.snapshot.page.frontmatter))) {
+        snapshot = fallback.snapshot;
+        page = snapshot.page;
+        resolved_slug = page.slug;
       }
     }
 
@@ -233,7 +198,7 @@ const get_page: Operation = {
     // would otherwise fall back to 'default' for — the wrong source for a
     // non-default page. We already hold the resolved page, so its source is
     // unambiguous.
-    const tags = await ctx.engine.getTags(page.slug, { sourceId: page.source_id });
+    const tags = snapshot!.tags;
     // Only explicitly trusted local reads retain protected body sections.
     // Holder grants and page-visibility opt-outs do not bypass this boundary.
     const isUntrustedReader = ctx.remote !== false;
@@ -257,6 +222,7 @@ const get_page: Operation = {
     // it would double every reader's payload for the round-trip minority.
     return {
       ...visibleBody,
+      revision: snapshot!.revision,
       tags,
       ...(includeContent ? { content: serializePageToMarkdown(visibleBody as Page, tags) } : {}),
       ...(resolved_slug ? { resolved_slug } : {}),
@@ -293,7 +259,8 @@ const fetch_page: Operation = {
     // Same scope ladder as get_page's unqualified read: federated array >
     // scalar > nothing — a remote caller only fetches what its grant spans.
     const sourceOpts = federatedSearchScope(ctx);
-    let page = await ctx.engine.getPage(slug, sourceOpts);
+    const snapshot = await ctx.engine.readPageSnapshot(slug, sourceOpts);
+    let page = snapshot?.page ?? null;
     // #4352 remediation: a `visibility: private` page reads as missing for
     // untrusted callers (same resolveExcludePrivatePages gate as get_page —
     // fetch is remote-facing by design, every MCP transport). Cheap row
@@ -305,7 +272,7 @@ const fetch_page: Operation = {
       throw new OperationError('page_not_found', `Page not found: ${slug}`, 'Pass an id returned by a `search` call.');
     }
     bumpLastRetrievedAt(ctx.engine, [page.id]);
-    const tags = await ctx.engine.getTags(page.slug, { sourceId: page.source_id });
+    const tags = snapshot!.tags;
     // Same privacy boundary as get_page: untrusted readers (ctx.remote ===
     // true — every MCP transport) never see takes or private facts fences.
     const visibleBody = ctx.remote === false
@@ -319,6 +286,7 @@ const fetch_page: Operation = {
       // the contract's citation slot without inventing a fake web URL.
       url: `gbrain://page/${page.source_id}/${page.slug}`,
       metadata: {
+        revision: snapshot!.revision,
         type: page.type,
         source_id: page.source_id,
         updated_at: page.updated_at,
@@ -334,6 +302,7 @@ const put_page: Operation = {
   name: 'put_page',
   description: 'Write or replace a page (markdown with frontmatter). REPLACES the entire page; this is not a partial edit. Before modifying an existing page, read its canonical content with `get_page include_content:true`, then submit the complete page. Chunks, embeds, reconciles tags, and (when auto_link/auto_timeline are enabled) extracts + reconciles graph links and timeline entries. Remote (MCP) callers: body wikilinks are NOT reconciled into the graph — auto_link/auto_timeline are skipped for untrusted writers (response reports auto_links: {skipped: "remote"}); use local capture/put_page for link extraction. For large content on Windows (pipe-buffer limit ~45KB) or any file-as-input workflow, use `gbrain capture --file PATH --slug SLUG` — capture reads the file as a Buffer with a binary-NUL guard and adds provenance write-through (v0.39.3.0).',
   params: {
+    ...PAGE_MUTATION_PARAMS,
     slug: { type: 'string', required: true, description: 'Page slug' },
     content: { type: 'string', required: true, description: 'Complete markdown content with YAML frontmatter. REPLACES the entire page; this is not a partial edit. Read the canonical page first with `get_page include_content:true` before modifying it.' },
     allow_empty: { type: 'boolean', required: false, description: 'Allow overwriting an existing non-empty page with empty/whitespace-only content (default: false). Without it, put_page rejects the empty overwrite — the empty-stdin failure class.' },
@@ -350,489 +319,15 @@ const put_page: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
-    const slug = p.slug as string;
-    validatePageSlug(slug);
-
-    // v0.39.3.0 CV6 trust gate for provenance write-through (WARN-8).
-    // Only trusted LOCAL callers (ctx.remote === false — capture CLI,
-    // autopilot, dream cycle, file watcher) may populate source_kind /
-    // source_uri / ingested_via from their own state. Anything else
-    // (HTTP MCP, stdio MCP, subagent) gets the server-stamped
-    // `mcp:put_page` regardless of what was passed.
-    //
-    // Closes the spoofing surface CV6 identified: pre-fix a write-scope
-    // OAuth token could send `source_kind: 'capture-cli'` to poison the
-    // audit trail. Fail-closed: `ctx.remote === false` is the ONLY truthy
-    // condition that admits client-supplied provenance.
-    let provenanceKind: string | null;
-    let provenanceUri: string | null;
-    let provenanceVia: string | null;
-    if (ctx.remote === false) {
-      // Trusted local caller: honor the client params (may be null/undefined
-      // for legacy local callers that don't set them).
-      provenanceKind = (p.source_kind as string | undefined) ?? null;
-      provenanceUri = (p.source_uri as string | undefined) ?? null;
-      provenanceVia = (p.ingested_via as string | undefined) ?? null;
-    } else {
-      // Remote caller or unset trust: server stamps. Mirrors the existing
-      // write-through stamping at the file-side (~:637).
-      provenanceKind = 'mcp:put_page';
-      provenanceUri = null;
-      provenanceVia = 'mcp:put_page';
-    }
-
-    // Subagent namespace enforcement (v0.15+). Runs BEFORE the dry-run
-    // short-circuit so preview calls surface the same rejection. See
-    // enforceSubagentSlugFence for the fail-closed policy.
-    enforceSubagentSlugFence(ctx, slug, 'put_page');
-    enforceClientSlugFence(ctx, slug, 'put_page');
-    if (ctx.viaSubagent === true && ctx.auth) await requireWritablePage(ctx, slug.toLowerCase(), 'put_page', 'page', true);
-
-    if (ctx.dryRun) return { dry_run: true, action: 'put_page', slug: p.slug };
-
-    // Empty-overwrite guard: empty/whitespace-only content over an existing
-    // non-empty page is almost always an input-plumbing failure (e.g. a
-    // caller that meant file input — put has no --file flag — so the missing
-    // --content fell back to reading an empty non-interactive stdin), not an
-    // intentional write. Refuse loudly unless the caller opts in with
-    // allow_empty. The read is scoped to the exact (source_id, slug) row the
-    // write below targets (engine.putPage defaults to 'default' when
-    // sourceId is unset). New-slug creates and soft-deleted-page overwrites
-    // stay allowed — nothing recoverable is lost there.
-    if ((p.content as string).trim() === '' && p.allow_empty !== true) {
-      const existing = await ctx.engine.getPage(slug, { sourceId: ctx.sourceId ?? 'default' });
-      const existingBody = existing
-        ? `${existing.compiled_truth ?? ''}\n${existing.timeline ?? ''}`.trim()
-        : '';
-      if (existingBody !== '') {
-        throw new OperationError(
-          'invalid_params',
-          `Refusing to overwrite existing non-empty page '${slug}' with empty content.`,
-          'For file input use `gbrain capture --file PATH --slug SLUG` (put has no --file flag). To intentionally blank the page, pass allow_empty: true (CLI: --allow-empty).',
-        );
+    if (ctx.dryRun) {
+      if (typeof p.slug === 'string') {
+        validatePageSlug(p.slug);
+        enforceClientSlugFence(ctx, p.slug, 'put_page');
+        enforceSubagentSlugFence(ctx, p.slug, 'put_page');
       }
+      return { dry_run: true, action: 'put_page', slug: p.slug };
     }
-
-    // Skip embedding when the AI gateway has no embedding provider configured.
-    // Checks all auth env vars for the resolved provider, not just OPENAI_API_KEY,
-    // so Gemini / Ollama / Voyage brains don't silently drop embeddings (Codex C2).
-    // #4216: ctx.deferEmbeds (server-side-only context field, set by the
-    // oneshot runner) also defers — chunks land `embedding IS NULL` and the
-    // standing embed machinery backfills them outside the model loop.
-    const { isAvailable } = await import('../ai/gateway.ts');
-    const noEmbed = ctx.deferEmbeds === true || !isAvailable('embedding');
-    // v0.31.8 (D7 / codex OV-1): thread ctx.sourceId so put_page on a
-    // multi-source brain lands in the intended source instead of the
-    // default-source clobber path. importFromContent already accepts
-    // opts.sourceId (PR #707/#757 engine work); previously the op handler
-    // just didn't pass it.
-    // v0.39 T1.5: load active pack ONCE per put_page invocation; thread to
-    // parseMarkdown via importFromContent so type inference honors user-defined
-    // page_types. Best-effort: pack load failure falls back to legacy inferType
-    // (parity gate preserved). Federated-read closure correction is T19's scope.
-    let activePack: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string> }> } | undefined;
-    try {
-      const { loadActivePack } = await import('../schema-pack/load-active.ts');
-      const { loadConfig } = await import('../config.ts');
-      const resolved = await loadActivePack({
-        cfg: loadConfig(),
-        remote: ctx.remote === false ? false : true,
-        sourceId: ctx.sourceId,
-      });
-      activePack = { page_types: resolved.manifest.page_types };
-    } catch {
-      // Pack load failed; fall through to legacy inferType behavior.
-      activePack = undefined;
-    }
-    const result = await importFromContent(ctx.engine, slug, p.content as string, {
-      noEmbed,
-      // v0.42 (#1699): untrusted callers can't smuggle gate-owned frontmatter
-      // markers (quarantine/content_flag/embed_skip). Fail-closed — anything
-      // not strictly local is remote (matches CV6 / v0.26.9 F7b posture).
-      remote: ctx.remote !== false,
-      ...(ctx.sourceId ? { sourceId: ctx.sourceId } : {}),
-      // v0.39.0.0 T1.5: pack-aware type inference (loaded above; legacy
-      // inferType behavior when undefined).
-      ...(activePack ? { activePack } : {}),
-      // v0.39.3.0 provenance write-through (WARN-8). Trust-filtered values
-      // computed above; ingested_at is server-stamped at the engine layer.
-      // Null-valued fields signal "no provenance write this call" and the
-      // engine's COALESCE-preserve UPDATE keeps the prior first-write
-      // record intact (CV12 audit-trail survival).
-      source_kind: provenanceKind,
-      source_uri: provenanceUri,
-      ingested_via: provenanceVia,
-      // Only an EXPLICIT allow_empty reaches the engine's empty-overwrite
-      // escape hatch; the default put_page path stays guarded end-to-end
-      // (including frontmatter-only content the raw-content check above
-      // can't see — the parsed body is blank even though content isn't).
-      ...(p.allow_empty === true ? { allowEmptyOverwrite: true } : {}),
-    });
-
-    // The dedup pre-check in importFromContent can resolve the write to a
-    // DIFFERENT page than the one requested (same content_hash, or the same
-    // `frontmatter.id`), and the disk write-through below runs against that
-    // RESOLVED slug. Fence it too: a bound client can read a victim page's
-    // frontmatter id over its federated grant, echo it back in an in-prefix
-    // put_page, and otherwise have write-through rewrite the victim's file
-    // with falsified provenance. Dedup returns status 'skipped' without
-    // touching the DB, so throwing here leaves nothing to roll back.
-    if (result.slug && result.slug !== slug) {
-      // Deliberately does NOT name the resolved slug: it belongs to a page
-      // outside the fence, and echoing it would turn frontmatter-id guessing
-      // into a slug-enumeration oracle.
-      if (slugOutsideCallerFence(ctx, result.slug)) {
-        ctx.logger.warn(`[put_page] dedup resolved '${slug}' to an out-of-fence page; refusing (client ${ctx.auth?.clientId ?? 'unknown'}, subagent ${ctx.subagentId ?? 'none'})`);
-        throw new OperationError(
-          'permission_denied',
-          `put_page: this content already exists on a page outside your write scope, so the write would have modified that page instead.`,
-          'Remove the `id:` frontmatter field (or change the content) to write a new page under your own prefix.',
-        );
-      }
-      if (ctx.viaSubagent === true && ctx.auth) await requireWritablePage(ctx, result.slug, 'put_page', 'page');
-    }
-
-    // v0.39 T13 — auto-prompt on first unknown-type write.
-    //
-    // Contract (codex finding #8 honored — 7 cases covered):
-    //   - TTY callers: stderr prompt fires once per unique unknown type;
-    //     subsequent writes with the same type silently append to
-    //     candidate audit.
-    //   - Non-TTY callers: ALWAYS succeed; silently append to candidate
-    //     audit. NEVER block. Critical regression test:
-    //     test/put-page-unknown-type-prompt.test.ts pins this.
-    //   - Subagent / MCP / claw-test / autopilot all go through here;
-    //     non-TTY contract preserves their semantics.
-    //   - Pack-load failures (activePack undefined) skip the gate entirely
-    //     since "unknown" has no meaning without a pack reference.
-    if (activePack && result.status === 'imported') {
-      try {
-        const pageType = (result as { page?: { type?: string } }).page?.type ?? null;
-        const knownTypes = new Set(activePack.page_types.map((t) => t.name));
-        if (pageType && !knownTypes.has(pageType)) {
-          const { logSchemaEvent } = await import('../schema-events.ts');
-          logSchemaEvent({
-            verb: 'put_page:unknown_type',
-            outcome: 'success',
-            flags: [`type=${pageType.slice(0, 32)}`, `slug=${slug.slice(0, 64)}`],
-          });
-          if (process.stderr.isTTY && ctx.remote === false) {
-            console.error(
-              `[schema] put_page wrote type=\`${pageType}\` which isn't in active pack \`${activePack.page_types.length ? '<configured>' : 'gbrain-base'}\`. ` +
-              `Run \`gbrain schema review-candidates\` to promote or ignore.`,
-            );
-          }
-        }
-      } catch {
-        // best-effort; never block put_page
-      }
-    }
-
-    // v0.38 put_page write-through (ingestion cathedral):
-    // After importFromContent succeeds, if `sync.repo_path` resolves to a
-    // real directory, persist the markdown file to disk alongside the DB
-    // row. A failure here is fatal to the call (see the check right below)
-    // except for the deliberate DB-only configurations.
-    //
-    // Trust gating:
-    //   - Subagent sandbox (viaSubagent without allowedSlugPrefixes) → DB-only.
-    //   - All other writes → write-through.
-    // put_page's own trust-gating produces two skip reasons ('subagent_sandbox',
-    // 'dry_run') that never come out of writePageThrough itself — widen the
-    // field rather than losing the commit/pushed/lastPushStatus typing.
-    let writeThrough: (Omit<WriteThroughResult, 'skipped'> & { skipped?: WriteThroughResult['skipped'] | 'subagent_sandbox' | 'dry_run' }) | undefined;
-    const isSandboxSubagent = ctx.viaSubagent === true
-      && !(Array.isArray(ctx.allowedSlugPrefixes) && ctx.allowedSlugPrefixes.length > 0);
-    if (!ctx.dryRun && result.status !== 'error' && !isSandboxSubagent) {
-      const sourceId = ctx.sourceId ?? 'default';
-      const provenanceVia = ctx.remote === false ? 'put_page' : 'mcp:put_page';
-      // Shared canonical write-through (also used by `gbrain brainstorm/lsd
-      // --save`). Renders the file from the saved DB row and writes it
-      // atomically; never throws (failures land in skipped/error).
-      writeThrough = await writePageThrough(ctx.engine, result.slug, {
-        sourceId,
-        frontmatterOverrides: {
-          ingested_via: provenanceVia,
-          ingested_at: new Date().toISOString(),
-          source_kind: provenanceVia,
-        },
-        logger: ctx.logger,
-      });
-    } else if (isSandboxSubagent) {
-      writeThrough = { written: false, skipped: 'subagent_sandbox' };
-    } else if (ctx.dryRun) {
-      writeThrough = { written: false, skipped: 'dry_run' };
-    }
-
-    // The markdown file is the system of record (docs/architecture/
-    // system-of-record.md); the DB row is a derived cache. The deliberate,
-    // by-design DB-only outcomes are `no_repo_configured` (no `sync.repo_path`
-    // set at all), `disabled_by_config` (operator opted out via
-    // `sync.write_through=false`), `subagent_sandbox`, and `dry_run` (no real
-    // write was supposed to happen). Every other non-written outcome — a
-    // thrown write error, or a guard that REFUSED to write into an existing
-    // repo (missing dir, sibling-source collision, escaped path, case-fold
-    // clash, unreadable row) — means a file was supposed to exist and
-    // doesn't, so put_page must not report success.
-    if (writeThrough && !writeThrough.written
-      && writeThrough.skipped !== 'no_repo_configured'
-      && writeThrough.skipped !== 'disabled_by_config'
-      && writeThrough.skipped !== 'subagent_sandbox'
-      && writeThrough.skipped !== 'dry_run') {
-      // Roll back rather than leave an index-only orphan, but only when this
-      // call is what created the row: created_at === updated_at is set by
-      // the SAME insert statement (the ON CONFLICT UPDATE branch never
-      // touches created_at), so equality here means "brand new, this call."
-      // An update (or a dedup hit resolved to a pre-existing page) is left
-      // alone — the prior file on disk still matches the prior DB content.
-      try {
-        const row = await ctx.engine.getPage(result.slug, { sourceId: ctx.sourceId ?? 'default' });
-        if (row && row.created_at.getTime() === row.updated_at.getTime()) {
-          await ctx.engine.deletePage(result.slug, { sourceId: ctx.sourceId ?? 'default' });
-        }
-      } catch {
-        // best-effort; the error thrown below still surfaces the failure
-      }
-      throw new OperationError(
-        'storage_error',
-        `put_page: the page content could not be written to disk (${writeThrough.skipped ?? writeThrough.error}).`,
-        'Check that the configured repo path exists and is writable, then retry.',
-      );
-    }
-
-    // Auto-link post-hook: runs AFTER importFromContent (which is its own
-    // transaction). Runs even on status='skipped' so reconciliation catches drift
-    // between the page text and the links table. Failures are non-blocking.
-    //
-    // SECURITY: skipped for remote (MCP) callers. Auto-link's bare-slug regex
-    // matches `people/X` etc. anywhere in page text, including code fences,
-    // quoted strings, and prompt-injected content. An untrusted page can plant
-    // arbitrary outbound links by including `see meetings/board-q1` in its body.
-    // Combined with the backlink boost in hybridSearch, attacker-placed targets
-    // would surface higher in search. Local CLI users (ctx.remote=false) opt
-    // into this behavior; MCP/remote writes do not.
-    let autoLinks:
-      | { created: number; removed: number; errors: number; unresolved: UnresolvedFrontmatterRef[] }
-      | { error: string }
-      | { skipped: 'remote'; hint?: string }
-      | undefined;
-    let autoTimeline: { created: number } | { error: string } | { skipped: 'remote'; hint?: string } | undefined;
-    // Trusted-workspace path (v0.23 dream cycle) re-enables auto-link/timeline
-    // even though ctx.remote=true, because the allow-list bounds the slug and
-    // the synthesis prompt is itself the trusted dispatcher. Without this,
-    // the cycle's `extract` phase would have to recompute every edge, and
-    // patterns (which runs after extract) would still see the right graph
-    // but auto_timeline would never fire on synth output.
-    const trustedWorkspace = ctx.viaSubagent === true
-      && ctx.auth === undefined
-      && Array.isArray(ctx.allowedSlugPrefixes)
-      && ctx.allowedSlugPrefixes.length > 0;
-    if (ctx.remote !== false && !trustedWorkspace) {
-      // #4525: say WHY and what to do about it — pre-fix the bare
-      // {skipped: 'remote'} left agents believing their body wikilinks had
-      // been reconciled into the graph.
-      const hint = 'auto_link/auto_timeline run for trusted local writers only; '
-        + 'body wikilinks were saved as text but NOT reconciled into the graph. '
-        + 'Use local `gbrain capture`/`gbrain call put_page` for link extraction.';
-      autoLinks = { skipped: 'remote', hint };
-      autoTimeline = { skipped: 'remote', hint };
-    } else if (result.parsedPage) {
-      try {
-        const enabled = await isAutoLinkEnabled(ctx.engine);
-        if (enabled) {
-          // ctx.sourceId is REQUIRED on OperationContext (v0.34 D4) — always
-          // pass it so the reconciliation reads/writes AND the advisory lock
-          // key stay scoped to the source this put_page targets.
-          autoLinks = await runAutoLink(ctx.engine, slug, result.parsedPage, { sourceId: ctx.sourceId });
-        }
-      } catch (e) {
-        autoLinks = { error: e instanceof Error ? e.message : String(e) };
-      }
-      // Timeline extraction mirrors auto-link: runs post-write, best-effort,
-      // never blocks the write. ON CONFLICT DO NOTHING in
-      // addTimelineEntriesBatch keeps it idempotent across re-writes, so a
-      // page that's edited and re-written won't duplicate its own timeline.
-      try {
-        const enabled = await isAutoTimelineEnabled(ctx.engine);
-        if (enabled) {
-          const fullContent = result.parsedPage.compiled_truth + '\n' + result.parsedPage.timeline;
-          const entries = parseTimelineEntries(fullContent);
-          if (entries.length > 0) {
-            // #3957: thread source_id — the batch JOIN maps a missing
-            // source_id to 'default', so a put_page against a named source
-            // silently dropped every timeline row (or attached them to a
-            // same-slug page in 'default'). Also carry the parsed source
-            // label so the row shape matches the FS/db extract paths and
-            // the (page_id, date, summary, source) dedup collapses
-            // re-extractions of the same bullet.
-            const batch = entries.map(e => ({
-              slug,
-              date: e.date,
-              source: e.source,
-              summary: e.summary,
-              detail: e.detail || '',
-              ...(ctx.sourceId ? { source_id: ctx.sourceId } : {}),
-            }));
-            // v0.41.18.0: engine self-retries on Supavisor circuit-breaker
-            // recovery. auditSite label routes the audit JSONL emission so
-            // operators can attribute losses to the agent-write path.
-            const created = await ctx.engine.addTimelineEntriesBatch(batch, { auditSite: 'mcp.put_page.autolink' });
-            autoTimeline = { created };
-          } else {
-            autoTimeline = { created: 0 };
-          }
-        }
-      } catch (e) {
-        autoTimeline = { error: e instanceof Error ? e.message : String(e) };
-      }
-    }
-
-    // v0.31 (D23): facts compliance backstop. When an agent writes a page
-    // on a conversation-shape slug AND the body has substantive prose, fire
-    // a fact-extraction job into the bounded queue. Skipped on dry-run,
-    // dream-generated content (anti-loop), and non-eligible kinds (sync,
-    // ingest, file uploads, code pages). Never blocks the put_page response.
-    // v0.31.2: routed through runFactsBackstop (PR1 commit 6) so put_page
-    // and sync share the same eligibility/extract/dedup/insert pipeline.
-    // Queue mode preserves the prior fire-and-forget shape (caller's
-    // put_page response stays fast). Default 'all' notability filter
-    // (MEDIUM facts wait for the dream cycle but DO land via put_page,
-    // matching the pre-fix behavior on this surface).
-    let factsQueued: { queued: boolean } | { skipped: string } | undefined;
-    // Slug-bound clients do not get the facts backstop. It extracts entities
-    // from the (attacker-controllable) page body and writes fact rows — and,
-    // on a source with a local_path, a `## Facts` fence in the entity's own
-    // .md — keyed to `people/…` / `companies/…` slugs the caller never named.
-    // That is exactly the capability `extract_facts` is denied at dispatch
-    // for, reachable indirectly through a perfectly in-prefix put_page. The
-    // sibling post-hooks above already skip for untrusted callers (auto-link
-    // at `remote !== false && !trustedWorkspace`, chronicle at
-    // `remote !== false`); this one had no gate at all.
-    // Keyed on "the caller is slug-confined at all", not on ctx.auth alone:
-    // the delegated (submit_agent → subagent) context carries
-    // `allowedSlugPrefixes` but NOT `auth`, so an auth-only test would let a
-    // bound client re-open this path simply by delegating the write.
-    if (ctx.auth?.boundSlugPrefixes || ctx.viaSubagent === true) {
-      factsQueued = { skipped: 'slug_bound_client' };
-    } else {
-    try {
-      const { runFactsBackstop } = await import('../facts/backstop.ts');
-      const r = await runFactsBackstop(
-        {
-          slug,
-          type: result.parsedPage!.type,
-          compiled_truth: result.parsedPage!.compiled_truth,
-          frontmatter: result.parsedPage!.frontmatter,
-        },
-        {
-          engine: ctx.engine,
-          sourceId: ctx.sourceId ?? 'default',
-          sessionId: (ctx as { source_session?: string }).source_session ?? null,
-          source: 'mcp:put_page',
-          mode: 'queue',
-        },
-      );
-      if (r.mode === 'queue' && r.enqueued) {
-        factsQueued = { queued: true };
-      } else if (r.mode === 'queue' && r.skipped) {
-        // Preserve the pre-v0.31.2 response shape for MCP clients:
-        // 'kind:guide' / 'too_short' / 'subagent_namespace' / 'dream_generated'
-        // (bare reasons), not the helper's namespaced 'eligibility_failed:...'
-        // discriminator. Map back here.
-        const bare = r.skipped.startsWith('eligibility_failed:')
-          ? r.skipped.slice('eligibility_failed:'.length)
-          : r.skipped;
-        factsQueued = { skipped: bare };
-      }
-    } catch {
-      factsQueued = { skipped: 'backstop_error' };
-    }
-    }
-
-    // v0.42.x (#2390): Life Chronicle backstop. ONLY on a real import
-    // (status==='imported' — a skipped/unchanged rewrite still carries
-    // parsedPage, so gating on parsedPage alone would re-enqueue forever),
-    // behind the SAME trust gate as auto-link/timeline + the auto_chronicle
-    // flag. Enqueues a chronicle_extract job; never blocks the write.
-    let chronicleQueued: { queued: boolean } | { skipped: string } | undefined;
-    if (result.status !== 'imported') {
-      chronicleQueued = { skipped: 'not_imported' };
-    } else if (ctx.remote !== false && !trustedWorkspace) {
-      chronicleQueued = { skipped: 'remote' };
-    } else if (result.parsedPage) {
-      try {
-        const { runChronicleBackstop } = await import('../chronicle/backstop.ts');
-        const r = await runChronicleBackstop(
-          {
-            slug,
-            type: result.parsedPage.type,
-            compiled_truth: result.parsedPage.compiled_truth,
-            frontmatter: result.parsedPage.frontmatter,
-          },
-          { engine: ctx.engine, sourceId: ctx.sourceId ?? 'default' },
-        );
-        chronicleQueued = r.enqueued ? { queued: true } : { skipped: r.skipped ?? 'skipped' };
-      } catch {
-        chronicleQueued = { skipped: 'backstop_error' };
-      }
-    }
-
-    // Post-write validator lint (PR 2.5): feature-flag-gated, non-blocking.
-    // When `writer.lint_on_put_page` is enabled, runs the BrainWriter's
-    // validators on the freshly-written page and logs findings to
-    // ingest_log + ~/.gbrain/validator-lint.jsonl. Does NOT reject the
-    // write — that's the deferred strict-mode flip after the 7-day soak.
-    // Response contract (T11): lint ran → full summary (counts, errors-first
-    // top_findings with hints, by_validator histogram) even at zero findings;
-    // lint crashed → {status: 'lint_error'}; lint off (flag / validate:false)
-    // → key absent.
-    let writerLint: WriterLintPayload | undefined;
-    try {
-      const { writerLintForPutPage } = await import('../output/post-write.ts');
-      writerLint = await writerLintForPutPage(ctx.engine, result.slug, {
-        sourceId: ctx.sourceId ?? 'default',
-      });
-    } catch {
-      // Module-load failure gets the same crash marker; never blocks put_page.
-      writerLint = { status: 'lint_error' };
-    }
-
-    // #2822: a 0-chunk put looks like success but the page is unsearchable —
-    // say WHY instead of leaving the caller to discover it at query time.
-    let chunkSkipReason: string | undefined;
-    if (result.chunks === 0) {
-      if (result.status === 'skipped') {
-        chunkSkipReason = 'write_skipped'; // dedup / unchanged content — prior chunks stand
-      } else if (result.parsedPage) {
-        const { isQuarantined } = await import('../quarantine.ts');
-        const { isEmbedSkipped } = await import('../embed-skip.ts');
-        const fm = result.parsedPage.frontmatter as Record<string, unknown> | undefined;
-        const bodyBlank = `${result.parsedPage.compiled_truth ?? ''}${result.parsedPage.timeline ?? ''}`.trim() === '';
-        chunkSkipReason = isQuarantined(fm) ? 'quarantined'
-          : isEmbedSkipped(fm) ? 'embed_skip'
-          : bodyBlank ? 'empty_body'
-          : 'unknown';
-      }
-    }
-
-    return {
-      slug: result.slug,
-      status: result.status === 'imported' ? 'created_or_updated' : result.status,
-      chunks: result.chunks,
-      // #3984: a skipped/error status without the reason is a silent no-op to
-      // MCP callers (e.g. the >5MB size guard returned bare status 'skipped'
-      // and the agent had no idea why the page never appeared). Thread
-      // importFromContent's error text through. capture delegates here, so
-      // it inherits the reason too.
-      ...(result.error ? { error: result.error } : {}),
-      ...(chunkSkipReason ? { chunk_skip_reason: chunkSkipReason } : {}),
-      ...(autoLinks ? { auto_links: autoLinks } : {}),
-      ...(autoTimeline ? { auto_timeline: autoTimeline } : {}),
-      ...(writerLint ? { writer_lint: writerLint } : {}),
-      ...(factsQueued ? { facts_backstop: factsQueued } : {}),
-      ...(chronicleQueued ? { chronicle_backstop: chronicleQueued } : {}),
-      ...(writeThrough ? { write_through: writeThrough } : {}),
-    };
+    return submitPageMutation(ctx, { operation: 'put_page', params: p });
   },
   cliHints: { name: 'put', positional: ['slug'], stdin: 'content' },
 };
@@ -1106,62 +601,22 @@ const delete_page: Operation = {
   name: 'delete_page',
   description: 'Soft-delete a page. The row is hidden from search and from get_page/list_pages, but is recoverable via restore_page within 72h. The autopilot purge phase hard-deletes after the recovery window. Pass include_deleted: true to get_page to verify the soft-delete landed.',
   params: {
+    ...PAGE_MUTATION_PARAMS,
     slug: { type: 'string', required: true, description: "Slug of the page to soft-delete, e.g. 'people/alice-example'." },
     source_id: { type: 'string', description: "#4329: source holding the row to soft-delete (a multi-source brain can hold the same slug in several sources). Defaults to ctx.sourceId. Remote callers may only target their write source — federated read grants do not confer delete access." },
   },
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
-    const slug = p.slug as string;
-    enforceClientSlugFence(ctx, slug, 'delete_page');
-    // #4329: honor a per-call source_id (pre-fix it was silently dropped and
-    // the delete landed on ctx.sourceId's row — the wrong-source soft-delete).
-    const requestedSource = parseSourceIdParam(p.source_id, 'delete_page');
-    if (requestedSource !== undefined) assertSourceInWriteGrant(ctx, requestedSource);
-    if (ctx.dryRun) return { dry_run: true, action: 'soft_delete_page', slug };
-    // v0.31.8 (D7): thread ctx.sourceId so multi-source brains soft-delete the
-    // intended row instead of always targeting (default, slug).
-    const sourceOpts = requestedSource
-      ? { sourceId: requestedSource }
-      : ctx.sourceId ? { sourceId: ctx.sourceId } : {};
-    // #4022 trust gating: sandbox subagents (viaSubagent without
-    // allowedSlugPrefixes) stay DB-only, matching put_page's write-through gate.
-    const isSandboxSubagent = ctx.viaSubagent === true
-      && !(Array.isArray(ctx.allowedSlugPrefixes) && ctx.allowedSlugPrefixes.length > 0);
-    // #4022: resolve the artifact target BEFORE softDeletePage stamps
-    // deleted_at — resolvePageWriteTarget reads the recorded source_path from
-    // active rows only, so a post-stamp resolution would fall back to the
-    // slug-derived twin and miss the real artifact.
-    const wtSourceId = sourceOpts.sourceId ?? 'default';
-    const target = isSandboxSubagent
-      ? undefined
-      : await resolvePageWriteTarget(ctx.engine, slug, wtSourceId);
-    // v0.26.5: rewired from hard-delete to soft-delete. The hard-delete primitive
-    // (engine.deletePage) is now reserved for purgeDeletedPages and explicit
-    // tests. softDeletePage returns null when the slug is unknown OR already
-    // soft-deleted (idempotent-as-null) — preserve that as a clean no-op shape.
-    const result = await ctx.engine.softDeletePage(slug, sourceOpts);
-    if (result === null) {
-      // Distinguish "not found" from "already soft-deleted" so the agent gets a
-      // clear signal. Probe once with include_deleted to disambiguate.
-      const existing = await ctx.engine.getPage(slug, { includeDeleted: true, ...sourceOpts });
-      if (!existing) {
-        throw new OperationError('page_not_found', `Page not found: ${slug}`, 'Check the slug (and source_id on a multi-source brain).');
+    if (ctx.dryRun) {
+      if (typeof p.slug === 'string') {
+        validatePageSlug(p.slug);
+        enforceClientSlugFence(ctx, p.slug, 'delete_page');
+        enforceSubagentSlugFence(ctx, p.slug, 'delete_page');
       }
-      return { status: 'already_soft_deleted', slug, ...(sourceOpts.sourceId ? { source_id: sourceOpts.sourceId } : {}), deleted_at: existing.deleted_at };
+      return { dry_run: true, action: 'delete_page', slug: p.slug };
     }
-    // #4022: remove the on-disk artifact too. Pre-fix this was DB-only, so the
-    // deleted page's `.md` survived, any timer-based commit (snapshot cron,
-    // hardened post-commit push) pushed it back into git, and the next
-    // `gbrain sync` resurrected the page. Best-effort like put_page's
-    // write-through: a skip/error never fails the delete (the DB row is the
-    // durable sink and the stale file reconciles on the next sync).
-    const writeThrough = isSandboxSubagent
-      ? { removed: false, skipped: 'subagent_sandbox' as const }
-      : await deletePageThrough(ctx.engine, slug, { sourceId: wtSourceId, logger: ctx.logger, target });
-    // Echo the targeted source so a multi-source caller can verify WHICH row
-    // the delete landed on (#4329's false-confidence failure mode).
-    return { status: 'soft_deleted', slug, ...(sourceOpts.sourceId ? { source_id: sourceOpts.sourceId } : {}), recoverable_until: 'now + 72h via restore_page', write_through: writeThrough };
+    return submitPageMutation(ctx, { operation: 'delete_page', params: p });
   },
   cliHints: { name: 'delete', positional: ['slug'] },
 };
@@ -1170,43 +625,22 @@ const restore_page: Operation = {
   name: 'restore_page',
   description: 'v0.26.5 — restore a soft-deleted page (clear deleted_at). Returns success only if the page was actually soft-deleted. After this op, the page reappears in search and in get_page/list_pages without the include_deleted flag.',
   params: {
+    ...PAGE_MUTATION_PARAMS,
     slug: { type: 'string', required: true, description: "Slug of the soft-deleted page to restore, e.g. 'people/alice-example'." },
     source_id: { type: 'string', description: "#4329: source holding the row to restore (a multi-source brain can hold the same slug in several sources). Defaults to ctx.sourceId. Remote callers may only target their write source — federated read grants do not confer restore access." },
   },
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
-    const slug = p.slug as string;
-    enforceClientSlugFence(ctx, slug, 'restore_page');
-    // #4329: honor a per-call source_id (pre-fix it was silently dropped).
-    const requestedSource = parseSourceIdParam(p.source_id, 'restore_page');
-    if (requestedSource !== undefined) assertSourceInWriteGrant(ctx, requestedSource);
-    if (ctx.dryRun) return { dry_run: true, action: 'restore_page', slug };
-    // v0.31.8 (D7): thread ctx.sourceId.
-    const sourceOpts = requestedSource
-      ? { sourceId: requestedSource }
-      : ctx.sourceId ? { sourceId: ctx.sourceId } : {};
-    const ok = await ctx.engine.restorePage(slug, sourceOpts);
-    if (!ok) {
-      // Distinguish "not found" from "already active" (idempotent-as-false).
-      const existing = await ctx.engine.getPage(slug, { includeDeleted: true, ...sourceOpts });
-      if (!existing) {
-        throw new OperationError('page_not_found', `Page not found: ${slug}`, 'Check the slug (and source_id on a multi-source brain).');
+    if (ctx.dryRun) {
+      if (typeof p.slug === 'string') {
+        validatePageSlug(p.slug);
+        enforceClientSlugFence(ctx, p.slug, 'restore_page');
+        enforceSubagentSlugFence(ctx, p.slug, 'restore_page');
       }
-      return { status: 'already_active', slug, ...(sourceOpts.sourceId ? { source_id: sourceOpts.sourceId } : {}) };
+      return { dry_run: true, action: 'restore_page', slug: p.slug };
     }
-    // #4022: re-render the artifact — delete_page now removes it, so without
-    // this a restored page has a DB row and no file, and `sync --full`'s
-    // delete-reconcile treats the missing artifact as a user deletion,
-    // silently re-deleting the page that was just restored. Keeps the two
-    // sinks symmetric across the delete/restore pair; sandbox subagents stay
-    // DB-only, matching put_page's trust gate.
-    const isSandboxSubagent = ctx.viaSubagent === true
-      && !(Array.isArray(ctx.allowedSlugPrefixes) && ctx.allowedSlugPrefixes.length > 0);
-    const writeThrough = isSandboxSubagent
-      ? { written: false, skipped: 'subagent_sandbox' as const }
-      : await writePageThrough(ctx.engine, slug, { sourceId: sourceOpts.sourceId, logger: ctx.logger });
-    return { status: 'restored', slug, ...(sourceOpts.sourceId ? { source_id: sourceOpts.sourceId } : {}), write_through: writeThrough };
+    return submitPageMutation(ctx, { operation: 'restore_page', params: p });
   },
   cliHints: { name: 'restore', positional: ['slug'] },
 };
@@ -1387,6 +821,7 @@ const capture: Operation = {
   name: 'capture',
   description: CAPTURE_DESCRIPTION,
   params: {
+    ...PAGE_MUTATION_PARAMS,
     content: { type: 'string', required: true, description: 'Markdown or plain text to capture. File paths are NOT accepted over MCP — read the file yourself and pass its content (the CLI --file lane is local-only).' },
     slug: { type: 'string', required: false, description: "Target slug. Default: inbox/YYYY-MM-DD-<sha8-of-content> (stable per content — recapturing identical text hits the same slug); type diary/event routes under life/. Fenced clients: the default lands under your first bound prefix." },
     type: { type: 'string', required: false, description: "Page type for the stamped frontmatter. Omitted: the content's frontmatter `type:` when present, else 'note'. An explicit type (this param or a frontmatter `type:`) must be declared by the active schema pack; undeclared types are rejected before writing, naming the declared vocabulary." },
@@ -1398,80 +833,15 @@ const capture: Operation = {
   // hidden hint per the advisor pattern.
   cliHints: { name: 'capture', hidden: true },
   handler: async (ctx, p) => {
-    const {
-      detectBinaryNullByte, normalizeForHash, mergeCaptureFrontmatter,
-      defaultSlug, explicitCaptureType,
-    } = await import('../capture-content.ts');
-    const { computeContentHash } = await import('../ingestion/types.ts');
-    const content = p.content as string;
-    const nulAt = detectBinaryNullByte(Buffer.from(content, 'utf8'));
-    if (nulAt !== -1) {
-      throw new OperationError('invalid_params',
-        `content contains a NUL byte at offset ${nulAt} — binary payloads are refused.`,
-        'Capture takes text/markdown; upload binaries through the files lane on the host.');
-    }
-    const normalized = normalizeForHash(content);
-    if (normalized.length === 0) {
-      throw new OperationError('invalid_params', 'Refusing to capture empty content.');
-    }
-    // #4655: fail-loud rejection of an EXPLICIT undeclared page type (the
-    // `type` param or a frontmatter `type:` in the content) BEFORE writing,
-    // naming the declared vocabulary so agents can self-correct. Best-effort:
-    // no resolvable pack → no check; the default-'note' path is never checked.
-    // The validated explicit type IS the effective type (else 'note') for both
-    // the default slug and the merge below — approved as X, stored as X.
-    const explicitType = explicitCaptureType(content, typeof p.type === 'string' && p.type.length > 0 ? p.type : undefined);
-    if (explicitType) {
-      const { loadActivePackForWriteVocabulary, packDeclaresPageType, undeclaredPageTypeMessage, undeclaredPageTypeSuggestion } =
-        await import('../schema-pack/write-vocabulary.ts');
-      const activePack = await loadActivePackForWriteVocabulary(ctx);
-      if (activePack && !packDeclaresPageType(activePack, explicitType)) {
-        throw new OperationError(
-          'invalid_params',
-          undeclaredPageTypeMessage(explicitType, activePack, 'capture'),
-          undeclaredPageTypeSuggestion(activePack),
-        );
+    if (ctx.dryRun) {
+      if (typeof p.slug === 'string') {
+        validatePageSlug(p.slug);
+        enforceClientSlugFence(ctx, p.slug, 'capture');
+        enforceSubagentSlugFence(ctx, p.slug, 'capture');
       }
+      return { dry_run: true, action: 'capture', slug: p.slug };
     }
-    const type = explicitType ?? 'note';
-    let slug = typeof p.slug === 'string' && p.slug.length > 0 ? p.slug : undefined;
-    if (slug) {
-      // Defense-in-depth on the caller-supplied slug (matches the takes ops);
-      // put_page validates again, but reject a malformed slug before we build
-      // provenance frontmatter around it.
-      validatePageSlug(slug);
-    } else {
-      slug = defaultSlug(normalized, new Date(), type);
-      // [EV7] A slug-bound client would 403 on the inbox/ default via the
-      // inherited slug fence — the zero-config path must work for exactly
-      // that audience, so the ENTIRE default slug (type prefix included —
-      // diary/event prefixes are two segments) nests under the FIRST bound
-      // prefix. Normalize a stored `<prefix>/*` glob (submit_agent binding
-      // grammar) to `<prefix>/` first so the nested slug never carries a
-      // literal `*` segment.
-      const bound = ctx.auth?.boundSlugPrefixes;
-      if (bound && bound.length > 0) {
-        const base = normalizeSlugPrefix(bound[0]);
-        const prefix = base.endsWith('/') ? base : `${base}/`;
-        slug = `${prefix}${slug}`;
-      }
-    }
-    // Remote MCP captures record `capture-mcp` provenance; local CLI callers
-    // (ctx.remote === false) keep the neutral 'capture-cli' default.
-    const capturedVia = ctx.remote !== false ? 'capture-mcp' : undefined;
-    const fullContent = mergeCaptureFrontmatter(content, { type, capturedVia });
-    if (ctx.dryRun) return { dry_run: true, action: 'capture', slug };
-    // Delegate with the SAME ctx (the runCapture local-path precedent) —
-    // put_page enforces the slug fence, validates the slug, dedupes, and
-    // server-stamps provenance for remote callers.
-    const result = await put_page.handler(ctx, { slug, content: fullContent }) as Record<string, unknown>;
-    return {
-      ...result,
-      slug,
-      channel: 'capture',
-      content_hash: computeContentHash(normalized),
-      dedupe: 'identical normalized content produces the same default slug and hash',
-    };
+    return submitPageMutation(ctx, { operation: 'capture', params: p });
   },
 };
 

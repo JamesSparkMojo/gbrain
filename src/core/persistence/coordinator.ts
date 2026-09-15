@@ -1,0 +1,194 @@
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, openSync, fsyncSync, closeSync } from 'node:fs';
+import { dirname } from 'node:path';
+import type { BrainEngine } from '../engine.ts';
+import { OperationError } from '../ops/contract.ts';
+import { atomicWriteFileSync } from '../atomic-write.ts';
+import { isWriteTargetContained } from '../path-confine.ts';
+import { sha256 } from './digest.ts';
+import { authorizeStoredRequest } from './authority.ts';
+import { localHostId } from './identity.ts';
+import { acquireWorktree, getWorktreeBinding, guardOwnership, type WorktreeBinding } from './ownership.ts';
+import { clearResolvedRecovery, completeWrite, getWriteRequestById, lockCounters, markRecovering, prepareRecovery, releaseUnpublishedClaim } from './journal.ts';
+import { isTerminal, principalKey, requestPrincipal, type RecoveryRecord, type WriteRequest } from './model.ts';
+import type { NativeLockHandle } from './native-lock.ts';
+import { withCoordinatedWrite } from './context.ts';
+
+export interface PreparedMutation {
+  observedRevision: string | null;
+  file?: { path: string; root: string; content: string | Uint8Array | null; expectedBeforeHash?: string | null };
+  noop?: boolean;
+  /** Must perform only transaction-composable database work. */
+  apply(tx: BrainEngine): Promise<Record<string, unknown>>;
+  validate?(tx: BrainEngine): Promise<void>;
+}
+export interface PublicationHooks {
+  boundary?(name: 'prepared' | 'before_publication' | 'after_publication' | 'before_commit' | 'after_commit', request: WriteRequest): Promise<void>;
+}
+function fileHash(path: string): string | null { return existsSync(path) ? sha256(readFileSync(path)) : null; }
+function flushDirectory(path: string): void {
+  let fd: number | undefined;
+  try { fd = openSync(dirname(path), 'r'); fsyncSync(fd); }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // Windows cannot open a directory through Node's file descriptor API.
+    // Its atomic replacement is handled by the platform filesystem primitive.
+    if (!(process.platform === 'win32' && ['EISDIR','EPERM','EINVAL','ENOTSUP'].includes(code ?? ''))) throw error;
+  } finally { if (fd !== undefined) closeSync(fd); }
+}
+function publishFile(file: NonNullable<PreparedMutation['file']>): void {
+  if (!isWriteTargetContained(file.path, file.root)) throw new OperationError('storage_error', 'Canonical file target escapes its source root.');
+  mkdirSync(dirname(file.path), { recursive: true });
+  if (!isWriteTargetContained(file.path, file.root)) throw new OperationError('storage_error', 'Canonical parent path changed during publication.');
+  if (file.content === null) {
+    try { unlinkSync(file.path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  } else atomicWriteFileSync(file.path, file.content, { durable: true });
+  flushDirectory(file.path);
+}
+function requestError(error: unknown): { code: string; message: string } {
+  if (error instanceof OperationError) return { code: error.code, message: error.message };
+  const code = (error as { code?: string })?.code;
+  if (code === 'revision_conflict') return { code, message: 'The page changed after the supplied revision was read.' };
+  return { code: 'storage_error', message: `Publication failed${code ? ` (${code})` : ''}. Inspect owner diagnostics.` };
+}
+function conflictCode(code: string): boolean { return ['revision_required','revision_conflict','source_changed','page_identity_changed'].includes(code); }
+export async function finishUnpublishedFailure(engine: BrainEngine, row: WriteRequest, error: unknown): Promise<WriteRequest> {
+  const failure = requestError(error);
+  return engine.transaction(tx => completeWrite(tx, row, conflictCode(failure.code) ? 'conflict' : 'failed', {}, failure));
+}
+
+/**
+ * prepare outside locks → durable recovery → file → DB+receipt commit.
+ * The root lock spans all file effects; the DB guards span authorization and
+ * publication. A rejected/ambiguous commit is recovered before releasing FIFO.
+ */
+export async function publishMutation(engine: BrainEngine, row: WriteRequest, prepared: PreparedMutation,
+  hostId = localHostId(), hooks: PublicationHooks = {}): Promise<WriteRequest> {
+  let lock: NativeLockHandle | null = null;
+  let binding: WorktreeBinding | null = null;
+  let recovery: RecoveryRecord | null = null;
+  let published = false;
+  let filesystemFailed = false;
+  try {
+    if (row.worktree_id) {
+      binding = await getWorktreeBinding(engine, row.source_id, hostId);
+      if (!binding || binding.owner_host_id !== hostId || !binding.local_path) {
+        await releaseUnpublishedClaim(engine, row, 'owner_unavailable');
+        return (await getWriteRequestById(engine, row.id))!;
+      }
+      lock = await acquireWorktree(binding);
+      if (!lock) {
+        await releaseUnpublishedClaim(engine, row, 'writer_busy');
+        return (await getWriteRequestById(engine, row.id))!;
+      }
+    }
+    if (prepared.file && !prepared.noop) {
+      if (!binding || !lock || !isWriteTargetContained(prepared.file.path, prepared.file.root)) throw new OperationError('storage_error', 'Filesystem publication requires a confined canonical owner.');
+      const before = existsSync(prepared.file.path) ? readFileSync(prepared.file.path) : null;
+      const record: RecoveryRecord = {
+        version: 1, path: prepared.file.path, root: prepared.file.root,
+        before: before?.toString('base64') ?? null, beforeHash: before ? sha256(before) : null,
+        afterHash: prepared.file.content === null ? null : sha256(prepared.file.content),
+        mode: before ? statSync(prepared.file.path).mode & 0o7777 : null,
+        ownerEpoch: String(binding.owner_epoch), attempt: row.execution_token!,
+      };
+      if (prepared.file.expectedBeforeHash !== undefined && record.beforeHash !== prepared.file.expectedBeforeHash) {
+        throw new OperationError('source_changed', 'The canonical file changed after preparation.');
+      }
+      const nextBytes = prepared.file.content === null ? 0 : typeof prepared.file.content === 'string'
+        ? Buffer.byteLength(prepared.file.content) : prepared.file.content.byteLength;
+      await prepareRecovery(engine, row, record, (before?.byteLength ?? 0) * 3 + nextBytes * 2 + 4096);
+      recovery = record;
+      await hooks.boundary?.('prepared', row);
+    }
+    const done = await engine.transaction(async tx => {
+      await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout','1s',true),set_config('statement_timeout','5s',true)");
+      const liveBinding = await guardOwnership(tx, row, hostId);
+      if (binding && String(liveBinding?.owner_epoch) !== String(binding.owner_epoch)) throw new OperationError('owner_unavailable', 'Owner epoch changed before publication.');
+      await authorizeStoredRequest(tx, row, true);
+      await lockCounters(tx, ['brain', principalKey(requestPrincipal(row)), ...(row.worktree_id ? [`worktree:${row.worktree_id}`] : [])]);
+      const [current] = await tx.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE id=$1::uuid FOR UPDATE', [row.id]);
+      if (!current || current.execution_token !== row.execution_token || current.state !== 'running') throw new OperationError('write_claim_lost', 'Execution claim changed before publication.');
+      await tx.lockPageKeys([{ sourceId: row.source_id, slug: row.slug }]);
+      const snapshot = await tx.readPageSnapshot(row.slug, { sourceId: row.source_id, includeDeleted: true });
+      if ((snapshot?.page.id ?? null) !== row.page_id) throw new OperationError('page_identity_changed', 'The accepted page was deleted or recreated.');
+      if ((snapshot?.revision ?? null) !== prepared.observedRevision) throw new OperationError('revision_conflict', 'The page changed during preparation.', 'Read its current revision and submit the updated intent with a new request_id.');
+      await prepared.validate?.(tx);
+      if (recovery && prepared.file) {
+        if (fileHash(recovery.path) !== recovery.beforeHash) throw new OperationError('source_changed', 'The canonical file changed during preparation.');
+        await tx.executeRaw('UPDATE persistence_requests SET publication_started=true WHERE id=$1::uuid', [row.id]);
+        await hooks.boundary?.('before_publication', row);
+        // Mark before the call: a rename followed by an fsync error still needs recovery.
+        published = true;
+        try { publishFile(prepared.file); } catch (error) { filesystemFailed = true; throw error; }
+        await hooks.boundary?.('after_publication', row);
+      }
+      const outcome = await withCoordinatedWrite(tx, [row.source_id], () => prepared.apply(tx));
+      const final = await tx.readPageSnapshot(row.slug, { sourceId: row.source_id, includeDeleted: true });
+      if (final) outcome.revision = final.revision;
+      outcome.persistence = { mode: prepared.file ? 'filesystem' : 'database', ...(prepared.file ? { file_written: !prepared.noop } : {}) };
+      outcome.write_through = prepared.file ? { written: !prepared.noop } : { written: false, skipped: 'no_repo_configured' };
+      await hooks.boundary?.('before_commit', row);
+      return completeWrite(tx, current, 'committed', outcome);
+    });
+    await hooks.boundary?.('after_commit', done);
+    await clearResolvedRecovery(engine, row.id);
+    return done;
+  } catch (error) {
+    if (recovery) {
+      // Even a rejected prepare can retain a journal record; do not leave that
+      // record unaccounted or let a sibling publication bypass its recovery.
+      try { await markRecovering(engine, row, published ? 'commit_outcome_uncertain' : 'publication_not_started'); }
+      catch { /* database outage: durable recovery record remains discoverable */ }
+      if (lock) {
+        try { return await recoverPublication(engine, row.id, hostId, true, published && !filesystemFailed ? undefined : requestError(error)); }
+        catch { /* hold durable recovering state; next owner loop retries */ }
+      }
+      try { return await getWriteRequestById(engine, row.id) ?? { ...row, state: 'recovering', blocked_reason: 'database_unavailable' }; }
+      catch { return { ...row, state: 'recovering', blocked_reason: 'database_unavailable' }; }
+    }
+    if ((error as { code?: string })?.code === 'queue_capacity') {
+      await releaseUnpublishedClaim(engine, row, 'recovery_capacity');
+      return (await getWriteRequestById(engine, row.id))!;
+    }
+    return finishUnpublishedFailure(engine, row, error);
+  } finally { await lock?.release(); }
+}
+
+export async function recoverPublication(engine: BrainEngine, id: string, hostId = localHostId(), alreadyLocked = false,
+  terminalError?: { code: string; message: string }): Promise<WriteRequest> {
+  let row = await getWriteRequestById(engine, id);
+  if (!row) throw new OperationError('not_found', 'Write request not found.');
+  if (!row.recovery) return row;
+  const binding = await getWorktreeBinding(engine, row.source_id, hostId);
+  if (!binding || binding.owner_host_id !== hostId) throw new OperationError('owner_unavailable', 'Recovery requires the canonical owner.');
+  const lock = alreadyLocked ? null : await acquireWorktree(binding);
+  if (!alreadyLocked && !lock) return row;
+  try {
+    row = await engine.transaction(async tx => {
+      await tx.executeRaw('SELECT id FROM persistence_worktrees WHERE id=$1::uuid FOR SHARE', [row!.worktree_id]);
+      await lockCounters(tx, ['brain', principalKey(requestPrincipal(row!)), `worktree:${row!.worktree_id}`]);
+      const [current] = await tx.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE id=$1::uuid FOR UPDATE', [id]);
+      if (isTerminal(current) || !current.recovery) return current;
+      const record = current.recovery;
+      if (!isWriteTargetContained(record.path, record.root) || !binding.local_path || !isWriteTargetContained(record.path, binding.local_path)) throw new OperationError('recovery_required', 'Recovery file binding is no longer confined to this owner.');
+      const actual = fileHash(record.path);
+      if (actual !== record.beforeHash && actual !== record.afterHash) {
+        await tx.executeRaw(`UPDATE persistence_requests SET state='recovering',blocked_reason='unexpected_file_bytes' WHERE id=$1::uuid`, [id]);
+        return { ...current, state: 'recovering' as const, blocked_reason: 'unexpected_file_bytes' };
+      }
+      if (actual === record.afterHash && actual !== record.beforeHash) {
+        publishFile({ path: record.path, root: record.root, content: record.before === null ? null : Buffer.from(record.before, 'base64') });
+        if (record.mode !== null && existsSync(record.path)) chmodSync(record.path, record.mode);
+      }
+      // Withdrawal is authoritative DB state and is never rolled back here.
+      if (terminalError) return completeWrite(tx, current, conflictCode(terminalError.code) ? 'conflict' : 'failed', {}, terminalError);
+      for (const key of ['brain', `worktree:${current.worktree_id}`]) await tx.executeRaw('UPDATE persistence_counters SET recovery_bytes=recovery_bytes-$2 WHERE key=$1', [key, Number(current.recovery_bytes)]);
+      const [queued] = await tx.executeRaw<WriteRequest>(`UPDATE persistence_requests SET state='queued',execution_token=NULL,
+        claim_expires_at=NULL,recovery=NULL,recovery_bytes=0,publication_started=false,blocked_reason=NULL,updated_at=now()
+        WHERE id=$1::uuid RETURNING *`, [id]);
+      return queued;
+    });
+    if (isTerminal(row)) await clearResolvedRecovery(engine, id);
+    return row;
+  } finally { await lock?.release(); }
+}
