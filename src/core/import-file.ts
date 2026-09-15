@@ -657,7 +657,7 @@ export async function importFromContent(
   // mirrors that default instead of matching the slug in ANY source (the
   // unscoped-check/scoped-write bug class).
   const existingSnapshot = opts.prepare ? await engine.readPageSnapshot(slug, { sourceId: sourceId ?? 'default', includeDeleted: true }) : null;
-  const existing = opts.prepare ? existingSnapshot?.page ?? null : await engine.getPage(slug, { sourceId: sourceId ?? 'default' });
+  const existing = opts.prepare ? existingSnapshot?.page ?? null : await engine.getPage(slug, { sourceId: sourceId ?? 'default', includeDeleted: true });
 
   // #2044 / #4548: remote get_page/fetch intentionally strip non-'world'
   // facts rows before an untrusted caller ever sees them. A documented
@@ -736,9 +736,9 @@ export async function importFromContent(
     tags: parsed.tags,
   };
 
-  // An unchanged canonical file may still need a verified projection after withdrawal/migration.
-  if (!opts.prepare && existing && existing.text_projection_revision !== existing.knowledge_revision) opts = { ...opts, forceRechunk: true };
-  if (existing?.content_hash === hash && !opts.forceRechunk && (!opts.prepare || sameCanonicalImport(existingSnapshot, parsedPage))) {
+  // Rebuild stale projections without granting --force-rechunk's external-ID dedup override.
+  const needsProjectionRebuild = !opts.prepare && existing && existing.text_projection_revision !== existing.knowledge_revision;
+  if (existing?.content_hash === hash && !existing.deleted_at && !opts.forceRechunk && !needsProjectionRebuild && (!opts.prepare || sameCanonicalImport(existingSnapshot, parsedPage))) {
     if (opts.prepare) {
       const result: ImportResult = { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}) };
       return opts.prepare({ slug, parsedPage, observedRevision: (existing as typeof existing & { knowledge_revision?: string }).knowledge_revision ?? null,
@@ -753,7 +753,7 @@ export async function importFromContent(
   // the content is unchanged — stamp the canonical hash via the narrow
   // refreshPageBody UPDATE (no chunk churn, no re-embed, no version snapshot)
   // and skip. The next import then hits the fast path above.
-  if (existing && !opts.prepare && !opts.forceRechunk && typeof engine.refreshPageBody === 'function') {
+  if (existing && !existing.deleted_at && !opts.prepare && !opts.forceRechunk && !needsProjectionRebuild && typeof engine.refreshPageBody === 'function') {
     const legacyHash = contentHashLegacy({
       title: parsed.title,
       type: parsed.type,
@@ -1491,8 +1491,8 @@ export async function importCodeFile(
   // engine.putPage defaults to 'default' when sourceId is unset, so the read
   // mirrors that default instead of matching the slug in ANY source (the
   // unscoped-check/scoped-write bug class).
-  const existing = await engine.getPage(slug, { sourceId: sourceId ?? 'default' });
-  if (!opts.force && existing?.content_hash === hash && existing.text_projection_revision === existing.knowledge_revision) {
+  const existing = await engine.getPage(slug, { sourceId: sourceId ?? 'default', includeDeleted: true });
+  if (!opts.force && existing?.content_hash === hash && !existing.deleted_at && existing.text_projection_revision === existing.knowledge_revision) {
     await engine.transaction(tx => assertImportBase(tx, slug, sourceId ?? 'default', existing));
     return { slug, status: 'skipped', chunks: 0 };
   }
@@ -2124,7 +2124,7 @@ export async function importImageFile(
   const buf = readSourceFileSync(filePath);
   const hash = createHash('sha256').update(buf).digest('hex');
 
-  const existing = await engine.getPage(imageSlug, sourceOpts);
+  const existing = await engine.getPage(imageSlug, { ...sourceOpts, includeDeleted: true });
   const hadProtectedOcr = !!existing && hasProtectedBody(existing.compiled_truth + '\n' + (existing.timeline || ''));
   if (existing?.content_hash === hash) {
     if (hadProtectedOcr) {
@@ -2136,7 +2136,7 @@ export async function importImageFile(
     // An unchanged legacy image still needs its full OCR/visual index rebuilt.
     const sealed = await engine.executeRaw(`SELECT id FROM pages p WHERE p.source_id = $1 AND p.slug = $2 AND ${safeChunksFilter('p')}`,
       [sourceOpts.sourceId, imageSlug]);
-    if (sealed.length && existing.text_projection_revision === existing.knowledge_revision) {
+    if (sealed.length && !existing.deleted_at && existing.text_projection_revision === existing.knowledge_revision) {
       await engine.transaction(tx => assertImportBase(tx, imageSlug, sourceOpts.sourceId, existing));
       return { slug: imageSlug, status: 'skipped', chunks: 0 };
     }
