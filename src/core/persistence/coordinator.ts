@@ -209,6 +209,7 @@ export async function recoverPublication(engine: BrainEngine, id: string, hostId
       return blocked ?? row;
     }
     row = await engine.transaction(async tx => {
+      await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout','1s',true),set_config('statement_timeout','5s',true)");
       await tx.executeRaw('SELECT id FROM persistence_worktrees WHERE id=$1::uuid FOR SHARE', [row!.worktree_id]);
       await lockCounters(tx, ['brain', principalKey(requestPrincipal(row!)), `worktree:${row!.worktree_id}`]);
       const [current] = await tx.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE id=$1::uuid FOR UPDATE', [id]);

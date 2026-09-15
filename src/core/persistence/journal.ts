@@ -50,6 +50,13 @@ export async function getWriteRequest(engine: SqlEngine, principal: Principal, r
     [principal.kind, principal.id, requireUuid(requestId)]);
   return row ?? null;
 }
+/** Resolve other operation domains before repeating target/provider preparation. */
+export async function assertPageRequestIdentity(engine: SqlEngine, principal: Principal, requestId: string): Promise<void> {
+  if (principal.kind !== 'local_cli') return;
+  const [topology] = await engine.executeRaw('SELECT id FROM persistence_topology_changes WHERE principal_id=$1::uuid AND request_id=$2::uuid',
+    [principal.id, requireUuid(requestId)]);
+  if (topology) throw new OperationError('idempotency_conflict', 'This request_id belongs to a source lifecycle operation.');
+}
 export async function getWriteRequestById(engine: SqlEngine, id: string): Promise<WriteRequest | null> {
   const [row] = await engine.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE id=$1::uuid', [id]);
   return row ?? null;
@@ -70,7 +77,7 @@ export async function admitWrite(engine: BrainEngine, input: WriteAdmission, ove
   const terminalBytes = input.terminalReservation ?? Math.max(16_384,jsonBytes(input.authority)+8192);
   if (!Number.isSafeInteger(terminalBytes) || terminalBytes < 1024) throw new TypeError('Invalid terminal receipt reservation.');
   return engine.transaction(async tx => {
-    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
+    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout','1s',true),set_config('statement_timeout','5s',true)");
     if (input.worktreeId) {
       await tx.executeRaw('SELECT id FROM persistence_worktrees WHERE id=$1::uuid FOR SHARE', [input.worktreeId]);
       const binding = await tx.executeRaw(`SELECT source_id FROM persistence_source_bindings WHERE source_id=$1
@@ -197,6 +204,7 @@ export async function clearResolvedRecovery(engine: BrainEngine, id: string): Pr
   const row = await getWriteRequestById(engine, id);
   if (!row?.recovery || !isTerminal(row)) return;
   await engine.transaction(async tx => {
+    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout','1s',true),set_config('statement_timeout','5s',true)");
     const keys = ['brain', ...(row.worktree_id ? [`worktree:${row.worktree_id}`] : [])];
     await lockCounters(tx, keys);
     const [locked] = await tx.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE id=$1::uuid FOR UPDATE', [id]);

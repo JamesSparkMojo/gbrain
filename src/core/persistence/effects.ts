@@ -52,6 +52,7 @@ async function finishPage(engine: BrainEngine, effect: PersistenceEffect, snapsh
 /** Missing physical files never prevent the authoritative withdrawal from materializing. */
 async function materializeAndAdvance(engine: BrainEngine, effect: PersistenceEffect, snapshot: PageSnapshot, hostId: string): Promise<void> {
   await engine.transaction(async tx => {
+    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout','1s',true),set_config('statement_timeout','5s',true)");
     await guardEffectSource(tx, effect, hostId);
     await tx.lockPageKeys([{ sourceId: effect.source_id, slug: snapshot.page.slug }]);
     const current = await tx.readPageSnapshot(snapshot.page.slug, { sourceId: effect.source_id, includeDeleted: true });

@@ -278,6 +278,16 @@ rebind or removal.
 
 ## Bounded admission and retention
 
+The CLI routes source mutations through the current resident owner before
+opening PGLite. These administrative requests require managed activation;
+before activation, stop the resident owner to use legacy source commands.
+`sources purge` in managed mode requires an explicit archived source ID and
+`--confirm-destructive`; use `sources archived` to inspect candidates. The
+automatic expiry walker still coordinates each expired source separately.
+`--yes` alone does not authorize destructive managed removal. Keep the UUID
+from a pending or uncertain administrative result and repeat the same command,
+arguments, and `--request-id` after recovery.
+
 Default admission limits are enforced atomically:
 
 | Reservation | Per principal | Per brain |

@@ -42,7 +42,7 @@ export async function reserveEffectRecovery(engine: BrainEngine, effect: Persist
     throw new OperationError('request_too_large', 'The physical mirror exceeds recovery capacity; the withdrawal remains committed.');
   }
   await engine.transaction(async tx => {
-    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
+    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout','1s',true),set_config('statement_timeout','5s',true)");
     await guardEffectSource(tx, effect, hostId);
     const counters = await lockCounters(tx, ['brain', `worktree:${effect.worktree_id}`]);
     const current = await lockedEffect(tx, effect);
@@ -71,7 +71,7 @@ export async function recoverEffectPublication(engine: BrainEngine, effect: Pers
   const releaseCapacity = tryAcquirePublicationCapacity(engine);
   if (!releaseCapacity) throw new OperationError('writer_pool_capacity', 'Mirror recovery is waiting for publication capacity.');
   try { await engine.transaction(async tx => {
-    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
+    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout','1s',true),set_config('statement_timeout','5s',true)");
     const binding = await guardEffectSource(tx, effect, hostId);
     await lockCounters(tx, ['brain', `worktree:${effect.worktree_id}`]);
     const current = await lockedEffect(tx, effect);

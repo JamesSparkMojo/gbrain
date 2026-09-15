@@ -7,7 +7,7 @@ import { enforceClientSlugFence, enforceSubagentSlugFence, normalizeSlugPrefix, 
 import { defaultSlug, detectBinaryNullByte, explicitCaptureType, mergeCaptureFrontmatter, normalizeForHash } from '../capture-content.ts';
 import { computeContentHash } from '../ingestion/types.ts';
 import { assertPersistenceAccepting, waitForWrite, writeResponse } from './service.ts';
-import { admitWrite, assertReplayIntent, getWriteRequest, intentDigest } from './journal.ts';
+import { admitWrite, assertPageRequestIdentity, assertReplayIntent, getWriteRequest, intentDigest } from './journal.ts';
 import { submissionAuthority, authorizeStoredRequest } from './authority.ts';
 import { currentVerifiedLocalWriter, localHostId, readLocalWriter, registerLocalWriter } from './identity.ts';
 import { claimWorktree, getWorktreeBinding } from './ownership.ts';
@@ -43,6 +43,7 @@ export async function submitPageMutation(ctx: OperationContext,
   const sourceId = pageMutationSource(ctx, p, input.operation);
   await initializeLocalPersistence(ctx);
   const principal = await requestPrincipalForContext(ctx);
+  await assertPageRequestIdentity(ctx.engine, principal, requestId);
   const prior = await getWriteRequest(ctx.engine, principal, requestId);
   const callerIntent = { ...p };
   delete callerIntent.request_id;

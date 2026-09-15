@@ -14,8 +14,8 @@ src/commands/migrations/v0_32_2.ts	1	engine_guard	Canonical table SQL trigger re
 src/commands/pages.ts	2	engine_guard	Canonical table SQL trigger requires coordinator capability; legacy calls fail before canonical DB publication.
 src/commands/reconcile-links.ts	2	engine_guard	Canonical table SQL trigger requires coordinator capability; legacy calls fail before canonical DB publication.
 src/commands/reindex-aliases.ts	1	engine_guard	Canonical table SQL trigger requires coordinator capability; legacy calls fail before canonical DB publication.
-src/commands/sources-set-path.ts	1	engine_guard	Canonical table SQL trigger requires coordinator capability; legacy calls fail before canonical DB publication.
-src/commands/sources.ts	10	engine_guard	Canonical table SQL trigger requires coordinator capability; legacy calls fail before canonical DB publication.
+src/commands/sources-set-path.ts	1	coordinator	Managed rebind uses native exclusion, exact manifest verification and a retained source-incarnation receipt; unmanaged pointer repair remains explicit.
+src/commands/sources.ts	10	coordinator	Managed add/archive/restore/remove/purge/reclone route through source lifecycle; remaining legacy canonical SQL stays fenced.
 src/commands/sync.ts	11	coordinator	Managed Markdown sync routes to immutable page requests and an exhausted-cursor checkpoint; unsupported Git pull, code/image and connector paths refuse early.
 src/core/agent-install/setup.ts	1	engine_guard	Canonical table SQL trigger requires coordinator capability; legacy calls fail before canonical DB publication.
 src/core/atomic-write.ts	0	filesystem_guard	Atomic page replacement checks the managed root before temporary bytes are written.

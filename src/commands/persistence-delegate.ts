@@ -49,8 +49,13 @@ export async function runDeferredPersistenceCommand(
       const { runTakesMutation } = await import('./takes-mutation.ts');
       await runTakesMutation(getEngine, args);
     } else if (command === 'sources') {
-      const { runPersistenceAdminCli } = await import('./persistence-admin.ts');
-      await runPersistenceAdminCli('writer', args.slice(1));
+      if (args[0] === 'writer') {
+        const { runPersistenceAdminCli } = await import('./persistence-admin.ts');
+        await runPersistenceAdminCli('writer', args.slice(1));
+      } else {
+        const { runSourceLifecycleCli } = await import('./sources-lifecycle.ts');
+        await runSourceLifecycleCli(args, getEngine);
+      }
     } else if (command === 'capture') {
       const { runCapture } = await import('./capture.ts');
       await runCapture(null, args, { getEngine });

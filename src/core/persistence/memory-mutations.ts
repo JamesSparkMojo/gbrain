@@ -6,7 +6,7 @@ import { isNullLikeEntity } from '../facts/write-single.ts';
 import { recordFactWithdrawal } from '../facts/withdrawal.ts';
 import { initializeLocalPersistence, requestPrincipalForContext } from './page-mutations.ts';
 import { authorizeStoredRequest, submissionAuthority } from './authority.ts';
-import { admitWrite, assertReplayIntent, completeWrite, getWriteRequest, intentDigest } from './journal.ts';
+import { admitWrite, assertPageRequestIdentity, assertReplayIntent, completeWrite, getWriteRequest, intentDigest } from './journal.ts';
 import { assertPersistenceAccepting, registerMutationPreparer, waitForWrite, writeResponse } from './service.ts';
 import { claimWorktree, getWorktreeBinding } from './ownership.ts';
 import { parseMutationPrecondition } from './preconditions.ts';
@@ -31,6 +31,7 @@ async function submission(ctx: OperationContext, operation: string, params: Reco
   }
   await initializeLocalPersistence(ctx);
   const principal = await requestPrincipalForContext(ctx);
+  await assertPageRequestIdentity(ctx.engine, principal, requestId);
   const callerIntent = { ...p }; delete callerIntent.request_id;
   const prior = await getWriteRequest(ctx.engine, principal, requestId);
   if (prior) {

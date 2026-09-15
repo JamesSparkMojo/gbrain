@@ -2060,7 +2060,7 @@ function refuseThinClient(command: string, mcpUrl: string): never {
 }
 
 async function handleCliOnly(command: string, args: string[]) {
-  if (command === 'capture' || command === 'forget' || command === 'call' || command === 'sources' && args[0] === 'writer' || command === 'takes' && ['add', 'update', 'supersede', 'resolve'].includes(args[0]) && !hasHelpFlag(args)) {
+  if (command === 'capture' || command === 'forget' || command === 'call' || command === 'sources' && ['writer', 'add', 'remove', 'archive', 'restore', 'purge', 'set-path', 'reclone'].includes(args[0]) || command === 'takes' && ['add', 'update', 'supersede', 'resolve'].includes(args[0]) && !hasHelpFlag(args)) {
     const { runDeferredPersistenceCommand } = await import('./commands/persistence-delegate.ts');
     await runDeferredPersistenceCommand(command, args, connectEngine);
     return;

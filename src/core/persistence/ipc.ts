@@ -334,5 +334,6 @@ export async function requestPersistenceOperation(socketPath: string, request: P
 
 export async function requestPersistenceAdministration(socketPath: string, request: PersistenceIpcAdminRequest, timeoutMs = 30_000): Promise<unknown> {
   if (!administrationRequest(request)) throw new OperationError('invalid_params', 'Invalid local administration envelope.');
-  return exchange(socketPath, request, timeoutMs);
+  return exchange(socketPath, request, timeoutMs,
+    typeof request.params.request_id === 'string' ? request.params.request_id : undefined);
 }

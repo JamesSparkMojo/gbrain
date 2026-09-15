@@ -20,6 +20,7 @@ export class PersistenceConsumer {
   private recoveryRetryAfter = new Map<string, number>();
   private projectionWorker: Promise<unknown> | undefined;
   private effectsWorker: Promise<void> | undefined;
+  private topologyWorker: Promise<unknown> | undefined;
   private maintenanceWorker: Promise<unknown> | undefined;
   private nextMaintenance = 0;
   private lastError: { code: string; at: string } | undefined;
@@ -43,6 +44,9 @@ export class PersistenceConsumer {
   private async doTick(): Promise<void> {
     if (this.stopping) return;
     await refreshManagedFilesystemRoots(this.engine, this.engine.kind === 'pglite' ? this.config.database_path : undefined);
+    if (!this.topologyWorker) this.topologyWorker = import('./topology-recovery.ts')
+      .then(({ recoverSourceTopologies }) => recoverSourceTopologies(this.engine, { hostId: this.hostId, limit: 2 }))
+      .catch(error => this.report(error)).finally(() => { this.topologyWorker = undefined; });
     if (!this.effectsWorker) this.effectsWorker = runPersistenceEffects(this.engine, this.config,
       { hostId: this.hostId, limit: 2, signal: this.abort.signal }).catch(error => this.report(error))
       .finally(() => { this.effectsWorker = undefined; });
@@ -145,6 +149,7 @@ export class PersistenceConsumer {
     await Promise.allSettled([...this.active]);
     await this.projectionWorker;
     await this.effectsWorker;
+    await this.topologyWorker;
     await this.maintenanceWorker;
   }
 }

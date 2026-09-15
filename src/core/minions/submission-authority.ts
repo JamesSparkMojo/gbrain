@@ -11,7 +11,6 @@ import { coerceLegacyPermissions, normalizeTokenScopes, parseLegacyTokenScope } 
 import { isValidSourceId } from '../source-id.ts';
 import { discoverGitRoot } from '../sync-git.ts';
 import type { MinionJob } from './types.ts';
-import { effectiveDelegation, snapshotFromJob } from './delegated-policy.ts';
 
 export const REMOTE_JOB_NAMES = ['sync', 'import', 'lint', 'lint-fix'] as const;
 export type RemoteJobName = typeof REMOTE_JOB_NAMES[number];
@@ -186,6 +185,10 @@ async function assertCurrentAgent(engine: BrainEngine, a: RemoteAgentAuthority, 
   const [source] = await engine.executeRaw<Record<string, unknown>>('SELECT archived, created_at FROM sources WHERE id = $1', [a.grant.sourceId]);
   if (!source || source.archived !== false || new Date(source.created_at as string).toISOString() !== a.grant.sourceCreatedAt) deny('agent source is missing, archived, or was replaced');
   if (data.__delegation_grant !== undefined) {
+    // Grant profiles reference the complete operation catalog. Filesystem
+    // writers need this module during catalog initialization; load the policy
+    // only when an actual delegated job is being checked.
+    const { effectiveDelegation, snapshotFromJob } = await import('./delegated-policy.ts');
     const submitted = snapshotFromJob(data);
     if (!submitted || submitted.clientId !== a.principal.id || submitted.sourceId !== a.grant.sourceId
       || authorityDigest(submitted.tools) !== authorityDigest(a.grant.allowedTools)

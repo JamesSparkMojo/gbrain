@@ -57,13 +57,31 @@ async function registrationGrant(engine: BrainEngine, params: Record<string, unk
 export async function runPersistenceAdministration(engine: BrainEngine, operation: PersistenceAdminOperation,
   params: Record<string, unknown>): Promise<Record<string, unknown>> {
   if (operation === 'writer_sync') return (await import('./sync-administration.ts')).runAuthenticatedSyncSlice(engine, params);
+  if (operation === 'source_add' || operation === 'source_lifecycle') {
+    const { managedPersistenceEnabled } = await import('./ownership.ts');
+    if (!await managedPersistenceEnabled(engine)) throw new OperationError('writer_coordinator_required',
+      'Resident source administration requires activated managed persistence.',
+      'Complete the writer upgrade and activation, or stop the resident owner before using legacy source commands.');
+  }
+  if (operation === 'source_add') {
+    keys(params, ['options', 'request_id', 'dry_run', 'legacy_hardening']);
+    if (params.legacy_hardening !== undefined) throw new OperationError('writer_coordinator_required',
+      'Source creation cannot install legacy Git hardening on a managed worktree.', 'Create the source without --pat-file.');
+    if (!params.options || typeof params.options !== 'object' || Array.isArray(params.options)) throw invalid('Source add requires typed options.');
+    const { managedSourceAddInput } = await import('./managed-sources.ts');
+    const { runManagedSourceLifecycle } = await import('./source-lifecycle.ts');
+    const options = params.options as import('../sources-ops.ts').AddSourceOpts;
+    if (options.requestId !== params.request_id || !isWriteRequestId(params.request_id)) throw invalid('Source add request identity must match its options.');
+    return runManagedSourceLifecycle(engine, { ...managedSourceAddInput(options), dryRun: params.dry_run === true });
+  }
   if(operation==='source_lifecycle') {
-    keys(params,['action','source_id','request_id','expected_incarnation','path','name','config','refederate','confirm_destructive','dry_run']);
+    keys(params,['action','source_id','request_id','expected_incarnation','path','name','config','refederate','confirm_destructive','dry_run','remote_url','create_directory','expired_only']);
     const { runManagedSourceLifecycle }=await import('./source-lifecycle.ts');
     return runManagedSourceLifecycle(engine,{operation:params.action as import('./source-lifecycle.ts').SourceLifecycleInput['operation'],sourceId:source(params.source_id),
       requestId:params.request_id as string|undefined,expectedIncarnation:params.expected_incarnation as string|undefined,
       path:params.path===undefined?undefined:path(params.path),name:params.name as string|undefined,config:params.config as Record<string,unknown>|undefined,
-      refederate:params.refederate as boolean|undefined,confirmDestructive:params.confirm_destructive as boolean|undefined,dryRun:params.dry_run===true});
+      refederate:params.refederate as boolean|undefined,confirmDestructive:params.confirm_destructive as boolean|undefined,dryRun:params.dry_run===true,
+      remoteUrl:params.remote_url as string|undefined,createDirectory:params.create_directory as boolean|undefined,expiredOnly:params.expired_only as boolean|undefined});
   }
   if (operation === 'writer_status') {
     keys(params, ['source_id', 'probe']);

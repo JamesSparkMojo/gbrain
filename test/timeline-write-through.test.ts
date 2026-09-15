@@ -427,7 +427,7 @@ describe('wave-C review: splice-under-lock, never whole-file regeneration', () =
     registerMutationPreparer('add_timeline_entry', async (e, row, config) => {
       const prepared = await prepareSemanticPageMutation(e, row, config);
       return { ...prepared, apply: async tx => {
-        if (++calls === 1) throw new Error('transient insert failure');
+        if (++calls === 1) throw Object.assign(new Error('transient serialization failure'), { code: '40001' });
         return prepared.apply(tx);
       } };
     });
