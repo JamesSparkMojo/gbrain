@@ -55,7 +55,7 @@ describe('CI execution evidence', () => {
     expect(e2e.jobs['e2e-status'].if).toBe('always()');
     const needs = e2e.jobs['e2e-status'].needs as string[];
     const nightly = ['coverage-full-unit', 'coverage-full-serial', 'coverage-full-slow', 'coverage-full-e2e'];
-    expect(needs).toEqual(['jsonb-parity', 'tier1', 'tier2', 'selected-e2e', ...nightly]);
+    expect(needs).toEqual(['jsonb-parity', 'tier1', 'tier2', 'prepare-e2e', 'selected-e2e', ...nightly]);
     for (const event of ['pull_request', 'push', 'workflow_dispatch']) {
       expect(aggregate(e2e, 'e2e-status', event, Object.fromEntries(nightly.map(job => [job, 'skipped'])))).toBe(0);
     }
