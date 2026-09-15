@@ -9,7 +9,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { registerLocalWriter, revokeLocalWriter } from '../src/core/persistence/identity.ts';
-import { claimWorktree, getWorktreeBinding } from '../src/core/persistence/ownership.ts';
+import { claimWorktree, getWorktreeBinding, worktreeManifest } from '../src/core/persistence/ownership.ts';
 import { runManagedSourceLifecycle } from '../src/core/persistence/source-lifecycle.ts';
 import { admitWrite, claimNextWrite } from '../src/core/persistence/journal.ts';
 import { submissionAuthority } from '../src/core/persistence/authority.ts';
@@ -261,12 +261,21 @@ test('trusted source constructors and archive/remove facades use managed topolog
 test('new clone metadata is counted alongside staging before canonical installation',()=>fixture(async(home)=>{
   await engine.setConfig('persistence.limits.worktree_recovery_bytes',String(4*1024*1024));
   const input={operation:'add' as const,sourceId:'metadata-clone',path:join(home,'metadata-clone'),remoteUrl:'https://example.invalid/brain.git',requestId:randomUUID()};
+  let cloneBudget=0,stagedBytes=0,manifestBytes=0;
   const result=await runManagedSourceClone(engine,input,await topologyPrincipal(engine),input.requestId,{...input,requestId:undefined,dryRun:undefined},{
     clone:async(_url,stage,budget)=>{
-      for(let i=0;i<950;i++)writeFileSync(join(stage,`${String(i).padStart(4,'0')}-${'x'.repeat(175)}.md`),'');
-      expect(await topologyDirectoryBytes(stage)).toBeLessThanOrEqual(budget);
+      // Directory stat.size varies by filesystem. Fill the measured remaining
+      // space so raw staging fits and only its new manifest exceeds capacity.
+      for(let i=0;i<128;i++)writeFileSync(join(stage,`${String(i).padStart(4,'0')}-${'x'.repeat(175)}.md`),'');
+      const payload=join(stage,'payload.md');writeFileSync(payload,'');
+      const remaining=budget-await topologyDirectoryBytes(stage)-8192;
+      writeFileSync(payload,'x'.repeat(Math.max(0,remaining)));
+      cloneBudget=budget;stagedBytes=await topologyDirectoryBytes(stage);
+      manifestBytes=Buffer.byteLength(JSON.stringify(worktreeManifest(stage)));
     },
   });
+  expect(stagedBytes).toBe(cloneBudget-8192);
+  expect(manifestBytes).toBeGreaterThan(8192);expect(manifestBytes).toBeLessThan(1_048_576);
   expect(result).toMatchObject({state:'failed',write_error:'request_too_large'});
   expect(await engine.executeRaw('SELECT id FROM sources WHERE id=$1',[input.sourceId])).toHaveLength(0);
   expect((await engine.executeRaw<{recovery_bytes:string}>("SELECT recovery_bytes::text FROM persistence_counters WHERE key='brain'"))[0].recovery_bytes).toBe('0');
