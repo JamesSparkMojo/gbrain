@@ -1,5 +1,23 @@
 # TODOS
 
+## Community fix wave 2 follow-ups (filed 2026-09-15)
+
+- [ ] **P3 — hand the semantic-cache lookup embedding to `hybridSearch` when the result cache returns (#4839).**
+  **What:** `hybridSearchCached` (`src/core/search/hybrid.ts`) embeds the query for the
+  `query_cache` similarity lookup and, on a miss, `hybridSearch` embeds the same query
+  again — two provider calls per search. Masked today: `semanticResultCacheAvailable()`
+  (`src/core/search/query-cache.ts`) returns `false`, so the lookup embed is unreachable
+  and every search embeds exactly once; the root cause (no embedding hand-off from the
+  cached wrapper to the inner search) comes back the moment the cache is re-enabled.
+  **How:** add `_queryEmbedding?: Float32Array` beside `_queryEmbedDeadline` in
+  `HybridSearchOpts`; `embedOneQuery` returns it when `q === query` (expansion variants
+  still embed); `hybridSearchCached` passes `_queryEmbedding: queryEmbedding ?? undefined`
+  alongside the deadline; build the lookup embed with the same `embedOpts` shape the inner
+  path uses so the reused vector is provably the same model/dims. ~12 lines, one file; the
+  closed PR #4840 is the template minus its cache-hit assertion. Land it WITH the cache
+  re-enable so the test exercises a real cache hit (no fails-on-master proof exists while
+  the cache is off — the reason it was not taken in the wave). **Effort:** S. **Priority:** P3.
+
 ## Community fix wave follow-ups (filed 2026-09-09)
 
 - [ ] **P3 — new v0.49/v0.50 tests assume `os.tmpdir()` is already a realpath (macOS `/var` vs `/private/var`).**
