@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getEngine, hasDatabase, setupDB, teardownDB } from './helpers.ts';
+import { getEngine, hasDatabase, setupLegacyEmbeddingDB, teardownDB } from './helpers.ts';
 import { resetPgliteStateNarrow } from '../helpers/reset-pglite.ts';
 import { configureGateway, resetGateway, __setEmbedTransportForTests } from '../../src/core/ai/gateway.ts';
 import { dispatchToolCall } from '../../src/mcp/dispatch.ts';
@@ -25,7 +25,7 @@ async function put(body: string, pageSlug = slug) {
 }
 
 d('Postgres put_page persistence', () => {
-  beforeAll(async () => { await setupDB(); });
+  beforeAll(async () => { await setupLegacyEmbeddingDB(); });
   afterAll(async () => { await teardownDB(); });
   beforeEach(async () => {
     await resetPgliteStateNarrow(getEngine(), ['pages', 'config', 'gbrain_cycle_locks', 'minion_jobs']);

@@ -20,7 +20,7 @@ import type { BrainEngine } from '../../src/core/engine.ts';
 import { getSessionContextState, upsertSessionContextState } from '../../src/core/context/session-state.ts';
 import { linkEntityIdentity, listEntityIdentities } from '../../src/core/entity-identity.ts';
 import { buildEntityCard } from '../../src/core/verbs/entity-card.ts';
-import { hasDatabase, setupDB, teardownDB, getEngine } from './helpers.ts';
+import { hasDatabase, setupDB, setupLegacyEmbeddingDB, teardownDB, getEngine } from './helpers.ts';
 import { TRAVERSE_PATH_ROW_CAP } from '../../src/core/engine-constants.ts';
 import { DENSE_HUB_SLUG, DENSE_HUB_SPOKES, seedDenseHub } from '../helpers/dense-hub.ts';
 
@@ -115,7 +115,7 @@ describeBoth('Engine parity — Postgres vs PGLite', () => {
   let pgliteEngine: PGLiteEngine;
 
   beforeAll(async () => {
-    pgEngine = await setupDB();
+    pgEngine = await setupLegacyEmbeddingDB();
     await seedEngine(pgEngine);
 
     pgliteEngine = new PGLiteEngine();
@@ -1305,7 +1305,7 @@ describeBoth('Engine parity — relationalFanout', () => {
   let pgliteEngine: PGLiteEngine;
 
   beforeAll(async () => {
-    pgEngine = await setupDB();
+    pgEngine = await setupLegacyEmbeddingDB();
     await seedRelational(pgEngine);
     pgliteEngine = new PGLiteEngine();
     await pgliteEngine.connect({});
@@ -1838,7 +1838,7 @@ describeBoth('Engine parity — CJK keyword fallback (#3986)', () => {
   }
 
   beforeAll(async () => {
-    pgEngine = await setupDB();
+    pgEngine = await setupLegacyEmbeddingDB();
     await seedCJK(pgEngine);
     pgliteEngine = new PGLiteEngine();
     await pgliteEngine.connect({});
@@ -2351,7 +2351,7 @@ describeBoth('Engine parity — facts TTL read-time validity (WP5)', () => {
   let pgliteEngine: PGLiteEngine;
 
   beforeAll(async () => {
-    pgEngine = await setupDB();
+    pgEngine = await setupLegacyEmbeddingDB();
     pgliteEngine = new PGLiteEngine();
     await pgliteEngine.connect({});
     await pgliteEngine.initSchema();

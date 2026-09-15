@@ -19,10 +19,9 @@
  *    postgres engine" `process.exit(1)`. helpers.ts captures DATABASE_URL at
  *    module load, so this file deletes it from process.env for the duration
  *    (restored in afterAll) and passes the target URL explicitly via --url.
- *  - The live Postgres schema sizes content_chunks.embedding at vector(1536)
- *    while an unconfigured gateway defaults PGLite to 1280d. The gateway is
- *    configured at 1536 (and the fixture config.json pins it) so the seeded
- *    vectors land on the target without a dims mismatch.
+ *  - Both fixture engines explicitly use the legacy test embedding shape.
+ *    Earlier CLI-init files can create the shared Postgres at a different
+ *    width, so setup transitions the cleared target before seeding vectors.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
@@ -30,16 +29,17 @@ import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { runMigrateEngine } from '../../src/commands/migrate-engine.ts';
-import { configureGateway, resetGateway } from '../../src/core/ai/gateway.ts';
+import { resetGateway } from '../../src/core/ai/gateway.ts';
 import type { BrainEngine } from '../../src/core/engine.ts';
-import { hasDatabase, setupDB, teardownDB, getEngine } from './helpers.ts';
+import { LEGACY_EMBEDDING_CONFIG } from '../helpers/legacy-embedding-config.ts';
+import { hasDatabase, setupLegacyEmbeddingDB, teardownDB, getEngine } from './helpers.ts';
 
 const describePg = hasDatabase() ? describe : describe.skip;
 
 // Captured at module load, before beforeAll deletes it from process.env.
 const DB_URL = process.env.DATABASE_URL ?? '';
 const REPO_ROOT = resolve(import.meta.dir, '../..');
-const EMBED_DIMS = 1536;
+const EMBED_DIMS = LEGACY_EMBEDDING_CONFIG.embedding_dimensions;
 
 /** Deterministic 1536-d vector; v[0] = seed/8 is float4-exact for the
  * round-trip spot check on the Postgres side. */
@@ -102,20 +102,14 @@ describePg('migrate-engine whole-brain PGLite to Postgres (D2)', () => {
   beforeAll(async () => {
     if (!DB_URL) throw new Error('DATABASE_URL must be set for this e2e file');
 
-    // Postgres clean slate FIRST (helpers captured DATABASE_URL at import).
-    await setupDB();
-
-    // Pin embedding sizing to the live Postgres schema (vector(1536)) so the
-    // fresh PGLite brain sizes its columns identically.
-    configureGateway({ embedding_model: 'openai:text-embedding-3-small', embedding_dimensions: EMBED_DIMS, env: {} });
+    await setupLegacyEmbeddingDB();
 
     // Isolated gbrain home with a real pglite file config — the SOURCE brain.
     mkdirSync(gbrainDir, { recursive: true });
     writeFileSync(configFile, JSON.stringify({
       engine: 'pglite',
       database_path: pgliteDir,
-      embedding_model: 'openai:text-embedding-3-small',
-      embedding_dimensions: EMBED_DIMS,
+      ...LEGACY_EMBEDDING_CONFIG,
     }, null, 2));
     process.env.GBRAIN_HOME = tmpBase;
     // See header: an exported DATABASE_URL makes loadConfig() infer postgres,

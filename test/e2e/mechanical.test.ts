@@ -13,12 +13,13 @@ import { join } from 'path';
 import { execSync } from 'child_process';
 import { tmpdir } from 'os';
 import {
-  hasDatabase, setupDB, teardownDB, getEngine, getConn,
+  hasDatabase, setupDB, setupLegacyEmbeddingDB, teardownDB, getEngine, getConn,
   importFixtures, importFixture, time, dumpDBState, FIXTURES_PATH,
 } from './helpers.ts';
 import { operationsByName, operations } from '../../src/core/operations.ts';
 import type { OperationContext } from '../../src/core/operations.ts';
 import { importFromContent } from '../../src/core/import-file.ts';
+import { LEGACY_EMBEDDING_CONFIG } from '../helpers/legacy-embedding-config.ts';
 
 // Skip all E2E tests if no database is configured
 const skip = !hasDatabase();
@@ -834,7 +835,7 @@ describeE2E('E2E: Idempotency', () => {
 
 describeE2E('E2E: Setup Journey', () => {
   beforeAll(async () => {
-    await setupDB();
+    await setupLegacyEmbeddingDB();
   }, 30_000);
   afterAll(teardownDB);
 
@@ -850,7 +851,8 @@ describeE2E('E2E: Setup Journey', () => {
     // inits in the file honor persisted config per D5 (no flag needed).
     const result = Bun.spawnSync({
       cmd: ['bun', 'run', 'src/cli.ts', 'init', '--non-interactive', '--url', process.env.DATABASE_URL!,
-            '--embedding-model', 'openai:text-embedding-3-large'],
+            '--embedding-model', LEGACY_EMBEDDING_CONFIG.embedding_model,
+            '--embedding-dimensions', String(LEGACY_EMBEDDING_CONFIG.embedding_dimensions)],
       cwd: cliCwd,
       env: cliEnv(),
       timeout: 15_000,
@@ -1345,7 +1347,7 @@ describeE2E('E2E: Doctor Command', () => {
   let gbrainHome: string;
 
   beforeAll(async () => {
-    await setupDB();
+    await setupLegacyEmbeddingDB();
     await importFixtures();
     // Isolate GBRAIN_HOME to a per-block tempdir so the developer's
     // ~/.gbrain/migrations/completed.jsonl ledger doesn't leak in. Without
@@ -1381,12 +1383,14 @@ describeE2E('E2E: Doctor Command', () => {
     // when ZEROENTROPY_API_KEY is in env) that mismatches the 1536d schema
     // setupDB initialized, producing a WARN-status embedding_width_consistency
     // check and exit 1. Mirrors the same pattern in 'Setup Journey'.
-    Bun.spawnSync({
+    const init = Bun.spawnSync({
       cmd: ['bun', 'run', 'src/cli.ts', 'init', '--non-interactive',
             '--url', process.env.DATABASE_URL!,
-            '--embedding-model', 'openai:text-embedding-3-large'],
+            '--embedding-model', LEGACY_EMBEDDING_CONFIG.embedding_model,
+            '--embedding-dimensions', String(LEGACY_EMBEDDING_CONFIG.embedding_dimensions)],
       cwd: cliCwd, env: cliEnv(), timeout: 15_000,
     });
+    expect(init.exitCode, new TextDecoder().decode(init.stderr)).toBe(0);
     const result = Bun.spawnSync({
       cmd: ['bun', 'run', 'src/cli.ts', 'doctor'],
       cwd: cliCwd,
