@@ -9,7 +9,7 @@ import { serializePageToMarkdown } from '../markdown.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
 import { materializePageSnapshot } from '../page-state/materialize.ts';
 import { installPageEmbeddings, readProjectionSnapshot } from '../page-state/projections.ts';
-import { currentEmbeddingSignature, embedBatch, getEmbeddingModelName } from '../embedding.ts';
+import { currentEmbeddingSignature, embedBatch } from '../embedding.ts';
 import { assertEmbeddingEnabled } from '../embedding-dim-check.ts';
 import { validateEmbeddingCreds } from '../embed-preflight.ts';
 import { wrapChunkTextsForStoredMode } from '../embedding-context.ts';
@@ -128,7 +128,7 @@ async function embedPage(engine: BrainEngine, config: GBrainConfig, effect: Pers
     const installed = await engine.transaction(async tx => {
       await guardEffectSource(tx, effect, opts.hostId);
       const installed = await installPageEmbeddings(tx, prepared, chunks.map((chunk, i) => ({ chunk_index: chunk.chunk_index,
-        chunk_text: chunk.chunk_text, chunk_source: chunk.chunk_source, embedding: vectors[i], model: opts.embedding?.model ?? getEmbeddingModelName() })), signature);
+        chunk_text: chunk.chunk_text, chunk_source: chunk.chunk_source, embedding: vectors[i], model: opts.embedding?.model })), signature);
       if (installed) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, snapshot.page.slug, effect.source_id);
       return installed;
     });

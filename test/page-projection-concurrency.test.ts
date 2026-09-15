@@ -7,6 +7,7 @@ import { installPageProjection, installPageEmbeddings, readProjectionSnapshot, r
 import { recordFactWithdrawal } from '../src/core/facts/withdrawal.ts';
 import { PageRevisionConflictError } from '../src/core/page-state/types.ts';
 import { sanitizeRemoteBody } from '../src/core/remote-body.ts';
+import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 
 const engines: BrainEngine[] = [];
 const sourceId = 'projection-concurrency-test';
@@ -126,4 +127,25 @@ test('embedding completion updates only vectors and rejects an indexing-context 
       else await engine.executeRaw("DELETE FROM config WHERE key='contextual_retrieval.mode'");
     }
   }
+});
+
+test('embedding completion stamps the captured full model and rejects a runtime model change', async () => {
+  try {
+    for (const engine of engines) {
+      configureGateway({ embedding_model: 'openai:text-embedding-3-small', embedding_dimensions: 1536, env: {} });
+      await engine.putPage('embedding-model', page('Model provenance'), { sourceId });
+      await installPageProjection(engine, (await engine.readPageSnapshot('embedding-model', { sourceId }))!, chunk('Model provenance'), { seal: true });
+      const prepared = (await readProjectionSnapshot(engine, 'embedding-model', sourceId))!;
+      const vector = new Float32Array(1536); vector[0] = 1;
+      expect(await installPageEmbeddings(engine, prepared, [{ ...chunk('Model provenance')[0], embedding: vector }])).toBe(true);
+      const [stored] = await engine.executeRaw<{ model: string }>('SELECT model FROM content_chunks WHERE id=$1', [prepared.chunks[0].id]);
+      expect(stored.model).toBe('openai:text-embedding-3-small');
+      configureGateway({ embedding_model: 'openai:text-embedding-3-large', embedding_dimensions: 1536, env: {} });
+      expect(await installPageEmbeddings(engine, prepared, [{ ...chunk('Model provenance')[0], embedding: vector }])).toBe(false);
+      expect((await engine.executeRaw<{ model: string }>('SELECT model FROM content_chunks WHERE id=$1', [prepared.chunks[0].id]))[0].model).toBe(stored.model);
+      const current = (await readProjectionSnapshot(engine, 'embedding-model', sourceId))!;
+      expect(await installPageEmbeddings(engine, current, [{ ...chunk('Model provenance')[0], embedding: vector, model: 'fixture:explicit-model' }])).toBe(true);
+      expect((await engine.executeRaw<{ model: string }>('SELECT model FROM content_chunks WHERE id=$1', [prepared.chunks[0].id]))[0].model).toBe('fixture:explicit-model');
+    }
+  } finally { resetGateway(); }
 });

@@ -7,6 +7,7 @@ import { sanitizeRemoteBody } from '../remote-body.ts';
 import { digest } from '../persistence/digest.ts';
 import { quoteIdentifier, resolveActiveEmbeddingColumnFromEngine, vectorCastSuffix } from '../search/embedding-column.ts';
 import { getFtsLanguage } from '../fts-language.ts';
+import { getEmbeddingModel } from '../ai/gateway.ts';
 
 /** Complete the searchable snapshot only after its sanitized chunks are installed. */
 export async function sealPageTextProjection(engine: BrainEngine, slug: string, sourceId: string): Promise<void> {
@@ -19,11 +20,13 @@ export async function sealPageTextProjection(engine: BrainEngine, slug: string, 
   [sourceId, slug, sanitizeRemoteBody(current.page.timeline), current.revision]);
 }
 
-export interface ProjectionSnapshot { snapshot: PageSnapshot; chunks: Chunk[]; indexingContext: string }
-async function indexingContext(engine: BrainEngine, snapshot: PageSnapshot): Promise<string> {
+export interface ProjectionSnapshot { snapshot: PageSnapshot; chunks: Chunk[]; indexingContext: string; embeddingModel: string | null }
+async function indexingContext(engine: BrainEngine, snapshot: PageSnapshot): Promise<{ key: string; model: string | null }> {
   const config = await engine.executeRaw<{ key: string; value: string }>(
     "SELECT key,value FROM config WHERE key IN ('search_embedding_column','embedding_columns','embedding_model','embedding_dimensions','contextual_retrieval.mode') ORDER BY key");
-  return digest({ config, mode: snapshot.page.contextual_retrieval_mode });
+  let model = config.find(row => row.key === 'embedding_model')?.value ?? null;
+  try { model = getEmbeddingModel(); } catch { /* Unconfigured gateway: retain the brain's recorded model. */ }
+  return { key: digest({ config, mode: snapshot.page.contextual_retrieval_mode, model }), model };
 }
 
 /** A short guarded read binds the exact chunk set and title/body revision. */
@@ -32,7 +35,8 @@ export async function readProjectionSnapshot(engine: BrainEngine, slug: string, 
     await tx.lockPageKeys([{ sourceId, slug }]);
     const snapshot = await tx.readPageSnapshot(slug, { sourceId });
     if (!snapshot || snapshot.page.text_projection_revision !== snapshot.revision) return null;
-    return { snapshot, chunks: await tx.getChunks(slug, { sourceId, includeUnsealed: true }), indexingContext: await indexingContext(tx, snapshot) };
+    const context = await indexingContext(tx, snapshot);
+    return { snapshot, chunks: await tx.getChunks(slug, { sourceId, includeUnsealed: true }), indexingContext: context.key, embeddingModel: context.model };
   });
 }
 
@@ -67,7 +71,7 @@ export async function installPageEmbeddings(engine: BrainEngine, prepared: Proje
     const current = await tx.readPageSnapshot(slug, { sourceId });
     if (!current || current.revision !== snapshot.revision || current.sourceIncarnation !== snapshot.sourceIncarnation
       || current.page.text_projection_revision !== current.revision) return false;
-    if (await indexingContext(tx, current) !== prepared.indexingContext) return false;
+    if ((await indexingContext(tx, current)).key !== prepared.indexingContext) return false;
     const stored = await tx.getChunks(slug, { sourceId, includeUnsealed: true });
     if (stored.length !== prepared.chunks.length || stored.some((c, i) => c.id !== prepared.chunks[i].id
       || c.chunk_index !== prepared.chunks[i].chunk_index || c.chunk_text !== prepared.chunks[i].chunk_text)) return false;
@@ -87,7 +91,9 @@ export async function installPageEmbeddings(engine: BrainEngine, prepared: Proje
         embedding_image=CASE WHEN $3::text IS NULL THEN embedding_image ELSE $3::vector END,
         embedded_at=now(),embedded_text_hash=md5(chunk_text),model=COALESCE($4,model)
         WHERE id=$1 AND page_id=$5 AND chunk_text=$6`,
-      [original.id, vector, image, chunk.model ?? null, snapshot.page.id, original.chunk_text]);
+      // Bind the full provider:model captured before the provider call. Keeping
+      // an old label on a new vector prevents provenance-complete migration.
+      [original.id, vector, image, chunk.model ?? (vector ? prepared.embeddingModel : null), snapshot.page.id, original.chunk_text]);
     }
     if (signature) await tx.setPageEmbeddingSignature(slug, { sourceId, signature });
     return true;
