@@ -722,7 +722,35 @@ async function main() {
     return;
   }
 
-  // Local engine path (unchanged behavior for local installs).
+  // The live PGLite owner exposes canonical operations over a dedicated
+  // local socket. Delegate before opening a competing engine connection.
+  {
+    const { maybeDelegateLocalOperation } = await import('./core/persistence/local-client.ts');
+    const { PersistenceIpcTransportError } = await import('./core/persistence/ipc.ts');
+    try {
+      const delegated = await maybeDelegateLocalOperation(op.name, params, cfgPre, {
+        brain: cliOpts.brain, timeoutMs: cliOpts.timeoutMs ?? undefined,
+      });
+      if (delegated.handled) {
+        const output = formatResult(op.name, delegated.result, params);
+        if (output) await writeStdoutFinal(output);
+        if ((delegated.result as { status?: unknown } | null)?.status === 'error') setCliExitVerdict(1);
+        return;
+      }
+    } catch (error) {
+      if (error instanceof OperationError || error instanceof PersistenceIpcTransportError) {
+        if (params.json) await writeStdoutFinal(JSON.stringify(error.toJSON(), null, 2) + '\n');
+        console.error(error.message);
+        const detail = error.toJSON();
+        if (detail.suggestion) console.error(detail.suggestion);
+        setCliExitVerdict(1);
+        return;
+      }
+      throw error;
+    }
+  }
+
+  // No live serve owns the selected brain; connect through the normal lock path.
   const engine = await connectEngine();
   // #2084: the teardown contract (bounded drain of every background-work sink,
   // bounded disconnect, computed-deadline backstop) lives in finishCliTeardown
