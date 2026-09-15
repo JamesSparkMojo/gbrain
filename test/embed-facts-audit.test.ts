@@ -9,25 +9,39 @@
  *     `--facts --background` with a usage line + exit 1, before any DB work.
  *   - runEmbed --stale --facts --dry-run --json is keyless-safe (no creds
  *     preflight), prints the EmbedFactsResult and maps it onto EmbedResult.
- *   - #4867 review: `--source` / `--batch-size` fail closed (missing, flag-like,
- *     inline `=` form, malformed or unknown source, non-positive batch) with
- *     exit 1 BEFORE the creds preflight; the summary names the scope; the
- *     non-dry-run drain single-flights on embedFactsBackfillLockId(); a
- *     facts.embedding width that differs from the configured width exits 1
- *     before the lock and before any provider call.
+ *   - `--source` / `--batch-size` fail closed (missing, flag-like, inline `=`
+ *     form, malformed or unknown source, non-positive batch, batch above the
+ *     500 cap) with exit 1 BEFORE the creds preflight; chunk-only flags
+ *     (--pace, --slugs, --all, ...) are refused with the usage line; the
+ *     summary names the scope; a facts.embedding width that differs from the
+ *     configured width exits 1 before the lock and before any provider call.
+ *   - Single-flight on EMBED_FACTS_BACKFILL_LOCK_ID: a held lock is
+ *     lock_skipped + exit 0 (cron-friendly); the heartbeat aborts the drain
+ *     as lock_lost when the lock is stolen; a lock-subsystem error and a
+ *     width-probe error both fail OPEN (the drain runs).
+ *   - Progress: `embed.facts` starts before the first provider call.
+ *   - A keyless (embedding_disabled) brain rejects a live run with
+ *     EmbeddingDisabledError rather than exiting 0.
  *   - embedStaleFacts loop edges: pre-aborted signal, batchSize clamp,
  *     failure_samples cap, onProgress arguments, NaN vector rejected.
  *
  * Hermetic: injected embedFn, PGLite, no provider keys required.
  */
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
+import { withEnv } from './helpers/with-env.ts';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { embedStaleFacts } from '../src/core/embed-facts.ts';
 import { runEmbed, isKeylessStaleRefusal } from '../src/commands/embed.ts';
 import { tryAcquireDbLock } from '../src/core/db-lock.ts';
-import { embedFactsBackfillLockId } from '../src/core/embed-backfill-lock.ts';
+import { EMBED_FACTS_BACKFILL_LOCK_ID } from '../src/core/embed-backfill-lock.ts';
 import { __setEmbedTransportForTests, configureGateway } from '../src/core/ai/gateway.ts';
+import { setCliOptions, _resetCliOptionsForTest, DEFAULT_CLI_OPTIONS } from '../src/core/cli-options.ts';
+import { EmbeddingDisabledError } from '../src/core/embedding-dim-check.ts';
+import { configPath } from '../src/core/config.ts';
 import { LEGACY_EMBEDDING_CONFIG } from './helpers/legacy-embedding-config.ts';
 
 let engine: PGLiteEngine;
@@ -102,6 +116,67 @@ function fakeEmbedFn(texts: string[]): Promise<Float32Array[]> {
 async function pendingCount(): Promise<number> {
   const rows = await engine.executeRaw<{ n: number }>(
     `SELECT count(*)::int AS n FROM facts WHERE embedding IS NULL AND expired_at IS NULL`,
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
+/** Embed transport stub whose behaviour per call is injected; returns the recorded input batches. */
+function stubEmbedTransportWith(onCall: (call: number) => Promise<void>): string[][] {
+  const calls: string[][] = [];
+  __setEmbedTransportForTests((async (params: { values: string[] }) => {
+    calls.push([...params.values]);
+    await onCall(calls.length);
+    return {
+      embeddings: params.values.map((v) => Array.from(new Float32Array(dims).fill(0).map((_, i) => (i === 0 ? v.length : i === 1 ? 1 : 0)))),
+      values: params.values,
+      warnings: [],
+      usage: { tokens: params.values.length },
+    };
+  }) as unknown as Parameters<typeof __setEmbedTransportForTests>[0]);
+  return calls;
+}
+
+/** The real engine with `executeRaw` rejecting for SQL matching `failing` (the facts width probe). */
+function withFailingExecuteRaw(real: PGLiteEngine, failing: RegExp): BrainEngine {
+  return new Proxy(real, {
+    get(t, p) {
+      if (p === 'executeRaw') {
+        return (sql: string, ...rest: unknown[]) => failing.test(sql)
+          ? Promise.reject(new Error('probe unavailable'))
+          : (t.executeRaw as (...a: unknown[]) => Promise<unknown>).call(t, sql, ...rest);
+      }
+      const v = Reflect.get(t, p);
+      return typeof v === 'function' ? v.bind(t) : v;
+    },
+  }) as unknown as BrainEngine;
+}
+
+/** The real engine whose lock table is unreachable (tryAcquireDbLock goes through `engine.db.query` on PGLite). */
+function withLockTableDown(real: PGLiteEngine): BrainEngine {
+  const realDb = (real as unknown as { db: { query: (sql: string, params?: unknown[]) => Promise<unknown> } }).db;
+  const fakeDb = new Proxy(realDb, {
+    get(t, p) {
+      if (p === 'query') {
+        return (sql: string, params?: unknown[]) => /gbrain_cycle_locks/.test(sql)
+          ? Promise.reject(new Error('lock table unavailable'))
+          : t.query(sql, params);
+      }
+      const v = Reflect.get(t, p);
+      return typeof v === 'function' ? v.bind(t) : v;
+    },
+  });
+  return new Proxy(real, {
+    get(t, p) {
+      if (p === 'db') return fakeDb;
+      const v = Reflect.get(t, p);
+      return typeof v === 'function' ? v.bind(t) : v;
+    },
+  }) as unknown as BrainEngine;
+}
+
+async function lockRowCount(): Promise<number> {
+  const rows = await engine.executeRaw<{ n: number }>(
+    `SELECT count(*)::int AS n FROM gbrain_cycle_locks WHERE id = $1`, [EMBED_FACTS_BACKFILL_LOCK_ID],
   );
   return Number(rows[0]?.n ?? 0);
 }
@@ -223,18 +298,20 @@ describe('runEmbed --facts CLI branch', () => {
     expect(await pendingCount()).toBe(1);
   });
 
-  test('single-flight: a held facts lock refuses the run with exit 1 and no provider call; once released the drain runs and releases it again', async () => {
+  test('single-flight: a held facts lock skips the run (lock_skipped, exit 0) with no provider call; once released the drain runs and releases it again', async () => {
     await seedStaleFacts(2);
     const calls = stubEmbedTransport();
     // Keyless run: the fake key only satisfies the gateway's provider-key check
     // so the call reaches the stub; GBRAIN_HOME is already scoped by the preload.
     pinGateway({ OPENAI_API_KEY: 'sk-fake' });
-    const held = await tryAcquireDbLock(engine, embedFactsBackfillLockId(), 60);
+    const held = await tryAcquireDbLock(engine, EMBED_FACTS_BACKFILL_LOCK_ID, 60);
     expect(held).not.toBeNull();
     try {
       const refused = await withCliCapture(() => runEmbed(engine, ['--stale', '--facts']));
-      expect(exitCode(refused)).toBe('__exit__1');
+      expect(refused.thrown).toBeUndefined();
+      expect(refused.result).toMatchObject({ lock_skipped: true, embedded: 0, failures: 0, total_chunks: 0, dryRun: false });
       expect(refused.stderr.join('\n')).toContain('another facts backfill is already running (all sources)');
+      expect(refused.stdout).toEqual([]);
       expect(calls).toEqual([]);
       expect(await pendingCount()).toBe(2);
 
@@ -246,12 +323,136 @@ describe('runEmbed --facts CLI branch', () => {
       expect(calls.length).toBe(2);
       expect(await pendingCount()).toBe(0);
       // Released in finally: the key is free again immediately.
-      const again = await tryAcquireDbLock(engine, embedFactsBackfillLockId(), 60);
+      const again = await tryAcquireDbLock(engine, EMBED_FACTS_BACKFILL_LOCK_ID, 60);
       expect(again).not.toBeNull();
       await again!.release();
     } finally {
       __setEmbedTransportForTests(null);
       pinGateway();
+    }
+  });
+
+  test('--batch-size above the 500 cap exits 1 naming the cap, before any provider call', async () => {
+    await seedStaleFacts(1);
+    const run = await withCliCapture(() => runEmbed(engine, ['--stale', '--facts', '--batch-size', '2000']));
+    expect(exitCode(run)).toBe('__exit__1');
+    expect(run.stderr.join('\n')).toContain('Invalid --batch-size "2000". The facts drain sends at most 500 facts');
+    expect(await pendingCount()).toBe(1);
+  });
+
+  test('chunk-only flags are refused with the usage line, not silently ignored', async () => {
+    await seedStaleFacts(1);
+    for (const extra of [['--pace'], ['--pace=gentle'], ['--pace-max-concurrency', '4'], ['--slugs', 'a'], ['--all'], ['--priority', 'recent'], ['--catch-up']]) {
+      const args = ['--stale', '--facts', '--dry-run', ...extra];
+      const run = await withCliCapture(() => runEmbed(engine, args));
+      expect(exitCode(run), args.join(' ')).toBe('__exit__1');
+      expect(run.stderr.join('\n'), args.join(' ')).toContain('Usage: gbrain embed --stale --facts');
+      expect(run.stdout).toEqual([]);
+    }
+    expect(await pendingCount()).toBe(1);
+  });
+
+  test('heartbeat: a lock stolen mid-drain aborts the drain as lock_lost with the rows left NULL', async () => {
+    await seedStaleFacts(3);
+    // Call 1 yanks the lock row out from under the drain, then idles long
+    // enough for the 5ms heartbeat to see the fenced refresh match 0 rows.
+    const calls = stubEmbedTransportWith(async (call) => {
+      if (call !== 1) return;
+      await engine.executeRaw(`DELETE FROM gbrain_cycle_locks WHERE id = $1`, [EMBED_FACTS_BACKFILL_LOCK_ID]);
+      await new Promise((r) => setTimeout(r, 150));
+    });
+    pinGateway({ OPENAI_API_KEY: 'sk-fake' });
+    try {
+      const run = await withEnv({ GBRAIN_EMBED_LOCK_HEARTBEAT_MS: '5' }, () =>
+        withCliCapture(() => runEmbed(engine, ['--stale', '--facts', '--batch-size', '1'])));
+      expect(run.thrown).toBeUndefined();
+      expect(run.result).toMatchObject({ lock_lost: true, failures: 0, total_chunks: 3 });
+      expect(run.stderr.join('\n')).toContain('single-flight lock was stolen or released mid-run');
+      // The drain stopped at the lost lock: one provider call, not three.
+      expect(calls.length).toBe(1);
+      expect(await pendingCount()).toBeGreaterThanOrEqual(2);
+    } finally {
+      __setEmbedTransportForTests(null);
+      pinGateway();
+    }
+  });
+
+  test('progress: the embed.facts start event is on stderr before the first provider call', async () => {
+    await seedStaleFacts(2);
+    const chunks: string[] = [];
+    let startSeenAtFirstCall: boolean | undefined;
+    const calls = stubEmbedTransportWith(async (call) => {
+      if (call === 1) startSeenAtFirstCall = chunks.some((c) => c.includes('"event":"start"') && c.includes('"phase":"embed.facts"'));
+    });
+    pinGateway({ OPENAI_API_KEY: 'sk-fake' });
+    setCliOptions({ ...DEFAULT_CLI_OPTIONS, progressJson: true });
+    const origWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown, ...rest: unknown[]) => {
+      chunks.push(String(chunk));
+      const cb = rest.find((r) => typeof r === 'function') as ((err?: Error) => void) | undefined;
+      cb?.();
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const run = await withCliCapture(() => runEmbed(engine, ['--stale', '--facts']));
+      expect(run.thrown).toBeUndefined();
+      expect(run.result).toMatchObject({ embedded: 2, failures: 0 });
+      expect(calls.length).toBe(1);
+      expect(startSeenAtFirstCall).toBe(true);
+      const start = chunks.map((c) => c.trim()).filter((c) => c.includes('"event":"start"')).map((c) => JSON.parse(c) as { total?: number });
+      expect(start).toHaveLength(1);
+      expect(start[0].total).toBe(2);
+    } finally {
+      process.stderr.write = origWrite;
+      _resetCliOptionsForTest();
+      __setEmbedTransportForTests(null);
+      pinGateway();
+    }
+  });
+
+  test('fail-open: a throwing width probe and a throwing lock acquire both let the drain run', async () => {
+    pinGateway({ OPENAI_API_KEY: 'sk-fake' });
+    try {
+      // Width probe unreadable → drift check falls open; the lock still works.
+      await seedStaleFacts(2);
+      let calls = stubEmbedTransportWith(async () => {});
+      const probeDown = await withCliCapture(() => runEmbed(withFailingExecuteRaw(engine, /information_schema\.columns/), ['--stale', '--facts']));
+      expect(probeDown.thrown).toBeUndefined();
+      expect(probeDown.result).toMatchObject({ embedded: 2, failures: 0 });
+      expect(calls.length).toBe(1);
+      expect(await pendingCount()).toBe(0);
+      expect(await lockRowCount()).toBe(0);
+
+      // Lock table unreachable → single-flight is dropped for this run; the drain proceeds unlocked.
+      await resetPgliteState(engine);
+      await seedStaleFacts(2);
+      calls = stubEmbedTransportWith(async () => {});
+      const lockDown = await withCliCapture(() => runEmbed(withLockTableDown(engine), ['--stale', '--facts']));
+      expect(lockDown.thrown).toBeUndefined();
+      expect(lockDown.result).toMatchObject({ embedded: 2, failures: 0 });
+      expect(lockDown.result?.lock_skipped).toBeUndefined();
+      expect(lockDown.stderr.join('\n')).not.toContain('another facts backfill');
+      expect(calls.length).toBe(1);
+      expect(await pendingCount()).toBe(0);
+    } finally {
+      __setEmbedTransportForTests(null);
+      pinGateway();
+    }
+  });
+
+  test('keyless brain (embedding_disabled): a live run rejects with EmbeddingDisabledError, never a silent exit 0', async () => {
+    await seedStaleFacts(1);
+    const path = configPath();
+    const prior = existsSync(path) ? readFileSync(path, 'utf-8') : null;
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ engine: 'pglite', embedding_disabled: true }));
+    try {
+      const run = await withCliCapture(() => runEmbed(engine, ['--stale', '--facts']));
+      expect(run.thrown).toBeInstanceOf(EmbeddingDisabledError);
+      expect(run.stdout).toEqual([]);
+      expect(await pendingCount()).toBe(1);
+    } finally {
+      if (prior === null) unlinkSync(path); else writeFileSync(path, prior);
     }
   });
 
@@ -271,7 +472,7 @@ describe('runEmbed --facts CLI branch', () => {
       expect(calls).toEqual([]);
       expect(await pendingCount()).toBe(1);
       // Refused BEFORE the lock: the key is still free.
-      const free = await tryAcquireDbLock(engine, embedFactsBackfillLockId(), 60);
+      const free = await tryAcquireDbLock(engine, EMBED_FACTS_BACKFILL_LOCK_ID, 60);
       expect(free).not.toBeNull();
       await free!.release();
     } finally {
@@ -289,7 +490,7 @@ describe('embedStaleFacts loop edges', () => {
 
     // dry-run early return still reports progress once.
     await embedStaleFacts(engine, { dryRun: true, embedFn: fakeEmbedFn, onProgress });
-    expect(progress).toEqual([[11, 11, 0]]);
+    expect(progress).toEqual([[0, 11, 0], [11, 11, 0]]);
 
     // Already-aborted signal breaks before selecting or embedding anything.
     const ac = new AbortController();
@@ -332,7 +533,7 @@ describe('embedStaleFacts loop edges', () => {
     expect(sizes).toEqual([2, 2, 2, 2, 2, 1]);
     expect(ok.embedded).toBe(11);
     expect(ok.failures).toBe(0);
-    expect(progress.map(([d]) => d)).toEqual([2, 4, 6, 8, 10, 11]);
+    expect(progress.map(([d]) => d)).toEqual([0, 2, 4, 6, 8, 10, 11]);
     expect(progress.every(([d, t]) => d <= t)).toBe(true);
     expect(progress.at(-1)).toEqual([11, 11, 11]);
     expect(await pendingCount()).toBe(0);

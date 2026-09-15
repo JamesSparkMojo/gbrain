@@ -3869,7 +3869,7 @@ FILES
 
 EMBEDDINGS
   embed [<slug>|--all|--stale]       Generate/refresh embeddings
-  embed --stale --facts [--dry-run] [--source ID]   Backfill fact rows that never got a vector
+  embed --stale --facts [--dry-run] [--batch-size N] [--source <id>|--source=<id>] [--json]   Backfill fact rows that never got a vector
 
 LINKS
   link <from> <to>                   Create typed link (alias: link-add)

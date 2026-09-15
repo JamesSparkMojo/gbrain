@@ -19,6 +19,8 @@ import { estimateTokens } from './chunkers/token-estimate.ts';
 import { AUDIT_ROW_SOURCES } from './facts/audit-sources.ts';
 
 const DEFAULT_BATCH_SIZE = 100;
+/** Facts per provider call ceiling; the CLI refuses a larger --batch-size, library callers are clamped. */
+export const FACTS_EMBED_MAX_BATCH = 500;
 
 export interface EmbedFactsOpts {
   batchSize?: number;
@@ -73,12 +75,15 @@ export async function embedStaleFacts(
     failure_samples: [],
     dryRun: !!opts.dryRun,
   };
+  // Reported before the first provider call so a progress reporter can start
+  // (and show the total) while batch 1 is still in flight.
+  opts.onProgress?.(0, total, 0);
   if (opts.dryRun || total === 0) {
     opts.onProgress?.(total, total, 0);
     return result;
   }
 
-  const batchSize = Math.min(500, Math.max(1, Math.floor(opts.batchSize ?? DEFAULT_BATCH_SIZE)));
+  const batchSize = Math.min(FACTS_EMBED_MAX_BATCH, Math.max(1, Math.floor(opts.batchSize ?? DEFAULT_BATCH_SIZE)));
   const embedFn = opts.embedFn ?? ((texts: string[], embedOpts: { abortSignal?: AbortSignal }) =>
     embedBatchWithBackoff(texts, embedOpts));
   const maxTokens = opts.maxInputTokens ?? resolveMaxChunkTokens();
@@ -124,6 +129,10 @@ export async function embedStaleFacts(
         }));
         result.embedded += await engine.updateFactEmbeddings(writes, { signal: opts.signal });
       } catch (error: unknown) {
+        // A caller abort (lost lock, budget) mid-batch is a clean, resumable
+        // stop: the rows stay NULL for the next run rather than counting as
+        // provider failures.
+        if (opts.signal?.aborted) break;
         result.failures += sendable.length;
         noteFailure(error instanceof Error ? error.message : String(error));
       }

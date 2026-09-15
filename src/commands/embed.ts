@@ -27,7 +27,8 @@ import {
   type PaceKeyOverrides,
 } from '../core/pace-mode.ts';
 import { tryAcquireDbLock, type DbLockHandle } from '../core/db-lock.ts';
-import { embedBackfillLockId, embedFactsBackfillLockId, EMBED_BACKFILL_LOCK_TTL_MIN } from '../core/embed-backfill-lock.ts';
+import { embedBackfillLockId, EMBED_FACTS_BACKFILL_LOCK_ID, EMBED_BACKFILL_LOCK_TTL_MIN } from '../core/embed-backfill-lock.ts';
+import { embedStaleFacts, FACTS_EMBED_MAX_BATCH } from '../core/embed-facts.ts';
 import { assertValidSourceId } from '../core/source-id.ts';
 import { AITransientError } from '../core/ai/errors.ts';
 import { wrapChunkTextsForStoredMode } from '../core/embedding-context.ts';
@@ -68,6 +69,104 @@ export type { EmbedBatchWithBackoffOpts } from '../core/embed-retry.ts';
 /** #3037: cap failure samples so a corpus-wide outage doesn't bloat --json. */
 const FAILURE_SAMPLE_CAP = 10;
 const DEFAULT_EMBED_LOCK_HEARTBEAT_TIMEOUT_MS = 30_000;
+
+interface LockHeartbeat {
+  /** Aborted when the lock is lost (or the owner calls `abort`). */
+  signal: AbortSignal;
+  abort: () => void;
+  stop: () => void;
+}
+
+/**
+ * Single-flight lock heartbeat shared by the chunk drain and the facts drain.
+ * The lock TTL is 60 minutes and long drains outlive it, so without refresh
+ * another process could steal the lock mid-drain and mutual exclusion silently
+ * ends. Refreshes every GBRAIN_EMBED_LOCK_HEARTBEAT_MS (default 5 min; test
+ * seam). Each tick is bounded by GBRAIN_EMBED_LOCK_HEARTBEAT_TIMEOUT_MS
+ * (default 30s) with its own AbortController so ONE never-settling refresh
+ * can't silence the heartbeat, and a slow tick never stacks on the next. A
+ * refresh that returns false (fenced predicate matched 0 rows = stolen or
+ * released) or 3 consecutive tick failures calls `onLost` once and aborts
+ * `signal` — continuing without the lock is the one thing this machinery
+ * exists to prevent. No interval is armed for an empty `locks` list; the
+ * signal still exists so the owner can abort the drain itself.
+ */
+function startLockHeartbeat(locks: DbLockHandle[], onLost: () => void): LockHeartbeat {
+  const lockAbort = new AbortController();
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let heartbeatTickAbort: AbortController | undefined;
+  let stopping = false;
+  const stop = (): void => {
+    stopping = true;
+    if (heartbeat !== undefined) {
+      clearInterval(heartbeat);
+      heartbeat = undefined;
+    }
+    if (heartbeatTickAbort && !heartbeatTickAbort.signal.aborted) {
+      heartbeatTickAbort.abort();
+    }
+  };
+  const lose = (message: string): void => {
+    onLost();
+    serr(message);
+    stop();
+    lockAbort.abort();
+  };
+  const heartbeatMs = Number(process.env.GBRAIN_EMBED_LOCK_HEARTBEAT_MS) > 0
+    ? Number(process.env.GBRAIN_EMBED_LOCK_HEARTBEAT_MS)
+    : 5 * 60 * 1000;
+  const heartbeatTimeoutMs = Number(process.env.GBRAIN_EMBED_LOCK_HEARTBEAT_TIMEOUT_MS) > 0
+    ? Number(process.env.GBRAIN_EMBED_LOCK_HEARTBEAT_TIMEOUT_MS)
+    : DEFAULT_EMBED_LOCK_HEARTBEAT_TIMEOUT_MS;
+  if (locks.length > 0) {
+    let consecutiveErrors = 0;
+    let beating = false;
+    heartbeat = setInterval(() => {
+      if (beating) return; // a slow tick must not stack
+      beating = true;
+      void (async () => {
+        const tickAbort = new AbortController();
+        heartbeatTickAbort = tickAbort;
+        let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+          timeoutTimer = setTimeout(() => {
+            tickAbort.abort();
+            reject(new Error('refresh_timeout'));
+          }, heartbeatTimeoutMs);
+          (timeoutTimer as unknown as { unref?: () => void }).unref?.();
+        });
+        try {
+          if (lockAbort.signal.aborted) return;
+          for (const h of locks) {
+            const ok = await Promise.race([h.refresh({ signal: tickAbort.signal }), timeout]);
+            if (!ok) {
+              lose('  [embed] single-flight lock was stolen or released mid-run; aborting the drain (partial progress is banked — re-run to resume).');
+              return;
+            }
+          }
+          consecutiveErrors = 0;
+        } catch {
+          if (stopping) return;
+          consecutiveErrors += 1;
+          if (consecutiveErrors >= 3) {
+            lose('  [embed] lock heartbeat failed 3 consecutive times; aborting the drain rather than running without mutual exclusion.');
+          }
+        } finally {
+          if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
+          if (heartbeatTickAbort === tickAbort) heartbeatTickAbort = undefined;
+          beating = false;
+        }
+      })();
+    }, heartbeatMs);
+    // Deliberately NOT unref'd: if the drain promise is lost (#4599 class),
+    // the referenced interval keeps the process alive as a LOUD hang instead
+    // of a silent exit-0 that leaks the single-flight locks. The per-tick
+    // timeout timer above IS unref'd — the interval already anchors the
+    // event loop, so the 30s tick timeout must not extend process lifetime
+    // past stop().
+  }
+  return { signal: lockAbort.signal, abort: () => lockAbort.abort(), stop };
+}
 
 /**
  * #3037: record embed failures on the run result. `chunkCount` is the number
@@ -502,90 +601,14 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
       }
     }
 
-    // Lock heartbeat (round-2 C3/#5): the TTL is 60 minutes and million-chunk
-    // drains run longer, so without refresh another process could steal the
-    // lock mid-drain and mutual exclusion silently ends. Refresh every 5
-    // minutes; a refresh that returns false (fenced predicate matched 0 rows
-    // = stolen/released) or that keeps THROWING (3 consecutive transient
-    // errors) aborts the drain — continuing without the lock is the one
-    // thing this machinery exists to prevent. Covers both our own sfLocks
-    // and caller-held locks (the migration's).
+    // Lock heartbeat (shared with the facts drain — see startLockHeartbeat):
+    // covers both our own sfLocks and caller-held locks (the migration's).
     const activeLocks: DbLockHandle[] = callerHeld ? [...(opts.heldLocks ?? [])] : sfLocks;
-    const lockAbort = new AbortController();
-    let heartbeat: ReturnType<typeof setInterval> | undefined;
-    let heartbeatTickAbort: AbortController | undefined;
-    let stoppingHeartbeat = false;
-    const stopHeartbeat = (): void => {
-      stoppingHeartbeat = true;
-      if (heartbeat !== undefined) {
-        clearInterval(heartbeat);
-        heartbeat = undefined;
-      }
-      if (heartbeatTickAbort && !heartbeatTickAbort.signal.aborted) {
-        heartbeatTickAbort.abort();
-      }
-    };
-    // Test seam: default 5 min; tests shrink it to exercise the loss path.
-    const heartbeatMs = Number(process.env.GBRAIN_EMBED_LOCK_HEARTBEAT_MS) > 0
-      ? Number(process.env.GBRAIN_EMBED_LOCK_HEARTBEAT_MS)
-      : 5 * 60 * 1000;
-    const heartbeatTimeoutMs = Number(process.env.GBRAIN_EMBED_LOCK_HEARTBEAT_TIMEOUT_MS) > 0
-      ? Number(process.env.GBRAIN_EMBED_LOCK_HEARTBEAT_TIMEOUT_MS)
-      : DEFAULT_EMBED_LOCK_HEARTBEAT_TIMEOUT_MS;
-    if (activeLocks.length > 0 && !opts.dryRun) {
-      let consecutiveErrors = 0;
-      let beating = false;
-      heartbeat = setInterval(() => {
-        if (beating) return; // a slow tick must not stack
-        beating = true;
-        void (async () => {
-          const tickAbort = new AbortController();
-          heartbeatTickAbort = tickAbort;
-          let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-          const timeout = new Promise<never>((_, reject) => {
-            timeoutTimer = setTimeout(() => {
-              tickAbort.abort();
-              reject(new Error('refresh_timeout'));
-            }, heartbeatTimeoutMs);
-            (timeoutTimer as unknown as { unref?: () => void }).unref?.();
-          });
-          try {
-            if (lockAbort.signal.aborted) return;
-            for (const h of activeLocks) {
-              const ok = await Promise.race([h.refresh({ signal: tickAbort.signal }), timeout]);
-              if (!ok) {
-                result.lock_lost = true;
-                serr('  [embed] single-flight lock was stolen or released mid-run; aborting the drain (partial progress is banked — re-run to resume).');
-                stopHeartbeat();
-                lockAbort.abort();
-                return;
-              }
-            }
-            consecutiveErrors = 0;
-          } catch {
-            if (stoppingHeartbeat) return;
-            consecutiveErrors += 1;
-            if (consecutiveErrors >= 3) {
-              result.lock_lost = true;
-              serr('  [embed] lock heartbeat failed 3 consecutive times; aborting the drain rather than running without mutual exclusion.');
-              stopHeartbeat();
-              lockAbort.abort();
-            }
-          } finally {
-            if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
-            if (heartbeatTickAbort === tickAbort) heartbeatTickAbort = undefined;
-            beating = false;
-          }
-        })();
-      }, heartbeatMs);
-      // Deliberately NOT unref'd: if the drain promise is lost (#4599 class),
-      // the referenced interval keeps the process alive as a LOUD hang instead
-      // of a silent exit-0 that leaks the single-flight locks. The per-tick
-      // timeout timer above IS unref'd — the interval already anchors the
-      // event loop, so the 30s tick timeout must not extend process lifetime
-      // past stopHeartbeat().
-    }
-    const drainSignal = anySignal(lockAbort.signal, opts.signal);
+    const heartbeat = startLockHeartbeat(
+      activeLocks.length > 0 && !opts.dryRun ? activeLocks : [],
+      () => { result.lock_lost = true; },
+    );
+    const drainSignal = anySignal(heartbeat.signal, opts.signal);
 
     // Resolve DB-contention pacing (env > config > bundle; env is the
     // incident escape hatch). dryRun skips it — no writes to pace. A
@@ -632,7 +655,7 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
     const flushAndRelease = async (): Promise<void> => {
       if (drainCleanupDone) return;
       drainCleanupDone = true;
-      stopHeartbeat();
+      heartbeat.stop();
       try {
         // E1: surface pacing telemetry (human + structured) when pacing was on.
         const snap = pacer.snapshot();
@@ -742,8 +765,8 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
         `Partial progress is banked (embedded=${result.embedded}); single-flight locks released; re-run to resume. ` +
         'Tune via GBRAIN_EMBED_STALL_ABORT_SECONDS (0 disables).',
     );
-    lockAbort.abort();
-    // Deadline timer is REFERENCED on purpose: after stop()/stopHeartbeat it
+    heartbeat.abort();
+    // Deadline timer is REFERENCED on purpose: after stop()/heartbeat.stop() it
     // may be the only live handle — unref'ing it could let a wedged cleanup
     // become a silent exit-0 instead of reaching the force path.
     let cleanupDeadline: ReturnType<typeof setTimeout> | undefined;
@@ -829,12 +852,11 @@ export function isKeylessStaleRefusal(args: string[], embeddingDisabled: boolean
 }
 
 /**
- * `--name <v>` / `--name=<v>` for the --facts branch. undefined = flag absent;
- * '' = flag present without a usable value (nothing after it, or the next
- * token is itself a flag) so the caller can fail closed instead of running
- * unscoped.
+ * `--name <v>` / `--name=<v>`. undefined = flag absent; '' = flag present
+ * without a usable value (nothing after it, or the next token is itself a
+ * flag) so the caller can fail closed instead of running unscoped.
  */
-function factsFlagValue(args: string[], name: string): string | undefined {
+function flagValue(args: string[], name: string): string | undefined {
   const inline = args.find((a) => a.startsWith(`${name}=`));
   if (inline !== undefined) return inline.slice(name.length + 1);
   const i = args.indexOf(name);
@@ -843,11 +865,48 @@ function factsFlagValue(args: string[], name: string): string | undefined {
   return v === undefined || v.startsWith('--') ? '' : v;
 }
 
+/**
+ * `--source` for every embed entry point (facts branch, chunk path, the
+ * --background payload). Fails closed: a missing / flag-like / empty value or
+ * a malformed id exits 1 on stderr before any preflight, lock, or provider
+ * call — an unscoped drain pays the provider for EVERY source.
+ */
+function sourceFlag(args: string[]): string | undefined {
+  const raw = flagValue(args, '--source');
+  if (raw === undefined) return undefined;
+  if (raw === '') {
+    serr('--source requires a value: --source <id> or --source=<id>');
+    process.exit(1);
+  }
+  try {
+    assertValidSourceId(raw);
+  } catch (e) {
+    serr(e instanceof Error ? e.message : String(e));
+    process.exit(1);
+  }
+  return raw;
+}
+
+/** `--batch-size` for every embed entry point: a positive integer or exit 1. */
+function batchSizeFlag(args: string[]): number | undefined {
+  const raw = flagValue(args, '--batch-size');
+  if (raw === undefined) return undefined;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isInteger(n) || n < 1) {
+    serr(`Invalid --batch-size "${raw}". Expected a positive integer.`);
+    process.exit(1);
+  }
+  return n;
+}
+
+/** Chunk-drain-only flags the facts branch refuses instead of silently ignoring. */
+const FACTS_REJECTED_FLAGS = ['--background', '--pace', '--pace-max-concurrency', '--slugs', '--all', '--priority', '--catch-up', '--include-null-signature'];
+
 export async function runEmbed(engine: BrainEngine, args: string[]): Promise<EmbedResult | undefined> {
   // Keyless clean refusal — see isKeylessStaleRefusal. Checked BEFORE the
   // background block so we never queue a job that can only fail. stderr only;
-  // stdout stays empty like every other embed outcome (embed has no JSON
-  // result surface — do not invent one here).
+  // stdout stays empty like every other chunk-path outcome (only the facts
+  // branch below has a --json result surface).
   if (isKeylessStaleRefusal(args, loadConfig()?.embedding_disabled)) {
     process.stderr.write(
       '[embed] Embeddings are disabled on this brain (keyless install). '
@@ -865,52 +924,38 @@ export async function runEmbed(engine: BrainEngine, args: string[]): Promise<Emb
   // write-time space). Branches before the chunk path; the result rides the
   // EmbedResult shape so cli.ts's failures>0 exit verdict applies unchanged.
   if (args.includes('--facts')) {
-    // --background is the chunk-only embed-backfill job; the facts pass is
-    // foreground-only, so refuse rather than silently ignore the flag.
-    if (!args.includes('--stale') || args.includes('--background')) {
+    // Foreground-only: --background is the chunk-only embed-backfill job, and
+    // the chunk drain's other flags have no meaning here — refuse rather than
+    // silently ignore any of them.
+    const chunkOnly = args.find((a) => FACTS_REJECTED_FLAGS.some((f) => a === f || a.startsWith(`${f}=`)));
+    if (!args.includes('--stale') || chunkOnly !== undefined) {
       serr('Usage: gbrain embed --stale --facts [--dry-run] [--batch-size N] [--source <id>|--source=<id>] [--json]');
       process.exit(1);
     }
     const dryRun = args.includes('--dry-run');
-    // #4867 review: flag values fail closed, BEFORE the creds preflight and any
-    // provider call. `args[i + 1]` turned a missing / flag-like / inline
-    // (`--source=x`) value into undefined and drained EVERY source;
-    // `parseInt(...) || undefined` turned `0` / `abc` into the default.
-    const sourceRaw = factsFlagValue(args, '--source');
-    let sourceId: string | undefined;
-    if (sourceRaw !== undefined) {
-      if (sourceRaw === '') {
-        serr('--source requires a value: --source <id> or --source=<id>');
-        process.exit(1);
-      }
-      try {
-        assertValidSourceId(sourceRaw);
-      } catch (e) {
-        serr(e instanceof Error ? e.message : String(e));
-        process.exit(1);
-      }
-      const known = await engine.executeRaw<{ id: string }>(`SELECT id FROM sources WHERE id = $1`, [sourceRaw]);
+    // Flag values fail closed BEFORE the creds preflight and any provider call.
+    const sourceId = sourceFlag(args);
+    if (sourceId !== undefined) {
+      const known = await engine.executeRaw<{ id: string }>(`SELECT id FROM sources WHERE id = $1`, [sourceId]);
       if (known.length === 0) {
-        serr(`source "${sourceRaw}" does not exist — check the spelling with \`gbrain sources list\`.`);
+        serr(`source "${sourceId}" does not exist — check the spelling with \`gbrain sources list\`.`);
         process.exit(1);
       }
-      sourceId = sourceRaw;
     }
-    const batchSizeRaw = factsFlagValue(args, '--batch-size');
-    const batchSize = batchSizeRaw === undefined ? undefined : Number.parseInt(batchSizeRaw, 10);
-    if (batchSize !== undefined && (!Number.isInteger(batchSize) || batchSize < 1)) {
-      serr(`Invalid --batch-size "${batchSizeRaw}". Expected a positive integer.`);
+    const batchSize = batchSizeFlag(args);
+    if (batchSize !== undefined && batchSize > FACTS_EMBED_MAX_BATCH) {
+      serr(`Invalid --batch-size "${batchSize}". The facts drain sends at most ${FACTS_EMBED_MAX_BATCH} facts per provider call.`);
       process.exit(1);
     }
     if (!dryRun) {
       assertEmbeddingEnabled(loadConfig());
       const { validateEmbeddingCreds } = await import('../core/embed-preflight.ts');
       validateEmbeddingCreds();
-      // #4867 review: facts.embedding width vs the configured width, mirroring
-      // preflightDimMismatch on the chunk path. A halfvec(1280) column under a
-      // 1536 config paid the provider for every batch and failed every write.
-      // Computed inside the try, acted on outside it (process.exit must not be
-      // swallowed); an unreadable column / unconfigured gateway falls open.
+      // facts.embedding width vs the configured width — the chunk path's
+      // preflightDimMismatch, for the facts column: a mismatch would pay the
+      // provider for every batch and fail every write. Computed inside the
+      // try, acted on outside it (process.exit must not be swallowed); an
+      // unreadable column / unconfigured gateway falls open.
       let drift: { have: number; type: string; want: number } | null = null;
       try {
         const col = await readFactsEmbeddingDim(engine);
@@ -924,38 +969,49 @@ export async function runEmbed(engine: BrainEngine, args: string[]): Promise<Emb
       }
     }
     const scope = sourceId ? `source "${sourceId}"` : 'all sources';
-    // Single-flight (#4867 review): a cron run plus a hand run paid the
-    // provider twice for the same NULL rows. Own key (not the chunk drain's);
-    // dry-run stays lock-free; a lock-subsystem error fails open like the
-    // chunk path (undefined = proceed unlocked, null = held elsewhere).
+    const zero = (): EmbedResult => ({
+      embedded: 0, skipped: 0, would_embed: 0, total_chunks: 0,
+      pages_processed: 0, failures: 0, failure_samples: [], dryRun, chunkless_pages_healed: 0,
+    });
+    // Single-flight: a cron run plus a hand run must not pay the provider
+    // twice for the same NULL rows. Own key (not the chunk drain's); dry-run
+    // stays lock-free; a lock-subsystem error fails open like the chunk path
+    // (undefined = proceed unlocked; null = held elsewhere → lock_skipped,
+    // exit 0, so a cron overlap is not a failure). The heartbeat keeps the
+    // 60-minute TTL alive on long drains and aborts the drain as lock_lost if
+    // the lock is stolen.
     let lock: DbLockHandle | null | undefined;
+    let heartbeat: LockHeartbeat | undefined;
+    let lockLost = false;
     if (!dryRun) {
       try {
-        lock = await tryAcquireDbLock(engine, embedFactsBackfillLockId(), EMBED_BACKFILL_LOCK_TTL_MIN);
+        lock = await tryAcquireDbLock(engine, EMBED_FACTS_BACKFILL_LOCK_ID, EMBED_BACKFILL_LOCK_TTL_MIN);
       } catch {
         lock = undefined;
       }
       if (lock === null) {
         serr(`  [embed] another facts backfill is already running (${scope}); skipping (single-flight).`);
-        process.exit(1);
+        return { ...zero(), lock_skipped: true };
       }
+      if (lock) heartbeat = startLockHeartbeat([lock], () => { lockLost = true; });
     }
     // Progress rides the shared reporter (stderr; --quiet / --progress-json
-    // honored). The drain reports cumulative done per batch, so tick the delta.
+    // honored). The drain reports cumulative done — 0 before the first
+    // provider call, so the phase starts before any spend — tick the delta.
     const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
     let progressDone = -1;
-    const { embedStaleFacts } = await import('../core/embed-facts.ts');
     try {
       const r = await embedStaleFacts(engine, {
         dryRun,
         sourceId,
         batchSize,
+        signal: heartbeat?.signal,
         onProgress: (done, total) => {
           if (progressDone < 0) {
             progress.start('embed.facts', total);
             progressDone = 0;
           }
-          progress.tick(done - progressDone);
+          if (done > progressDone) progress.tick(done - progressDone);
           progressDone = done;
         },
       });
@@ -965,12 +1021,23 @@ export async function runEmbed(engine: BrainEngine, args: string[]): Promise<Emb
         slog(`Embedded ${r.embedded} fact(s) (${scope}); ${r.total_stale - r.embedded} remain stale.`);
         if (r.failures > 0) serr(`[embed] Failed to embed ${r.failures} fact(s): ${r.failure_samples[0] ?? 'unknown error'}`);
       }
-      return { embedded: r.embedded, skipped: 0, would_embed: r.would_embed, total_chunks: r.total_stale, pages_processed: 0, failures: r.failures, failure_samples: r.failure_samples, dryRun, chunkless_pages_healed: 0 };
+      return {
+        ...zero(), embedded: r.embedded, would_embed: r.would_embed, total_chunks: r.total_stale,
+        failures: r.failures, failure_samples: r.failure_samples, ...(lockLost ? { lock_lost: true } : {}),
+      };
     } finally {
+      heartbeat?.stop();
       if (progressDone >= 0) progress.finish();
       if (lock) await lock.release().catch(() => { /* best-effort */ });
     }
   }
+
+  // Chunk path: --source / --batch-size fail closed through the same helpers
+  // as the facts branch (a silently-undefined source drains EVERY source).
+  // The batch-size ceiling here is a clamp, as before, not a refusal.
+  const sourceId = sourceFlag(args);
+  const batchSizeParsed = batchSizeFlag(args);
+  const batchSize = batchSizeParsed === undefined ? undefined : Math.min(10_000, batchSizeParsed);
 
   // v0.36+ T7: --background submits via Minion queue, returns job_id to
   // stdout, exits. Same semantics in TTY and cron (D9).
@@ -982,21 +1049,18 @@ export async function runEmbed(engine: BrainEngine, args: string[]): Promise<Emb
       jobName: 'embed',
       paramBuilder: (cleanArgs) => {
         const slugsI = cleanArgs.indexOf('--slugs');
-        const srcI = cleanArgs.indexOf('--source');
-        const bsI = cleanArgs.indexOf('--batch-size');
-        const bsRaw = bsI >= 0 ? parseInt(cleanArgs[bsI + 1] ?? '', 10) : NaN;
         const prI = cleanArgs.indexOf('--priority');
         return {
           all: cleanArgs.includes('--all'),
           stale: cleanArgs.includes('--stale'),
           dryRun: cleanArgs.includes('--dry-run'),
           slugs: slugsI >= 0 ? cleanArgs.slice(slugsI + 1).filter(a => !a.startsWith('--')) : undefined,
-          sourceId: srcI >= 0 ? cleanArgs[srcI + 1] : undefined,
+          sourceId,
           // Background parity (D7): these four used to be silently DROPPED,
           // degrading the documented recovery command to a plain stale run.
           catchUp: cleanArgs.includes('--catch-up'),
           includeNullSignature: cleanArgs.includes('--include-null-signature'),
-          ...(Number.isFinite(bsRaw) && bsRaw > 0 && { batchSize: Math.min(10_000, bsRaw) }),
+          ...(batchSize !== undefined && { batchSize }),
           ...(prI >= 0 && cleanArgs[prI + 1] === 'recent' && { priority: 'recent' }),
           // CX1+CX5: carry explicit pace overrides into the `embed` job payload
           // (the job name CLI --background actually submits). The handler
@@ -1014,13 +1078,7 @@ export async function runEmbed(engine: BrainEngine, args: string[]): Promise<Emb
   const all = args.includes('--all');
   const stale = args.includes('--stale');
   const dryRun = args.includes('--dry-run');
-  // v0.31.12: --source <id> scopes to a single source.
-  const sourceIdx = args.indexOf('--source');
-  const sourceId = sourceIdx >= 0 ? args[sourceIdx + 1] : undefined;
-  // v0.41.18.0 (A13): --batch-size N, --priority recent, --catch-up flags.
-  const batchSizeIdx = args.indexOf('--batch-size');
-  const batchSizeRaw = batchSizeIdx >= 0 ? args[batchSizeIdx + 1] : undefined;
-  const batchSize = batchSizeRaw ? Math.max(1, Math.min(10_000, parseInt(batchSizeRaw, 10) || 0)) : undefined;
+  // v0.41.18.0 (A13): --priority recent, --catch-up flags.
   const priorityIdx = args.indexOf('--priority');
   const priorityRaw = priorityIdx >= 0 ? args[priorityIdx + 1] : undefined;
   const priority = priorityRaw === 'recent' ? 'recent' as const : undefined;
