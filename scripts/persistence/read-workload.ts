@@ -3,7 +3,6 @@ import { randomUUID } from 'node:crypto';
 import { platform } from 'node:os';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
-import type { BrainEngine } from '../../src/core/engine.ts';
 import type { OperationContext } from '../../src/core/ops/contract.ts';
 import { operationsByName } from '../../src/core/operations.ts';
 import { hybridSearch } from '../../src/core/search/hybrid.ts';
@@ -14,6 +13,7 @@ import { activatePersistence } from '../../src/core/persistence/activation.ts';
 import { assertSafeE2eDatabaseUrl } from '../../test/helpers/db-guard.ts';
 import { distribution } from './harness.ts';
 import { overlapPercent } from './read-metrics.ts';
+import { observeAdmissionTransactions, WriteTimingRecorder } from './read-admission.ts';
 
 export interface ReadWorkloadOptions {
   engine?: 'pglite' | 'postgres'; databaseUrl?: string; pages?: number; queries?: number; writers?: number; writesPerWriter?: number;
@@ -34,14 +34,16 @@ export async function runReadLatencyWorkload(options: ReadWorkloadOptions = {}) 
   const kind = options.engine ?? 'pglite'; const pages = options.pages ?? 500; const count = options.queries ?? 200;
   const writerCount = options.writers ?? 4; const cap = 4 * (options.writesPerWriter ?? 25);
   for (const [name, value] of Object.entries({ pages, queries: count, writers: writerCount, cap })) assert(Number.isSafeInteger(value) && value > 0, `Invalid workload ${name}`);
-  const engine: BrainEngine = kind === 'postgres' ? new PostgresEngine() : new PGLiteEngine();
   const at = performance.now(); const result: Record<string, any> = { ok: false, platform: platform(), engine: kind, runtime: `bun-${Bun.version}`,
     phase_a: null, phase_b: null, overlap_pct: 0, write_path: 'public put_page handler', verdict: 'informational' };
-  let stop = false; let recording = false; let metricsTimer: ReturnType<typeof setInterval> | undefined;
+  let stop = false; let metricsTimer: ReturnType<typeof setInterval> | undefined;
   let metricsWork: Promise<void> | undefined; let backgroundFailure: unknown;
-  const writers: Promise<void>[] = []; const intervals: [number, number][] = [];
-  const starts = new Map<string, number>(); const admissionAt = new Map<string, number>();
-  const admissionMs: number[] = []; const completionMs: number[] = [];
+  const writers: Promise<void>[] = [];
+  const timings = new WriteTimingRecorder();
+  const { intervals, admissionMs, completionMs } = timings;
+  const engine = observeAdmissionTransactions(kind === 'postgres' ? new PostgresEngine() : new PGLiteEngine(), (requestId, now) => {
+    timings.admitted(requestId, now);
+  });
   const samples: { at_ms: number; queue_count: number; queue_age_ms: number; recovery_bytes: number; rss_bytes: number; pool: unknown }[] = [];
   // Production search can degrade when one lexical arm fails. A benchmark
   // must not count that cheaper, partial read as a successful measurement.
@@ -52,22 +54,11 @@ export async function runReadLatencyWorkload(options: ReadWorkloadOptions = {}) 
   engine.searchTitles = async function(query, opts) {
     try { return await titles.call(this, query, opts); } catch (error) { backgroundFailure = error; throw error; }
   };
-  const transaction = engine.transaction;
-  // Observe resolved admission transactions without adding queries. Preserve
-  // the receiver so transaction clones retain their actual scoped connection.
-  engine.transaction = async function<T>(this: BrainEngine, fn: (tx: BrainEngine) => Promise<T>): Promise<T> {
-    const value = await transaction.call(this, fn) as T;
-    const row = value as Record<string, unknown> | null;
-    if (recording && row && row.state === 'queued' && typeof row.request_id === 'string' && starts.has(row.request_id) && !admissionAt.has(row.request_id)) {
-      const now = performance.now(); admissionAt.set(row.request_id, now); admissionMs.push(now - starts.get(row.request_id)!);
-    }
-    return value;
-  };
   const put = operationsByName.put_page;
   const ctx: OperationContext = { engine, config: { engine: kind }, sourceId: 'default', remote: false, dryRun: false,
     logger: { info() {}, warn() {}, error() {} } };
   async function write(i: number, prefix: string) {
-    const requestId = randomUUID(); const started = performance.now(); if (recording) starts.set(requestId, started);
+    const requestId = randomUUID(); timings.start(requestId, performance.now());
     let receipt: Record<string, unknown>;
     try { receipt = await put.handler(ctx, { ...page(i, prefix), request_id: requestId }) as Record<string, unknown>; }
     catch (error) {
@@ -82,7 +73,7 @@ export async function runReadLatencyWorkload(options: ReadWorkloadOptions = {}) 
       }
     }
     assert.equal(receipt!.state, 'committed', 'pending receipt cannot count as a completed write');
-    if (recording) { const end = performance.now(); intervals.push([started, end]); completionMs.push(end - started); }
+    timings.complete(requestId, performance.now());
   }
   try {
     if (engine instanceof PostgresEngine) { assertSafeE2eDatabaseUrl(options.databaseUrl!); await engine.connect({ database_url: options.databaseUrl, poolSize: 4 }); }
@@ -105,7 +96,10 @@ export async function runReadLatencyWorkload(options: ReadWorkloadOptions = {}) 
       }
       return { ...distribution(timings), queries_run: timings.length };
     }
-    result.phase_a = await readPhase(); recording = true;
+    result.phase_a = await readPhase();
+    // Exercise the identical observer during all warmup writes. Begin the
+    // measured phase with empty buffers, not a newly enabled closure branch.
+    timings.reset();
     const sample = async () => {
       const [row] = await engine.executeRaw<{ pending: number; age: string; recovery: string; database_sessions?: unknown }>(`SELECT
         COUNT(*) FILTER(WHERE state IN ('queued','running','recovering'))::integer AS pending,
@@ -135,6 +129,8 @@ export async function runReadLatencyWorkload(options: ReadWorkloadOptions = {}) 
     result.overlap_basis = 'union of actual public mutation intervals from invocation through terminal receipt';
     result.query_scheduling = 'one event-loop yield between queries in both phases, excluded from individual query latency';
     result.admission = distribution(admissionMs); result.commit = distribution(completionMs);
+    result.admission_basis = 'public invocation through resolved top-level queued journal transaction; nested savepoints excluded';
+    result.commit_basis = 'public invocation through observed terminal committed receipt';
     assert.equal(admissionMs.length, completed, 'every completed write needs an observed durable admission');
     result.metrics = samples; result.throughput_writes_per_second = completed * 1000 / (performance.now() - queryStart);
     result.peak_queue_age_ms = Math.max(...samples.map(sample => sample.queue_age_ms));

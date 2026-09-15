@@ -112,8 +112,14 @@ without a provider or remote embedding latency.
 
 The manifest records all three runs, exact source hashes, storage/runtime
 and runner characteristics, admission/completion distributions, queue age,
-recovery bytes, RSS, throughput and Postgres activity samples. Pool gauges
-are explicitly a tracked SQL subset; `pg_stat_activity` separately records
+recovery bytes, RSS, throughput and Postgres activity samples. The harness
+measures durable admission when the public handler's top-level queued journal
+transaction resolves, and completion when its terminal committed receipt is
+observed. Nested savepoints never count as admission. The same harness proxy
+observes warmup and pressure writes; measurement buffers reset after warmup.
+Every completed write must have its own earlier admission observation, and
+missing or incomplete timing distributions invalidate the aggregate gate.
+Pool gauges are explicitly a tracked SQL subset; `pg_stat_activity` separately records
 active/idle sessions in the fresh fixture database, including the sampler.
 PGLite keeps the original in-memory read-latency storage model; the separate
 10,000-write durability lane uses disk storage. Smaller corpus options are

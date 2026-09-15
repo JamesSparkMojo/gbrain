@@ -13,7 +13,9 @@ export function summarizeReadRuns(runs: Record<string, any>[], thresholdPct = 50
   const median = (values: number[]) => values.toSorted((a, b) => a - b)[Math.floor(values.length / 2)];
   const valid = runs.length === 3 && runs.every(run => run.ok && run.overlap_pct >= 90 &&
     run.phase_b?.writes_completed > 0 && run.phase_b?.writes_committed_during_reads > 0 && run.phase_b?.writes_failed === 0 && run.phase_a?.queries_run > 0 &&
-    run.phase_a.queries_run === run.phase_b.queries_run && ['phase_a', 'phase_b'].every(phase =>
+    run.phase_a.queries_run === run.phase_b.queries_run &&
+    run.admission?.count === run.phase_b.writes_completed && run.commit?.count === run.phase_b.writes_completed &&
+    ['phase_a', 'phase_b', 'admission', 'commit'].every(phase =>
       ['p50_ms', 'p95_ms', 'p99_ms'].every(key => Number.isFinite(run[phase][key]) && run[phase][key] > 0)));
   const phase = (name: string) => Object.fromEntries(['p50_ms', 'p95_ms', 'p99_ms'].map(key =>
     [key, median(runs.map(run => run[name]?.[key] ?? NaN))]));
