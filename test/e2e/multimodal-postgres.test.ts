@@ -13,6 +13,7 @@
  * Run: DATABASE_URL=postgresql://... bun test test/e2e/multimodal-postgres.test.ts
  */
 
+import { installFixtureChunks } from '../helpers/page-projection.ts';
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import { assertSafeE2eDatabaseUrl } from '../helpers/db-guard.ts';
@@ -181,7 +182,7 @@ describe.skipIf(skip)('multimodal v0.27.1 against real Postgres', () => {
     await pg.putPage('notes/text-only', {
       type: 'note', title: 'text only', compiled_truth: 'body', timeline: '',
     });
-    await pg.upsertChunks('notes/text-only', [{
+    await installFixtureChunks(pg, 'notes/text-only', [{
       chunk_index: 0, chunk_text: 'body',
       chunk_source: 'compiled_truth',
       embedding: textVec, modality: 'text',
@@ -193,7 +194,7 @@ describe.skipIf(skip)('multimodal v0.27.1 against real Postgres', () => {
       type: 'image', page_kind: 'image',
       title: 'a', compiled_truth: '', timeline: '',
     });
-    await pg.upsertChunks('photos/a', [{
+    await installFixtureChunks(pg, 'photos/a', [{
       chunk_index: 0, chunk_text: 'a',
       chunk_source: 'image_asset',
       embedding_image: imgA, modality: 'image',
@@ -202,7 +203,7 @@ describe.skipIf(skip)('multimodal v0.27.1 against real Postgres', () => {
       type: 'image', page_kind: 'image',
       title: 'b', compiled_truth: '', timeline: '',
     });
-    await pg.upsertChunks('photos/b', [{
+    await installFixtureChunks(pg, 'photos/b', [{
       chunk_index: 0, chunk_text: 'b',
       chunk_source: 'image_asset',
       embedding_image: imgB, modality: 'image',
@@ -228,7 +229,7 @@ describe.skipIf(skip)('multimodal v0.27.1 against real Postgres', () => {
     await pg.putPage('notes/keyword', {
       type: 'note', title: 'keyword', compiled_truth: 'sunset photo at the beach', timeline: '',
     });
-    await pg.upsertChunks('notes/keyword', [{
+    await installFixtureChunks(pg, 'notes/keyword', [{
       chunk_index: 0,
       chunk_text: 'sunset photo at the beach',
       chunk_source: 'compiled_truth',
@@ -238,7 +239,7 @@ describe.skipIf(skip)('multimodal v0.27.1 against real Postgres', () => {
       type: 'image', page_kind: 'image',
       title: 'keyword image', compiled_truth: '', timeline: '',
     });
-    await pg.upsertChunks('photos/keyword', [{
+    await installFixtureChunks(pg, 'photos/keyword', [{
       chunk_index: 0,
       chunk_text: 'sunset photo at the beach',
       chunk_source: 'image_asset',
