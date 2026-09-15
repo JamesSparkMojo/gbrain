@@ -4,7 +4,7 @@
 <!-- Regenerate: bun run scripts/generate-tool-catalog.ts -->
 <!-- Freshness-guarded by scripts/check-tool-catalog-fresh.sh (bun run verify). -->
 
-Every non-localOnly operation on the MCP surface: 122 tools across 23 areas. **Starter** marks membership in the ~26-op `starter` surface (`src/mcp/surface.ts`); **Gate** names the config key that must be true before remote callers see/call the op (`gbrain config set <key> true`). What a given token actually sees is further filtered per request by scope, bound-client fence, publish gates, and the per-client surface — see `docs/operations/mcp-surface-runbook.md`. Area names are non-contractual groupings.
+Every non-localOnly operation on the MCP surface: 125 tools across 23 areas. **Starter** marks membership in the ~29-op `starter` surface (`src/mcp/surface.ts`); **Gate** names the config key that must be true before remote callers see/call the op (`gbrain config set <key> true`). What a given token actually sees is further filtered per request by scope, bound-client fence, publish gates, and the per-client surface — see `docs/operations/mcp-surface-runbook.md`. Area names are non-contractual groupings.
 
 ## admin
 
@@ -157,6 +157,7 @@ Every non-localOnly operation on the MCP surface: 122 tools across 23 areas. **S
 
 | Tool | Description | Scope | Starter | Gate |
 |---|---|---|---|---|
+| `cancel_write_request` | Cancel your accepted write before publication starts. | write | yes |  |
 | `capture` | Capture a quick note into the brain — the "just remember this" write. | write | yes |  |
 | `delete_page` | Soft-delete a page. | write |  |  |
 | `fetch` | Fetch the full text of one search result by its `id` (OpenAI deep-research contract: the search/fetch pair). | read |  |  |
@@ -164,7 +165,9 @@ Every non-localOnly operation on the MCP surface: 122 tools across 23 areas. **S
 | `get_page` | Read a page by slug (supports optional fuzzy matching). | read | yes |  |
 | `get_raw_data` | Retrieve raw data for a page | read |  |  |
 | `get_versions` | Page version history | read |  |  |
+| `get_write_request` | Read your durable write receipt by request_id. | write | yes |  |
 | `list_pages` | List pages with optional filters. | read | yes |  |
+| `list_write_requests` | List your currently authorized write receipts in one source, newest first. | write | yes |  |
 | `put_page` | Write or replace a page (markdown with frontmatter). | write | yes |  |
 | `put_raw_data` | Store raw API response data for a page | write |  |  |
 | `resolve_slugs` | Fuzzy-resolve a partial slug to matching page slugs | read | yes |  |
