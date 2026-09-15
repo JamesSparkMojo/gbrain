@@ -2152,6 +2152,24 @@ export function __getShrinkStateForTests(recipeId: string): ShrinkEntry | undefi
 }
 
 /**
+ * #4616 — pgvector rejects non-finite components at insert and its cosine
+ * HNSW silently SKIPS a zero-norm vector, so a degenerate provider vector is a
+ * stored embedding that no vector search can ever reach (while `get` and
+ * keyword search still see the row). Fail loud here, before upsertChunks.
+ * Checked on the float32 view — what the column stores — so a vector that
+ * flushes to all-zero at float32 precision counts as zero-norm too.
+ */
+function assertIndexableEmbedding(vector: Float32Array, modelId: string): Float32Array {
+  let norm = 0;
+  for (const x of vector) norm += x * x;
+  if (norm > 0 && Number.isFinite(norm)) return vector;
+  throw new AIConfigError(
+    `Embedding provider returned a ${norm === 0 ? 'zero-norm' : 'non-finite'} vector for model ${modelId}; it cannot be indexed for vector search.`,
+    `Retry the import after checking provider health; a degenerate vector would be stored but never reachable by search.`,
+  );
+}
+
+/**
  * Embed a single sub-batch with automatic halving on token-limit errors.
  * If the batch is already at MIN_SUB_BATCH and still fails, throws.
  */
@@ -2206,8 +2224,9 @@ async function embedSubBatch(
       }
     }
 
+    const vectors = result.embeddings.map((e: number[]) => assertIndexableEmbedding(new Float32Array(e), modelId));
     recordSubBatchSuccess(recipe);
-    return result.embeddings.map((e: number[]) => new Float32Array(e));
+    return vectors;
   } catch (err) {
     if (isAIInvocationPolicyError(err)) throw err;
     // On token-limit error, tighten the recipe's effective safety factor
@@ -2435,7 +2454,7 @@ export async function embedMultimodal(
           `(used by the text path). Image vectors land in content_chunks.embedding_image (1024).`,
         );
       }
-      allEmbeddings.push(new Float32Array(row.embedding));
+      allEmbeddings.push(assertIndexableEmbedding(new Float32Array(row.embedding), parsed.modelId));
     }
   }
 
@@ -2597,7 +2616,7 @@ async function embedMultimodalOpenAICompat(
         `and reinitialize the embedding column at the new width.`,
       );
     }
-    allEmbeddings.push(new Float32Array(row.embedding));
+    allEmbeddings.push(assertIndexableEmbedding(new Float32Array(row.embedding), modelId));
   }
 
   return allEmbeddings;

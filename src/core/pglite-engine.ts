@@ -569,9 +569,12 @@ export function buildWalRepairNotice(receipt: WalRepairReceipt): string {
     `    Data dir: ${receipt.dataDir}`,
     `    Cause: torn WAL/checkpoint state from an unclean shutdown (issue #223 class).`,
     `    Data files were preserved; transactions not checkpointed before the`,
-    `    corruption may be lost (the standard pg_resetwal caveat).`,
+    `    corruption may be lost (the standard pg_resetwal caveat). Indexes were NOT`,
+    `    rebuilt: a page written just before the crash can be missing from vector`,
+    `    search while \`gbrain get\` and keyword search still find it.`,
     `    Pre-repair backup: ${receipt.backupPath}`,
-    `    Recommended: run \`gbrain doctor\` to verify brain integrity.`,
+    `    Recommended: \`gbrain doctor\`, then \`gbrain search diagnose "<phrase>" --target`,
+    `    <recent-slug>\` — vector rank absent means re-embed it: \`gbrain embed <slug>\`.`,
     `    Disable auto-repair with GBRAIN_PGLITE_WAL_REPAIR=off.`,
   ].join('\n');
 }

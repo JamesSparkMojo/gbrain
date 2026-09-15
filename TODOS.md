@@ -649,7 +649,11 @@ deferred M-effort issues above are NOT repeated here.
   `reindex_vector` admin op + doctor self-recall reachability probe (ANN-query
   the K most recent chunks with their own vectors) + rebuild-or-flag after WAL
   repair. Design care: probe false positives (exact-scan columns, empty
-  index); inline-vs-queued rebuild after repair.
+  index); inline-vs-queued rebuild after repair. **Landed so far:** the gateway
+  rejects zero-norm / non-finite provider vectors (`assertIndexableEmbedding`),
+  and the WAL-repair notice + `docs/ENGINES.md` state that indexes are NOT
+  rebuilt, how to verify (`gbrain search diagnose`) and how to recover
+  (`gbrain embed <slug>`). Still open: the rebuild-after-repair and probe work.
 - [ ] **P3 — hoist prompt-too-long helpers to a shared module.** **What:**
   #4675 has subagent-oneshot.ts import isPromptTooLongError/
   extractPromptTooLongDetail from subagent.ts while subagent.ts imports

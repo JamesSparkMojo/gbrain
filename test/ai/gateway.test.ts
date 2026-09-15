@@ -527,4 +527,33 @@ describe('embedding response integrity', () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  // #4616 — pgvector's cosine HNSW silently skips a zero-norm vector at insert
+  // and rejects non-finite components, so a degenerate provider vector is a
+  // stored embedding no vector search can ever reach. The gateway must fail
+  // loud instead of handing it to upsertChunks.
+  const degenerateCases: Array<[string, () => number[], string]> = [
+    ['zero-norm', () => new Array(1536).fill(0), 'zero-norm'],
+    ['non-finite', () => { const v = new Array(1536).fill(0.01); v[7] = Number.NaN; return v; }, 'non-finite'],
+  ];
+  for (const [label, makeVector, expectedMessage] of degenerateCases) {
+    test(`rejects a ${label} embedding vector instead of storing an unreachable row`, async () => {
+      __setEmbedTransportForTests(async ({ values }: any) => ({
+        embeddings: values.map(() => makeVector()),
+        usage: { tokens: 0 },
+      }) as any);
+      try {
+        configureGateway({
+          embedding_model: 'openai:text-embedding-3-large',
+          embedding_dimensions: 1536,
+          env: { OPENAI_API_KEY: 'openai-fake' },
+        });
+        const err = await embed(['first', 'second']).then(() => undefined, (e: unknown) => e);
+        expect(err).toBeInstanceOf(AIConfigError);
+        expect((err as Error).message).toContain(expectedMessage);
+      } finally {
+        __setEmbedTransportForTests(null);
+      }
+    });
+  }
 });
