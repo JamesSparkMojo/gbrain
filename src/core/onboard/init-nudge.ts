@@ -14,6 +14,7 @@
 // also short-circuits (CI/scripted callers see nothing).
 
 import type { BrainEngine } from '../engine.ts';
+import { entityTypesForEngine } from '../schema-pack/entity-types.ts';
 
 const NUDGE_BUDGET_MS = 3000;
 
@@ -50,6 +51,10 @@ export async function runInitNudge(engine: BrainEngine): Promise<void> {
     let checksAttempted = 0;
     let partial = false;
 
+    // #4772: entity types = active pack's primitive:entity types + legacy
+    // literals (same set getHealth / doctor count), bound as $1 text[].
+    const entityTypes = await entityTypesForEngine(engine);
+
     // Run 4 cheap counts in parallel against the 3s budget.
     const results = await Promise.allSettled([
       engine.executeRaw<{ count: string | number }>(
@@ -59,25 +64,25 @@ export async function runInitNudge(engine: BrainEngine): Promise<void> {
       ),
       engine.executeRaw<{ count: string | number }>(
         `SELECT COUNT(*) AS count FROM pages
-           WHERE type IN ('person', 'company', 'organization', 'entity')
+           WHERE type = ANY($1::text[])
              AND deleted_at IS NULL`,
-        [],
+        [entityTypes],
         { signal: controller.signal },
       ),
       engine.executeRaw<{ count: string | number }>(
         `SELECT COUNT(*) AS count FROM pages p
-           WHERE p.type IN ('person', 'company', 'organization', 'entity')
+           WHERE p.type = ANY($1::text[])
              AND p.deleted_at IS NULL
              AND EXISTS (SELECT 1 FROM links l WHERE l.to_page_id = p.id)`,
-        [],
+        [entityTypes],
         { signal: controller.signal },
       ),
       engine.executeRaw<{ count: string | number }>(
         `SELECT COUNT(*) AS count FROM pages p
-           WHERE p.type IN ('person', 'company', 'organization', 'entity')
+           WHERE p.type = ANY($1::text[])
              AND p.deleted_at IS NULL
              AND EXISTS (SELECT 1 FROM timeline_entries t WHERE t.page_id = p.id)`,
-        [],
+        [entityTypes],
         { signal: controller.signal },
       ),
       engine.executeRaw<{ count: string | number }>(

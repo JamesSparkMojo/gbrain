@@ -111,6 +111,7 @@ import type { PgSalienceDeps } from './postgres-engine/salience.ts';
 import { hasCJK } from './cjk.ts';
 import { searchKeywordCJK as searchKeywordCJKImpl } from './postgres-engine/cjk-search.ts';
 import type { CjkKeywordCtx } from './search/cjk-keyword-sql.ts';
+import { entityTypesForEngine } from './schema-pack/entity-types.ts';
 
 function escapeSqlStringLiteral(value: string): string {
   return value.replace(/'/g, "''");
@@ -4809,7 +4810,11 @@ export class PostgresEngine implements BrainEngine {
     // Chunk/link counts stay raw (storage until the purge phase), matching
     // getStats, and destructive-removal counts elsewhere deliberately stay raw.
     // S2: coverage + missing_embeddings key on the registry-ACTIVE column.
-    const colId = await this.activeEmbeddingColId({ fallbackToLegacy: true });
+    // #4772: entity types come from the active pack (+ legacy literals), bound
+    // as a text[] — deliberately pack-aware where onboard's checks.ts predicate
+    // is still literal (that flip changes what extract-ner is asked to write).
+    const [colId, entityTypes] =
+      await Promise.all([this.activeEmbeddingColId({ fallbackToLegacy: true }), entityTypesForEngine(this)]);
     const [h] = await sql`
       WITH scoped_pages AS (
         SELECT id, slug, frontmatter, deleted_at, source_id FROM pages p
@@ -4817,10 +4822,9 @@ export class PostgresEngine implements BrainEngine {
       ),
       entity_pages AS (
         -- #4280: quarantined entity shells are not served memory — keep them
-        -- out of the link/timeline coverage denominators (parity with
-        -- onboard's VISIBLE_ENTITY_PREDICATE).
+        -- out of the link/timeline coverage denominators.
         SELECT id, slug FROM scoped_pages WHERE id IN (
-          SELECT id FROM pages WHERE type IN ('entity', 'person', 'company') AND deleted_at IS NULL
+          SELECT id FROM pages WHERE type = ANY(${entityTypes}::text[]) AND deleted_at IS NULL
             AND ${sql.unsafe(quarantineFilterFragment('pages'))}
         )
       )
@@ -4902,7 +4906,7 @@ export class PostgresEngine implements BrainEngine {
                            OR EXISTS (SELECT 1 FROM pages fp WHERE fp.id = l.from_page_id AND fp.source_id = ANY(${scope}))))
              )::int as link_count
       FROM pages p
-      WHERE p.type IN ('entity', 'person', 'company') AND p.deleted_at IS NULL
+      WHERE p.type = ANY(${entityTypes}::text[]) AND p.deleted_at IS NULL
         AND ${sql.unsafe(QUARANTINE_FILTER_FRAGMENT)}
         AND (${scope}::text[] IS NULL OR p.source_id = ANY(${scope}))
       ORDER BY link_count DESC

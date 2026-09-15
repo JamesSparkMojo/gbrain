@@ -33,7 +33,7 @@ interface ProbeCounts {
 /**
  * Stub engine shaped like { executeRaw: async (sql) => [...] }. Routes each
  * of runInitNudge's 6 COUNT queries by a distinctive SQL fragment. Order
- * matters: the linked/timeline queries also contain "type IN ('person'",
+ * matters: the linked/timeline queries also contain "type = ANY($1::text[])",
  * so they are matched first.
  */
 function stubEngine(counts: ProbeCounts): BrainEngine {
@@ -42,7 +42,7 @@ function stubEngine(counts: ProbeCounts): BrainEngine {
     if (sql.includes('FROM takes')) return counts.takes ?? 0;
     if (sql.includes('FROM links')) return counts.linked ?? 0;
     if (sql.includes('timeline_entries')) return counts.timeline ?? 0;
-    if (sql.includes("type IN ('person'")) return counts.entities ?? 0;
+    if (sql.includes('type = ANY($1::text[])')) return counts.entities ?? 0;
     // 6th probe: SELECT COUNT(*) FROM pages WHERE deleted_at IS NULL
     return counts.pages ?? 0;
   };
