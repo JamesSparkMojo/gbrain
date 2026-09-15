@@ -447,7 +447,8 @@ jobs:
           key: pglite-snapshot-${{ runner.os }}-${{ hashFiles('src/core/migrate.ts', 'src/core/pglite-schema.ts', 'src/core/pglite-engine.ts', 'src/core/fts-language.ts', 'src/core/vector-index.ts', 'src/core/ai/defaults.ts', 'src/core/timeline-dedup-repair.ts', 'src/core/pages-upsert-arbiter.ts', 'src/core/link-extraction.ts', 'src/core/grants/*.ts', 'src/core/scope.ts', 'src/core/sql-query.ts', 'src/core/minions/tools/brain-allowlist.ts', 'src/core/facts/withdrawal-schema.ts', 'test/helpers/legacy-embedding-config.ts', 'scripts/build-pglite-snapshot.ts') }}
       - run: bun install --frozen-lockfile
       - name: Run test shard ${{ matrix.shard }}/10
-        run: scripts/test-shard.sh ${{ matrix.shard }} 10
+        shell: bash
+        run: bun scripts/capture-test-log.ts --job 'test (${{ matrix.shard }})' --out "$RUNNER_TEMP/unit.log" -- bash scripts/test-shard.sh ${{ matrix.shard }} 10
         env:
           COVERAGE_DIR: ${{ runner.temp }}/coverage
       - name: Upload coverage (shard lane)
@@ -459,6 +460,15 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
           overwrite: true
+      - name: Upload unit timing log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: timings-unit-${{ matrix.shard }}
+          path: ${{ runner.temp }}/unit.log
+          retention-days: 14
+          overwrite: true
+
 
   # ──────────────────────────────────────────────────────────────────────
   # coverage-report: merges the PR corpus (10 shards + serial + 2 slow
