@@ -1,3 +1,4 @@
+import { sanitizeRemoteBody } from '../core/remote-body.ts';
 import { readProjectionSnapshot, installPageProjection, installPageEmbeddings } from '../core/page-state/projections.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { currentEmbeddingSignature } from '../core/embedding.ts';
@@ -994,12 +995,12 @@ async function embedPage(
     // #4530: respect the active embedding model's per-input token limit.
     const chunkOpts = { maxTokens: resolveMaxChunkTokens() };
     if (page.compiled_truth.trim()) {
-      for (const c of chunkText(page.compiled_truth, chunkOpts)) {
+      for (const c of chunkText(sanitizeRemoteBody(page.compiled_truth), chunkOpts)) {
         inputs.push({ chunk_index: inputs.length, chunk_text: c.text, chunk_source: 'compiled_truth' });
       }
     }
     if (page.timeline.trim()) {
-      for (const c of chunkText(page.timeline, chunkOpts)) {
+      for (const c of chunkText(sanitizeRemoteBody(page.timeline), chunkOpts)) {
         inputs.push({ chunk_index: inputs.length, chunk_text: c.text, chunk_source: 'timeline' });
       }
     }
@@ -1058,6 +1059,8 @@ async function embedPage(
   // swallowed: the page stays NULL exactly as before, but the run now
   // reports it (result.failures → non-zero exit) instead of pretending
   // success. Abort (shutdown) still propagates.
+  const prepared = await readProjectionSnapshot(engine, slug, page.source_id);
+  if (!prepared || prepared.snapshot.revision !== snapshot!.revision || prepared.chunks.some((chunk, i) => chunk.id !== chunks[i]?.id || chunk.chunk_text !== chunks[i]?.chunk_text)) return;
   let embeddings: (Float32Array | null)[];
   let failed = 0;
   let firstError: unknown;
@@ -1086,7 +1089,7 @@ async function embedPage(
     token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
   }));
 
-  if (!await installPageEmbeddings(engine, { snapshot: snapshot!, chunks }, updated,
+  if (!await installPageEmbeddings(engine, prepared, updated,
     failed === 0 && toEmbed.length === chunks.length ? currentEmbeddingSignature() ?? undefined : undefined)) return;
   // v0.41.31: stamp provenance so a later model/dims swap is detectable as
   // stale. embedPage is the per-slug path used by `gbrain embed <slug>` AND

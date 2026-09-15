@@ -9,6 +9,7 @@ import { chunkText } from './chunkers/recursive.ts';
 import { resolveMaxChunkTokens } from './embedding-input-limit.ts';
 import { chunkCodeText, chunkCodeTextFull, detectCodeLanguage, CHUNKER_VERSION } from './chunkers/code.ts';
 import { sanitizeRemoteBody } from './remote-body.ts';
+import { sealPageTextProjection } from './page-state/projections.ts';
 import { sanitizeText } from './batch-rows.ts';
 import { hasProtectedBody, safeChunksFilter } from './search/safe-chunks.ts';
 import { findChunkForOffset } from './chunkers/edge-extractor.ts';
@@ -730,6 +731,8 @@ export async function importFromContent(
     tags: parsed.tags,
   };
 
+  // An unchanged canonical file may still need a verified projection after withdrawal/migration.
+  if (!opts.prepare && existing && existing.text_projection_revision !== existing.knowledge_revision) opts = { ...opts, forceRechunk: true };
   if (existing?.content_hash === hash && !opts.forceRechunk) {
     if (opts.prepare) {
       const result: ImportResult = { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}) };
@@ -1071,8 +1074,9 @@ export async function importFromContent(
     }
     // Seal only the completed, full-body sanitized replacement. A body-only
     // write or a failed transaction must never certify old stored fragments.
-    await tx.executeRaw('UPDATE pages SET chunker_version = $1,text_projection_revision=knowledge_revision WHERE source_id = $2 AND slug = $3',
+    await tx.executeRaw('UPDATE pages SET chunker_version = $1 WHERE source_id = $2 AND slug = $3',
       [MARKDOWN_CHUNKER_VERSION, txOpts.sourceId, slug]);
+    await sealPageTextProjection(tx, slug, txOpts.sourceId);
 
     // v0.19.0 E1 — doc↔impl linking: if this markdown page cites code paths
     // (e.g. 'src/core/sync.ts:42'), create bidirectional edges to the code
@@ -1094,20 +1098,20 @@ export async function importFromContent(
       const codeSlug = slugifyCodePath(ref.path);
       // Forward: markdown guide → code page (this guide documents that code)
       try {
-        await tx.addLink(
+        await tx.transaction(savepoint => savepoint.addLink(
           slug, codeSlug,
           ref.line ? `cited at ${ref.path}:${ref.line}` : ref.path,
           'documents', 'markdown', slug, 'compiled_truth',
           linkOpts,
-        );
+        ));
       } catch { /* code page not yet imported — reconcile-links will catch it */ }
       // Reverse: code page → markdown guide (this code is documented by the guide)
       try {
-        await tx.addLink(
+        await tx.transaction(savepoint => savepoint.addLink(
           codeSlug, slug,
           ref.path, 'documented_by', 'markdown', slug, 'compiled_truth',
           linkOpts,
-        );
+        ));
       } catch { /* same reason — silent skip */ }
     }
     // Alias projection and readback share the page commit. A later writer can
@@ -1588,8 +1592,9 @@ export async function importCodeFile(
     } else {
       await tx.deleteChunks(slug, txOpts);
     }
-    await tx.executeRaw('UPDATE pages SET chunker_version = $1,text_projection_revision=knowledge_revision WHERE source_id = $2 AND slug = $3',
+    await tx.executeRaw('UPDATE pages SET chunker_version = $1 WHERE source_id = $2 AND slug = $3',
       [MARKDOWN_CHUNKER_VERSION, txOpts.sourceId, slug]);
+    await sealPageTextProjection(tx, slug, txOpts.sourceId);
   });
 
   // Post-write read-back verification.
@@ -1763,8 +1768,9 @@ export async function withImportTransaction(
       }
     }
     if (spec.safeChunks && spec.chunks !== undefined) {
-      await tx.executeRaw('UPDATE pages SET chunker_version = $1,text_projection_revision=knowledge_revision WHERE source_id = $2 AND slug = $3',
+      await tx.executeRaw('UPDATE pages SET chunker_version = $1 WHERE source_id = $2 AND slug = $3',
         [MARKDOWN_CHUNKER_VERSION, sourceId, spec.slug]);
+      await sealPageTextProjection(tx, spec.slug, sourceId);
     }
     if (spec.after) await spec.after(tx);
   });
@@ -2218,12 +2224,12 @@ export async function importImageFile(
         const sibling = await tx.getPage(candidate, sourceOpts);
         if (sibling) {
           try {
-            await tx.addLink(
+            await tx.transaction(savepoint => savepoint.addLink(
               imageSlug, candidate,
               filename,
               'image_of', 'manual', imageSlug, 'frontmatter',
               linkOpts,
-            );
+            ));
           } catch { /* sibling vanished mid-tx; skip */ }
           break; // one canonical link per image
         }

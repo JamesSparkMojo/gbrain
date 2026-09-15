@@ -13,6 +13,7 @@ import { isTerminal, principalKey, requestPrincipal, type RecoveryRecord, type W
 import type { NativeLockHandle } from './native-lock.ts';
 import { withCoordinatedWrite } from './context.ts';
 import { withFilesystemPublication } from './filesystem-guard.ts';
+import { mayReprepare } from './semantic.ts';
 
 export interface PreparedMutation {
   observedRevision: string | null;
@@ -54,6 +55,10 @@ function requestError(error: unknown): { code: string; message: string } {
 function conflictCode(code: string): boolean { return ['revision_required','revision_conflict','source_changed','page_identity_changed'].includes(code); }
 export async function finishUnpublishedFailure(engine: BrainEngine, row: WriteRequest, error: unknown): Promise<WriteRequest> {
   const failure = requestError(error);
+  if (mayReprepare(row, failure)) {
+    await releaseUnpublishedClaim(engine, row, 'revision_changed_repreparing');
+    return (await getWriteRequestById(engine, row.id))!;
+  }
   return engine.transaction(tx => completeWrite(tx, row, conflictCode(failure.code) ? 'conflict' : 'failed', {}, failure));
 }
 
@@ -142,7 +147,8 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       try { await markRecovering(engine, row, published ? 'commit_outcome_uncertain' : 'publication_not_started'); }
       catch { /* database outage: durable recovery record remains discoverable */ }
       if (lock) {
-        try { return await recoverPublication(engine, row.id, hostId, true, published && !filesystemFailed ? undefined : requestError(error)); }
+        try { return await recoverPublication(engine, row.id, hostId, true,
+          (published && !filesystemFailed) || mayReprepare(row, requestError(error)) ? undefined : requestError(error)); }
         catch { /* hold durable recovering state; next owner loop retries */ }
       }
       try { return await getWriteRequestById(engine, row.id) ?? { ...row, state: 'recovering', blocked_reason: 'database_unavailable' }; }

@@ -1,5 +1,10 @@
 /** Durable DB-only text rebuild work; source deletion cancels its old incarnation. */
 export const PAGE_PROJECTION_SCHEMA_STATEMENTS = [
+  // Metadata/embedding updates must preserve the explicitly sanitized vector.
+  // Canonical body updates remain unsearchable until projection completion.
+  `DROP TRIGGER IF EXISTS trg_pages_search_vector ON pages`,
+  `CREATE TRIGGER trg_pages_search_vector BEFORE INSERT OR UPDATE OF title,timeline ON pages
+    FOR EACH ROW EXECUTE FUNCTION update_page_search_vector()`,
   `CREATE TABLE IF NOT EXISTS page_projection_jobs (
     source_incarnation UUID NOT NULL REFERENCES sources(incarnation) ON DELETE CASCADE,
     slug TEXT NOT NULL,

@@ -12,12 +12,15 @@ export async function withCoordinatedWrite<T>(engine: BrainEngine, sourceIds: st
   const [previous] = await engine.executeRaw<{ value: string | null }>("SELECT current_setting('gbrain.write_sources',true) AS value");
   await engine.executeRaw("SELECT set_config('gbrain.write_sources',$1,true)", [JSON.stringify(sourceIds)]);
   return publication.run(context, async () => {
+    let failed = false;
     try { return await fn(); }
+    catch (error) { failed = true; throw error; }
     finally {
       context.active = false;
       // An aborted transaction cannot accept statements; its rollback clears
       // SET LOCAL automatically. A success restores the enclosing capability.
-      await engine.executeRaw("SELECT set_config('gbrain.write_sources',$1,true)", [previous?.value ?? '']).catch(() => {});
+      try { await engine.executeRaw("SELECT set_config('gbrain.write_sources',$1,true)", [previous?.value ?? '']); }
+      catch (error) { if (!failed) throw error; }
     }
   });
 }

@@ -1,5 +1,5 @@
 import { submitPageMutation } from '../persistence/page-mutations.ts';
-import { PAGE_MUTATION_PARAMS } from '../persistence/params.ts';
+import { PAGE_MUTATION_PARAMS, CAPTURE_EVENT_PARAMS } from '../persistence/params.ts';
 /**
  * Page CRUD operation cluster — pure move from operations.ts (v0.46.x
  * tranche 1). Op consts stay module-private; `pagesOperations` below lists
@@ -99,7 +99,7 @@ async function dropPrivateSlugs(
  * entirely, facts fence keeps only `world`-visibility rows.
  */
 function stripPrivacyFencesForRemoteReader(page: Page): Page {
-  return { ...page, compiled_truth: sanitizeRemoteBody(page.compiled_truth), timeline: sanitizeRemoteBody(page.timeline ?? '') };
+  return { ...page, compiled_truth: sanitizeRemoteBody(page.compiled_truth, { includeWithdrawn: true }), timeline: sanitizeRemoteBody(page.timeline ?? '', { includeWithdrawn: true }) };
 }
 
 const get_page: Operation = {
@@ -822,6 +822,7 @@ const capture: Operation = {
   description: CAPTURE_DESCRIPTION,
   params: {
     ...PAGE_MUTATION_PARAMS,
+    ...CAPTURE_EVENT_PARAMS,
     content: { type: 'string', required: true, description: 'Markdown or plain text to capture. File paths are NOT accepted over MCP — read the file yourself and pass its content (the CLI --file lane is local-only).' },
     slug: { type: 'string', required: false, description: "Target slug. Default: inbox/YYYY-MM-DD-<sha8-of-content> (stable per content — recapturing identical text hits the same slug); type diary/event routes under life/. Fenced clients: the default lands under your first bound prefix." },
     type: { type: 'string', required: false, description: "Page type for the stamped frontmatter. Omitted: the content's frontmatter `type:` when present, else 'note'. An explicit type (this param or a frontmatter `type:`) must be declared by the active schema pack; undeclared types are rejected before writing, naming the declared vocabulary." },

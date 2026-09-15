@@ -28,6 +28,18 @@ function overlayWithdrawals(body: string, normalizedBody: string, withdrawals: P
   return changed ? replaceOrInsertFactsFence(body, renderFactsTable(facts)) : body;
 }
 
+/** Normalize filesystem bytes with the exact ledger fingerprint rules before comparing them. */
+export async function overlayCanonicalBodies(query: ReadQuery, body: string, timeline: string, withdrawals: PageWithdrawal[]): Promise<{ compiled_truth: string; timeline: string }> {
+  if (!withdrawals.length) return { compiled_truth: body, timeline };
+  const [normalized] = await query<{ body: string; timeline: string }>(`SELECT
+    (SELECT string_agg(regexp_replace(lower(line),'[[:space:]]+',' ','g'),chr(10) ORDER BY ord)
+      FROM unnest(string_to_array($1::text,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS body,
+    (SELECT string_agg(regexp_replace(lower(line),'[[:space:]]+',' ','g'),chr(10) ORDER BY ord)
+      FROM unnest(string_to_array($2::text,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS timeline`, [body, timeline]);
+  return { compiled_truth: overlayWithdrawals(body, normalized.body ?? '', withdrawals),
+    timeline: overlayWithdrawals(timeline, normalized.timeline ?? '', withdrawals) };
+}
+
 /** One MVCC statement binds content, tags, identity and withdrawals to one revision. */
 export async function readPageSnapshot(query: ReadQuery, slug: string, opts?: PageSnapshotOptions): Promise<PageSnapshot | null> {
   const params: unknown[] = [slug, opts?.resolveAlias === true];

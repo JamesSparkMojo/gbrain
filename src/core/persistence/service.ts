@@ -3,6 +3,7 @@ import type { GBrainConfig } from '../config.ts';
 import { OperationError } from '../ops/contract.ts';
 import { PersistenceConsumer, type PrepareMutation } from './consumer.ts';
 import { preparePageMutation } from './page-prepare.ts';
+import { prepareSemanticPageMutation } from './semantic-pages.ts';
 import { getWriteRequestById, receiptFor } from './journal.ts';
 import { isTerminal, type WriteRequest } from './model.ts';
 import { isWriteErrorCode, type WriteReceipt } from './types.ts';
@@ -17,7 +18,12 @@ export function startPersistenceConsumer(engine: BrainEngine, config: GBrainConf
     if (prior.stopping) throw new OperationError('unavailable', 'The persistence owner is closing.');
     return prior.consumer;
   }
-  const consumer = new PersistenceConsumer(engine, config, (e, row, cfg) => (preparers.get(row.operation) ?? preparePageMutation)(e, row, cfg));
+  const consumer = new PersistenceConsumer(engine, config, async (e, row, cfg) => {
+    const registered = preparers.get(row.operation);
+    if (registered) return registered(e, row, cfg);
+    if (row.operation === 'remember') return (await import('./memory-mutations.ts')).prepareMemoryMutation(e, row, cfg);
+    return (['add_tag','remove_tag','add_timeline_entry'].includes(row.operation) ? prepareSemanticPageMutation : preparePageMutation)(e, row, cfg);
+  });
   services.set(engine, { consumer, stopping: false });
   const lifecycle = engine as BrainEngine & { registerBeforeDisconnect?: (run: () => Promise<void>) => unknown };
   lifecycle.registerBeforeDisconnect?.(() => stopPersistenceConsumer(engine));

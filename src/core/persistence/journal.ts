@@ -111,7 +111,7 @@ export async function admitWrite(engine: BrainEngine, input: WriteAdmission, ove
 
 /** Claims commit before OS-lock waits. An unresolved head blocks its entire root. */
 export async function claimNextWrite(engine: BrainEngine, hostId: string, leaseMs = 30_000, excludeRoots: string[] = []): Promise<WriteRequest | null> {
-  return engine.transaction(async tx => {
+  return engine.transactionDirect(async tx => {
     const [row] = await tx.executeRaw<WriteRequest>(`SELECT r.* FROM persistence_requests r
       LEFT JOIN persistence_worktrees w ON w.id=r.worktree_id
       WHERE r.state='queued' AND (r.worktree_id IS NULL OR (w.owner_host_id=$1::uuid AND w.state='active'))

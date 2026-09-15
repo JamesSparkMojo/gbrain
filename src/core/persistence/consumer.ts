@@ -5,6 +5,7 @@ import { finishUnpublishedFailure, publishMutation, recoverPublication, type Pre
 import { localHostId } from './identity.ts';
 import { isTerminal, type WriteRequest } from './model.ts';
 import { refreshManagedFilesystemRoots } from './filesystem-guard.ts';
+import { rebuildPendingPageProjections } from '../page-state/projections.ts';
 
 export type PrepareMutation = (engine: BrainEngine, row: WriteRequest, config: GBrainConfig) => Promise<PreparedMutation>;
 export class PersistenceConsumer {
@@ -13,6 +14,7 @@ export class PersistenceConsumer {
   private tickPromise: Promise<void> | undefined;
   private active = new Set<Promise<void>>();
   private activeRoots = new Set<string>();
+  private projectionWorker: Promise<unknown> | undefined;
   readonly hostId: string;
   constructor(readonly engine: BrainEngine, readonly config: GBrainConfig, readonly prepare: PrepareMutation,
     private opts: { hostId?: string; concurrency?: number; pollMs?: number; onError?: (error: unknown) => void } = {}) {
@@ -32,6 +34,8 @@ export class PersistenceConsumer {
   private async doTick(): Promise<void> {
     if (this.stopping) return;
     await refreshManagedFilesystemRoots(this.engine);
+    if (!this.projectionWorker) this.projectionWorker = rebuildPendingPageProjections(this.engine, 2)
+      .catch(error => this.report(error)).finally(() => { this.projectionWorker = undefined; });
     // Recover only our owner roots. Kernel exclusion, not elapsed heartbeat,
     // proves that a previous process can no longer be publishing this root.
     const recovery = await this.engine.executeRaw<WriteRequest>(`SELECT r.* FROM persistence_requests r
@@ -89,5 +93,6 @@ export class PersistenceConsumer {
     if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
     await this.tickPromise;
     await Promise.allSettled([...this.active]);
+    await this.projectionWorker;
   }
 }

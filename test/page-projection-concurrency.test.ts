@@ -81,6 +81,10 @@ test('withdrawal commits revision, removes stale retrieval, and durably rebuilds
     expect(rebuilt.length).toBeGreaterThan(0);
     expect(rebuilt.map(c => c.chunk_text).join('\n')).not.toContain(claim);
     expect(await engine.executeRaw('SELECT slug FROM page_projection_jobs WHERE slug=$1', ['withdraw'])).toHaveLength(0);
+    expect(await engine.searchKeyword('withdrawnsentinel', { sourceId })).toEqual([]);
+    expect(await engine.searchTitles('withdrawnsentinel', { sourceId })).toEqual([]);
+    await engine.executeRaw('UPDATE pages SET last_retrieved_at=now() WHERE source_id=$1 AND slug=$2', [sourceId,'withdraw']);
+    expect(await engine.searchTitles('withdrawnsentinel', { sourceId })).toEqual([]);
   }
 });
 
@@ -98,5 +102,28 @@ test('delayed embeddings cannot replace new chunks at the same indices', async (
     const sameRevision = (await readProjectionSnapshot(engine, 'embedding-race', sourceId))!;
     await installPageProjection(engine, current, chunk('A re-chunked snapshot'), { seal: true });
     expect(await installPageEmbeddings(engine, sameRevision, chunk('After embedding'))).toBe(false);
+  }
+});
+
+
+test('embedding completion updates only vectors and rejects an indexing-context change', async () => {
+  for (const engine of engines) {
+    await engine.putPage('embedding-completion', page('Stable text'), { sourceId });
+    await installPageProjection(engine, (await engine.readPageSnapshot('embedding-completion', { sourceId }))!, chunk('Stable text'), { seal: true });
+    const prepared = (await readProjectionSnapshot(engine, 'embedding-completion', sourceId))!;
+    const vector = new Float32Array(1536); vector[0] = 1;
+    expect(await installPageEmbeddings(engine, prepared, [{ ...chunk('Stable text')[0], embedding: vector }])).toBe(true);
+    const current = (await readProjectionSnapshot(engine, 'embedding-completion', sourceId))!;
+    expect(current.chunks.map(c => [c.id,c.chunk_text,c.chunk_index])).toEqual(prepared.chunks.map(c => [c.id,c.chunk_text,c.chunk_index]));
+    const [stored] = await engine.executeRaw<{ hash: string; matches: boolean }>('SELECT embedded_text_hash AS hash,embedded_text_hash=md5(chunk_text) AS matches FROM content_chunks WHERE id=$1', [current.chunks[0].id]);
+    expect(stored.matches).toBe(true);
+    const old = await engine.getConfig('contextual_retrieval.mode');
+    try {
+      await engine.setConfig('contextual_retrieval.mode', 'projection-test-changed');
+      expect(await installPageEmbeddings(engine, prepared, [{ ...chunk('Stable text')[0], embedding: vector }])).toBe(false);
+    } finally {
+      if (old !== null) await engine.setConfig('contextual_retrieval.mode', old);
+      else await engine.executeRaw("DELETE FROM config WHERE key='contextual_retrieval.mode'");
+    }
   }
 });

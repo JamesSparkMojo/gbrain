@@ -15,12 +15,14 @@ import { getWorktreeBinding } from './ownership.ts';
 import type { PreparedContentImport } from './prepared-import.ts';
 import type { PreparedMutation } from './coordinator.ts';
 import type { WriteRequest } from './model.ts';
+import { sealPageTextProjection } from '../page-state/projections.ts';
+import { overlayCanonicalBodies } from '../page-state/snapshot.ts';
 
 function canonical(page: Pick<Page, 'type' | 'title' | 'compiled_truth' | 'timeline' | 'frontmatter'>, tags: string[]) {
   return { type: page.type, title: page.title, compiled_truth: page.compiled_truth, timeline: page.timeline ?? '',
     frontmatter: page.frontmatter, tags: [...new Set(tags)].sort() };
 }
-async function fileTarget(engine: BrainEngine, row: WriteRequest, snapshot: PageSnapshot | null,
+export async function prepareFileTarget(engine: BrainEngine, row: WriteRequest, snapshot: PageSnapshot | null,
   content: string | null): Promise<PreparedMutation['file']> {
   if (!row.worktree_id) return undefined;
   const binding = await getWorktreeBinding(engine, row.source_id);
@@ -34,10 +36,11 @@ async function fileTarget(engine: BrainEngine, row: WriteRequest, snapshot: Page
   if (before && snapshot && !snapshot.page.deleted_at) {
     const parsed = parseMarkdown(before.toString('utf8'), row.slug);
     const expected = canonical(snapshot.page, snapshot.tags);
-    const actual = canonical(parsed, parsed.tags);
+    const actual = canonical({ ...parsed, ...await overlayCanonicalBodies(engine.executeRaw.bind(engine),
+      parsed.compiled_truth, parsed.timeline ?? '', snapshot.withdrawals) }, parsed.tags);
     // Withdrawal overlays intentionally precede physical mirroring. The ledger
     // is applied by the import preparation and cannot be undone by this check.
-    if (!snapshot.withdrawals.length && digest(actual) !== digest(expected)) {
+    if (digest(actual) !== digest(expected)) {
       throw new OperationError('source_changed', 'The canonical file contains an uncoordinated local edit.', 'Import or recover the local edit before replacing this page.');
     }
   } else if (before && !snapshot && content !== null && sha256(before) !== sha256(content)) {
@@ -47,24 +50,25 @@ async function fileTarget(engine: BrainEngine, row: WriteRequest, snapshot: Page
 }
 
 /** Providers and parsing run before the OS lock and before any publication transaction. */
-export async function preparePageMutation(engine: BrainEngine, row: WriteRequest, _config: GBrainConfig): Promise<PreparedMutation> {
+export async function preparePageMutation(engine: BrainEngine, row: WriteRequest, _config: GBrainConfig,
+  preparedIntent?: { content: string; expectedRevision: string; tags?: string[] }): Promise<PreparedMutation> {
   if (!row.intent) throw new OperationError('storage_error', 'A pending write lost its normalized intent.');
   const p = row.intent;
   const source = { sourceId: row.source_id };
   const snapshot = await engine.readPageSnapshot(row.slug, { ...source, includeDeleted: true });
-  assertPageRevision(snapshot, engineMutationPrecondition(parseMutationPrecondition(p)));
+  assertPageRevision(snapshot, preparedIntent ? { expectedRevision: preparedIntent.expectedRevision } : engineMutationPrecondition(parseMutationPrecondition(p)));
   if ((snapshot?.page.id ?? null) !== row.page_id) throw new OperationError('page_identity_changed', 'The accepted page identity changed.');
   const observedRevision = snapshot?.revision ?? null;
   if (row.operation === 'delete_page') {
     if (!snapshot) throw new OperationError('page_not_found', 'Page not found.');
     const noop = snapshot.page.deleted_at != null;
-    return { observedRevision, noop, file: await fileTarget(engine, row, snapshot, null), apply: async tx => {
+    return { observedRevision, noop, file: await prepareFileTarget(engine, row, snapshot, null), apply: async tx => {
       if (!noop) { await tx.createVersion(row.slug, source); await tx.softDeletePage(row.slug, source); }
       return { status: 'soft_deleted', slug: row.slug, source_id: row.source_id, noop };
     } };
   }
-  let content = p.content as string;
-  let versionTags: string[] | undefined;
+  let content = preparedIntent?.content ?? p.content as string;
+  let versionTags: string[] | undefined = preparedIntent?.tags;
   if (row.operation === 'restore_page' || row.operation === 'revert_version') {
     if (!snapshot) throw new OperationError('page_not_found', 'Page not found.');
     let page = snapshot.page;
@@ -107,7 +111,7 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
   const rendered = serializePageToMarkdown(renderedPage, tags);
   const logicalNoop = snapshot !== null && digest(canonical(snapshot.page, snapshot.tags)) === digest(canonical(ready.parsedPage, tags));
   const noop = logicalNoop && (row.operation !== 'restore_page' || snapshot?.page.deleted_at == null);
-  return { observedRevision, noop, file: await fileTarget(engine, row, snapshot, rendered), apply: async tx => {
+  return { observedRevision, noop, file: await prepareFileTarget(engine, row, snapshot, rendered), apply: async tx => {
     if (!noop) {
       await ready.apply(tx);
       if (row.operation === 'restore_page') await tx.restorePage(row.slug, source);
@@ -116,7 +120,7 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
         for (const tag of versionTags) await tx.addTag(row.slug, tag, source);
       }
       // Index installation and terminal receipt share this transaction.
-      await tx.executeRaw('UPDATE pages SET text_projection_revision=knowledge_revision WHERE source_id=$1 AND slug=$2', [row.source_id, row.slug]);
+      await sealPageTextProjection(tx, row.slug, row.source_id);
     }
     return { status: noop ? 'skipped' : row.operation === 'restore_page' ? 'restored' : row.operation === 'revert_version' ? 'reverted' : 'created_or_updated',
       slug: row.slug, source_id: row.source_id, chunks: ready.result.chunks, noop,
