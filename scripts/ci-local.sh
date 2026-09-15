@@ -192,6 +192,7 @@ if [ "$NO_SHARD" = "1" ]; then
   if [ "$DIFF" = "1" ]; then
     RUN_PHASES_CMD='echo "[runner] guards + typecheck"
 bash scripts/check-jsonb-pattern.sh
+bash scripts/check-bun-test-timeout.sh
 bash scripts/check-progress-to-stdout.sh
 bash scripts/check-trailing-newline.sh
 bash scripts/check-wasm-embedded.sh
@@ -218,6 +219,7 @@ fi'
   else
     RUN_PHASES_CMD='echo "[runner] guards + typecheck"
 bash scripts/check-jsonb-pattern.sh
+bash scripts/check-bun-test-timeout.sh
 bash scripts/check-progress-to-stdout.sh
 bash scripts/check-trailing-newline.sh
 bash scripts/check-wasm-embedded.sh
@@ -252,6 +254,7 @@ fi'
   fi
   RUN_PHASES_CMD="echo \"[runner] guards + typecheck (run once before sharding)\"
 bash scripts/check-jsonb-pattern.sh
+bash scripts/check-bun-test-timeout.sh
 bash scripts/check-progress-to-stdout.sh
 bash scripts/check-trailing-newline.sh
 bash scripts/check-wasm-embedded.sh
