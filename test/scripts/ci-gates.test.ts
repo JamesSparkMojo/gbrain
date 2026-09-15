@@ -41,7 +41,7 @@ describe('CI execution evidence', () => {
     expect(unit.jobs['test-status'].if).toBe('always()');
     expect(unit.jobs['test-status'].needs).toEqual([
       'gitleaks', 'security-regressions', 'dependency-audit', 'verify', 'serial-tests', 'slow-eval-longmemeval',
-      'slow-entity-resolve-perf', 'slow-brainbench-e2e', 'brainbench', 'test',
+      'slow-entity-resolve-perf', 'slow-brainbench-e2e', 'brainbench', 'test', 'native-locks',
     ]);
     expect(aggregate(unit, 'test-status', 'pull_request', {})).toBe(0);
     for (const job of unit.jobs['test-status'].needs as string[]) {

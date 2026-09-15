@@ -526,10 +526,13 @@ jobs:
           if-no-files-found: ignore
           overwrite: true
 
+  native-locks:
+    uses: ./.github/workflows/native-locks.yml
+
   # The stable aggregate succeeds only when every required lane ran successfully.
   # Coverage percentages remain advisory until their separate graduation.
   test-status:
-    needs: [gitleaks, security-regressions, dependency-audit, verify, serial-tests, slow-eval-longmemeval, slow-entity-resolve-perf, slow-brainbench-e2e, brainbench, test]
+    needs: [gitleaks, security-regressions, dependency-audit, verify, serial-tests, slow-eval-longmemeval, slow-entity-resolve-perf, slow-brainbench-e2e, brainbench, test, native-locks]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -546,8 +549,9 @@ jobs:
           SLOW_BRAINBENCH="${{ needs.slow-brainbench-e2e.result }}"
           BRAINBENCH="${{ needs.brainbench.result }}"
           TEST="${{ needs.test.result }}"
-          echo "gitleaks=$GITLEAKS  security-regressions=$SECURITY  dependency-audit=$AUDIT  verify=$VERIFY  serial-tests=$SERIAL  slow-eval-longmemeval=$SLOW_EVAL  slow-entity-resolve-perf=$SLOW_PERF  slow-brainbench-e2e=$SLOW_BRAINBENCH  brainbench=$BRAINBENCH  test=$TEST"
-          for r in "$GITLEAKS" "$SECURITY" "$AUDIT" "$VERIFY" "$SERIAL" "$SLOW_EVAL" "$SLOW_PERF" "$SLOW_BRAINBENCH" "$BRAINBENCH" "$TEST"; do
+          NATIVE_LOCKS="${{ needs.native-locks.result }}"
+          echo "gitleaks=$GITLEAKS  security-regressions=$SECURITY  dependency-audit=$AUDIT  verify=$VERIFY  serial-tests=$SERIAL  slow-eval-longmemeval=$SLOW_EVAL  slow-entity-resolve-perf=$SLOW_PERF  slow-brainbench-e2e=$SLOW_BRAINBENCH  brainbench=$BRAINBENCH  test=$TEST  native-locks=$NATIVE_LOCKS"
+          for r in "$GITLEAKS" "$SECURITY" "$AUDIT" "$VERIFY" "$SERIAL" "$SLOW_EVAL" "$SLOW_PERF" "$SLOW_BRAINBENCH" "$BRAINBENCH" "$TEST" "$NATIVE_LOCKS"; do
             if [ "$r" != "success" ]; then
               echo "✗ gated job did not succeed (got $r) — CI fail"
               exit 1

@@ -1,0 +1,70 @@
+# Native writer locks
+
+`locks.c` is a first-party C Node-API v3 addon exposing opaque `openLock`,
+nonblocking `tryLock`, and idempotent `close` operations. POSIX uses `flock`;
+Windows uses `LockFileEx`. The kernel releases ownership on process death.
+The TypeScript wrapper in `src/core/persistence/native-lock.ts` adds cancellable
+asynchronous waiting, defaults to a 5-second deadline and 25-ms polling, and
+loads the addon only when a caller needs lock capability.
+
+The caller must supply an absolute, stable lock path in a host-controlled
+directory outside any replaceable datastore or worktree. Keep the file after
+release. Never unlink, rotate, copy over, or infer ownership from its age or
+metadata: replacing a locked inode can permit two owners. Leaf symlinks,
+reparse points and nonregular files are rejected. Directory confinement and
+the filesystem's cross-process lock semantics are prerequisites supplied by
+the host; this binding does not establish distributed ownership across hosts.
+An unavailable addon or an OS error produces `writer_lock_unavailable`.
+There is no timestamp, PID, or TTL ownership fallback. A close failure must
+stop publication; it cannot be treated as successful relinquishment.
+
+## Distribution and reproducible builds
+
+All eight addons are checked in, so source installs work with
+`bun install --frozen-lockfile --ignore-scripts`. They support x64 and arm64
+on Linux glibc (2.17 ABI baseline), Linux musl, macOS (13.0 deployment
+target), and Windows. Supported Bun versions are tested at the repository's
+minimum, 1.3.11, and release version, 1.3.13. OS compatibility also requires
+the selected Bun version's own platform minimums.
+
+Node-API headers and their upstream license are vendored from Node
+v22.15.0. `darwin-abi.h` declares the narrow public Darwin LP64 ABI needed
+for SDK-free cross-compilation, with constants/layout checked against Apple
+XNU tag `xnu-11215.81.4`; macOS CI compiles `abi-check.c` against the actual
+SDK. The x86_64 `fstat$INODE64` symbol and arm64 `fstat` symbol are distinct.
+No Apple SDK is redistributed. Windows imports only the used Node-API
+symbols through `node.def`.
+
+Use the pinned Zig 0.14.1 compiler. Archive URLs, SHA-256 hashes and sizes
+are in `scripts/native/toolchain.json`; setup verifies them before extracting.
+
+```sh
+bun scripts/native/setup-toolchain.ts --dir .context/native-toolchain
+ZIG=/absolute/path/to/the/downloaded/zig bun scripts/native/build.ts --target all --write-manifest
+bun scripts/native/verify.ts
+ZIG=/absolute/path/to/the/downloaded/zig bun scripts/native/build.ts --output /tmp/native-rebuilt
+bun scripts/native/verify.ts --rebuilt /tmp/native-rebuilt
+```
+
+The manifest hashes every addon plus the build inputs, compiler recipe and
+toolchain metadata. Commit source, all eight regenerated binaries and the
+manifest together. Builds fix the source timestamp, macOS install name and
+Linux build ID behavior to permit byte-for-byte comparison across output
+directories. CI rebuilds each target on its platform and compares bytes.
+
+## Runtime validation
+
+`bun test test/native-lock.test.ts` runs real competing Bun processes,
+retained-inode checks, cancellation, deadline cleanup, live-holder staleness,
+SIGKILL recovery, and fail-closed missing-addon/invalid-path cases.
+`test/scripts/native-lock-prebuilds.test.ts` proves source/binary tampering
+fails verification and checks that the required CI matrix covers all sixteen
+target/runtime pairs. Native CI also runs the tests in native musl userspace.
+
+`bun scripts/native/compiled-smoke.ts` builds a focused executable importing
+the exact production wrapper, proves two compiled processes exclude each
+other, kills the holder and proves immediate handoff. Release CI additionally
+passes `--binary bin/<artifact>` to require that the actual CLI executable
+embeds the exact current-platform addon. That assertion verifies packaging;
+the focused executable verifies compiled lock execution. Full CLI lifecycle
+behavior is covered by the persistence integration tests.
