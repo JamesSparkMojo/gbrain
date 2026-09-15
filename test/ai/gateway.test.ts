@@ -551,6 +551,7 @@ describe('embedding response integrity', () => {
         const err = await embed(['first', 'second']).then(() => undefined, (e: unknown) => e);
         expect(err).toBeInstanceOf(AIConfigError);
         expect((err as Error).message).toContain(expectedMessage);
+        expect((err as Error).message).toMatch(/at batch index 0 \(input: "first"\)/);
       } finally {
         __setEmbedTransportForTests(null);
       }

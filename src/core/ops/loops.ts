@@ -426,8 +426,9 @@ const loops_close: Operation = {
     source_id: {
       type: 'string',
       description:
-        'Source the loop belongs to (default: routed source). A remote caller whose grant spans ' +
-        'several sources must name one, and it must sit inside the grant.',
+        'Source the loop belongs to. Remote callers default to the granted source when the grant ' +
+        'names exactly one, and must name one inside the grant otherwise; a trusted local caller ' +
+        'closes unscoped (any source) unless it names one.',
     },
   },
   mutating: true,

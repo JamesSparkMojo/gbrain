@@ -858,10 +858,7 @@ export async function extractPageLinks(
   //
   // Pack-declared `frontmatter_links` are an explicit operator opt-in, so
   // they still run in that mode (pack-only pass; rules that mirror a
-  // built-in stay gated with it). Pre-fix a DB-born page (extract_atoms
-  // writing `concepts: [...]`) was swept with `skipFrontmatter: true`,
-  // stamped `links_extracted_at`, and its pack-declared edges never
-  // appeared until someone hand-ran `extract links --include-frontmatter`.
+  // built-in stay gated with it).
   let fmUnresolved: UnresolvedFrontmatterRef[] = [];
   const packOnly = Boolean(opts.skipFrontmatter);
   if (!packOnly || (pack && pack.frontmatter_links.length > 0)) {

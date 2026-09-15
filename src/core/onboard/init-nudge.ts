@@ -14,7 +14,7 @@
 // also short-circuits (CI/scripted callers see nothing).
 
 import type { BrainEngine } from '../engine.ts';
-import { entityTypesForEngine } from '../schema-pack/entity-types.ts';
+import { entityTypesForEngine, LEGACY_ENTITY_TYPES } from '../schema-pack/entity-types.ts';
 
 const NUDGE_BUDGET_MS = 3000;
 
@@ -39,6 +39,17 @@ export async function runInitNudge(engine: BrainEngine): Promise<void> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), NUDGE_BUDGET_MS);
 
+    // #4772: entity types = active pack's primitive:entity types + legacy
+    // literals (same set getHealth / doctor count), bound as $1 text[]. The
+    // pack lookup (`getConfig('schema_pack')`) takes no signal, so it is raced
+    // against the same budget: on abort the legacy floor is used and the
+    // counts still run in whatever budget remains — init never blocks on it.
+    const entityTypes = await Promise.race([
+      entityTypesForEngine(engine),
+      new Promise<string[]>(res =>
+        controller.signal.addEventListener('abort', () => res([...LEGACY_ENTITY_TYPES]), { once: true })),
+    ]);
+
     let totalStale = 0;
     let totalEntities = 0;
     let linkedCount = 0;
@@ -50,10 +61,6 @@ export async function runInitNudge(engine: BrainEngine): Promise<void> {
     let checksRan = 0;
     let checksAttempted = 0;
     let partial = false;
-
-    // #4772: entity types = active pack's primitive:entity types + legacy
-    // literals (same set getHealth / doctor count), bound as $1 text[].
-    const entityTypes = await entityTypesForEngine(engine);
 
     // Run 4 cheap counts in parallel against the 3s budget.
     const results = await Promise.allSettled([

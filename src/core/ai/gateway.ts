@@ -2159,12 +2159,12 @@ export function __getShrinkStateForTests(recipeId: string): ShrinkEntry | undefi
  * Checked on the float32 view — what the column stores — so a vector that
  * flushes to all-zero at float32 precision counts as zero-norm too.
  */
-function assertIndexableEmbedding(vector: Float32Array, modelId: string): Float32Array {
-  let norm = 0;
-  for (const x of vector) norm += x * x;
+function assertIndexableEmbedding(vector: Float32Array, modelId: string, index: number, input?: string | MultimodalInput): Float32Array {
+  const norm = vector.reduce((sum, x) => sum + x * x, 0);
   if (norm > 0 && Number.isFinite(norm)) return vector;
+  const text = typeof input === 'string' ? input : input?.kind === 'text' ? input.text : undefined;
   throw new AIConfigError(
-    `Embedding provider returned a ${norm === 0 ? 'zero-norm' : 'non-finite'} vector for model ${modelId}; it cannot be indexed for vector search.`,
+    `Embedding provider returned a ${norm === 0 ? 'zero-norm' : 'non-finite'} vector for model ${modelId} at batch index ${index}${text === undefined ? '' : ` (input: ${JSON.stringify(text.slice(0, 40))})`}; it cannot be indexed for vector search.`,
     `Retry the import after checking provider health; a degenerate vector would be stored but never reachable by search.`,
   );
 }
@@ -2224,7 +2224,7 @@ async function embedSubBatch(
       }
     }
 
-    const vectors = result.embeddings.map((e: number[]) => assertIndexableEmbedding(new Float32Array(e), modelId));
+    const vectors = result.embeddings.map((e: number[], i: number) => assertIndexableEmbedding(new Float32Array(e), modelId, i, texts[i]));
     recordSubBatchSuccess(recipe);
     return vectors;
   } catch (err) {
@@ -2446,7 +2446,7 @@ export async function embedMultimodal(
       );
     }
 
-    for (const row of parsedBody.data) {
+    for (const [j, row] of parsedBody.data.entries()) {
       if (!Array.isArray(row.embedding) || row.embedding.length !== targetDims) {
         throw new AIConfigError(
           `Voyage multimodal returned ${row.embedding?.length ?? 0}-dim vector; expected ${targetDims}.`,
@@ -2454,7 +2454,7 @@ export async function embedMultimodal(
           `(used by the text path). Image vectors land in content_chunks.embedding_image (1024).`,
         );
       }
-      allEmbeddings.push(assertIndexableEmbedding(new Float32Array(row.embedding), parsed.modelId));
+      allEmbeddings.push(assertIndexableEmbedding(new Float32Array(row.embedding), parsed.modelId, i + j, batch[j]));
     }
   }
 
@@ -2530,7 +2530,7 @@ async function embedMultimodalOpenAICompat(
   const inputType = opts.inputType ?? 'document';
 
   const allEmbeddings: Float32Array[] = [];
-  for (const input of inputs) {
+  for (const [k, input] of inputs.entries()) {
     const body: Record<string, unknown> = {
       model: modelId,
       input: [
@@ -2616,7 +2616,7 @@ async function embedMultimodalOpenAICompat(
         `and reinitialize the embedding column at the new width.`,
       );
     }
-    allEmbeddings.push(assertIndexableEmbedding(new Float32Array(row.embedding), modelId));
+    allEmbeddings.push(assertIndexableEmbedding(new Float32Array(row.embedding), modelId, k, input));
   }
 
   return allEmbeddings;

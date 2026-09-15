@@ -10,6 +10,8 @@
  *     non-empty, so the takes nudge still fires
  *   - non-empty + healthy + one rejected arm → partial-checks notice
  *   - non-empty + takes 0 → "0 takes" opportunity nudge
+ *   - a hanging schema-pack lookup (getConfig never resolves) is raced
+ *     against the 3s budget: legacy entity types, nudge still completes
  *
  * The gate is process.stderr.isTTY (NOT process.env), so monkeypatching it
  * here does not trip the serial-isolation rules for env-mutating tests.
@@ -19,6 +21,7 @@
 import { describe, test, expect } from 'bun:test';
 import { runInitNudge } from '../src/core/onboard/init-nudge.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
+import { LEGACY_ENTITY_TYPES } from '../src/core/schema-pack/entity-types.ts';
 
 /** Per-probe result: a count, or an Error to make that arm reject. */
 interface ProbeCounts {
@@ -136,5 +139,28 @@ describe('runInitNudge — non-empty brain opportunities', () => {
     expect(out).toContain("Run 'gbrain onboard --check' to see the plan");
     // All 6 probes succeeded — no partial-checks suffix.
     expect(out).not.toContain('checks complete');
+  });
+});
+
+describe('runInitNudge — schema-pack lookup is budget-bound', () => {
+  test('getConfig that never resolves → legacy entity types, nudge completes within the budget', async () => {
+    const base = stubEngine({ stale: 0, entities: 0, linked: 0, timeline: 0, takes: 0, pages: 5 });
+    let getConfigCalls = 0;
+    const seenTypes: unknown[] = [];
+    const engine = {
+      getConfig: () => { getConfigCalls++; return new Promise(() => {}); },
+      executeRaw: async (sql: string, params: unknown[] = []) => {
+        if (sql.includes('$1::text[]')) seenTypes.push(params[0]);
+        return base.executeRaw(sql, params);
+      },
+    } as unknown as BrainEngine;
+    const t0 = Date.now();
+    const out = await runNudgeCaptured(engine);
+    // Budget is 3s; the lookup lost the race and the counts still ran.
+    expect(Date.now() - t0).toBeLessThan(4500);
+    expect(getConfigCalls).toBeGreaterThan(0);
+    expect(out).toContain('0 takes');
+    expect(seenTypes).toHaveLength(3);
+    for (const types of seenTypes) expect(types).toEqual([...LEGACY_ENTITY_TYPES]);
   });
 });

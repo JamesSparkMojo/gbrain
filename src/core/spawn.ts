@@ -21,6 +21,7 @@
  */
 
 import * as cp from 'child_process';
+import { promisify } from 'node:util';
 
 // Type-only re-exports: they vanish at compile time. A namespace re-export
 // (`export * from 'child_process'`) is NOT safe here — `bun build --compile`
@@ -82,8 +83,14 @@ type Wrapped = 'spawn' | 'spawnSync' | 'exec' | 'execSync' | 'execFile' | 'execF
 
 // Looked up on the namespace at CALL time (not destructured at import) so a
 // test's `spyOn(childProcess, 'spawnSync')` still intercepts through the seam.
+// node's exec/execFile carry a `util.promisify.custom` that resolves to
+// `{ stdout, stderr }`; the wrapper keeps it (merged through the seam) so
+// `promisify(exec)` matches node instead of resolving a bare stdout string.
 function hidden<K extends Wrapped>(name: K): (typeof cp)[K] {
-  return ((...args: unknown[]) => (cp[name] as unknown as AnyFn)(...withWindowsHide(args))) as unknown as (typeof cp)[K];
+  const fn = (...args: unknown[]) => (cp[name] as unknown as AnyFn)(...withWindowsHide(args));
+  const custom = (cp[name] as unknown as Record<symbol, AnyFn | undefined>)[promisify.custom];
+  if (custom) (fn as unknown as Record<symbol, AnyFn>)[promisify.custom] = (...args: unknown[]) => custom(...withWindowsHide(args));
+  return fn as unknown as (typeof cp)[K];
 }
 
 export const spawn = hidden('spawn');

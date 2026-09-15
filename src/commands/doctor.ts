@@ -2541,13 +2541,14 @@ export async function buildChecks(
   // notes brains). The coverage formula divides by entity-page count, so it's
   // structurally undefined when no entities exist — emitting WARN under that
   // condition is a false positive. Closes #530.
+  // #4772: entity types = active pack's primitive:entity types + legacy
+  // literals, bound as text[] (same set getHealth counts). Deliberately
+  // pack-aware where onboard's checks.ts predicate stays literal. Resolved
+  // once here for graph_coverage AND orphan_ratio below (never throws).
+  const entityTypes = await entityTypesForEngine(engine);
   progress.heartbeat('graph_coverage');
   try {
     const health = await engine.getHealth();
-    // #4772: entity types = active pack's primitive:entity types + legacy
-    // literals, bound as text[] (same set getHealth counts). Deliberately
-    // pack-aware where onboard's checks.ts predicate stays literal.
-    const entityTypes = await entityTypesForEngine(engine);
     const entityCount = (await engine.executeRaw<{ count: number }>(
       // deleted_at IS NULL: a brain whose only entity pages are soft-deleted has
       // zero LIVE entities, and must take the short-circuit below rather than
@@ -2659,7 +2660,6 @@ export async function buildChecks(
     const { getOrphansData } = await import('./orphans.ts');
     const srcId = orphanRatioSourceId;
     const inSource = srcId ? ` in source '${srcId}'` : '';
-    const entityTypes = await entityTypesForEngine(engine);
     const entityCount = (await engine.executeRaw<{ count: number }>(
       `SELECT COUNT(*)::int AS count FROM pages WHERE type = ANY($1::text[]) AND deleted_at IS NULL${srcId ? ' AND source_id = $2' : ''}`,
       srcId ? [entityTypes, srcId] : [entityTypes],
