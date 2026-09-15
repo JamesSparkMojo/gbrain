@@ -138,7 +138,8 @@ export async function prepareWriterTransfer(engine: BrainEngine, sourceId: strin
       if (owner.owner_host_id !== hostId) throw new OperationError('owner_unavailable', 'Ownership changed during transfer.');
       const pending = await tx.executeRaw(`SELECT id FROM persistence_requests WHERE worktree_id=$1::uuid AND
         (state IN ('running','recovering') OR recovery IS NOT NULL) LIMIT 1`, [binding.worktree_id]);
-      if (pending.length) throw new OperationError('recovery_required', 'Resolve outstanding publication before transfer.');
+      const mirrors = await tx.executeRaw('SELECT id FROM persistence_effects WHERE worktree_id=$1::uuid AND recovery IS NOT NULL LIMIT 1', [binding.worktree_id]);
+      if (pending.length || mirrors.length) throw new OperationError('recovery_required', 'Resolve outstanding publication before transfer.');
       const manifest = worktreeManifest(binding.local_path!);
       await tx.executeRaw(`UPDATE persistence_worktrees SET state='draining',manifest=$2::text::jsonb WHERE id=$1::uuid`, [binding.worktree_id, JSON.stringify(manifest)]);
       return { worktree_id: binding.worktree_id, owner_epoch: String(owner.owner_epoch), manifest };
@@ -159,7 +160,8 @@ export async function acceptWriterTransfer(engine: BrainEngine, sourceId: string
       const [owner] = await tx.executeRaw<{ owner_epoch: string; state: string; manifest: { digest: string } }>('SELECT owner_epoch,state,manifest FROM persistence_worktrees WHERE id=$1::uuid FOR UPDATE', [binding.worktree_id]);
       if (!owner || owner.state !== 'draining' || String(owner.owner_epoch) !== expectedEpoch || owner.manifest?.digest !== expectedManifest) throw new OperationError('writer_transfer_conflict', 'Transfer preparation or epoch changed.');
       const pending = await tx.executeRaw(`SELECT id FROM persistence_requests WHERE worktree_id=$1::uuid AND (state IN ('running','recovering') OR recovery IS NOT NULL) LIMIT 1`, [binding.worktree_id]);
-      if (pending.length || worktreeManifest(root).digest !== expectedManifest) throw new OperationError('recovery_required', 'Transfer state changed; prepare again.');
+      const mirrors = await tx.executeRaw('SELECT id FROM persistence_effects WHERE worktree_id=$1::uuid AND recovery IS NOT NULL LIMIT 1', [binding.worktree_id]);
+      if (pending.length || mirrors.length || worktreeManifest(root).digest !== expectedManifest) throw new OperationError('recovery_required', 'Transfer state changed; prepare again.');
       await tx.executeRaw(`INSERT INTO persistence_host_bindings(worktree_id,host_id,local_path,coordination_path)
         VALUES($1::uuid,$2::uuid,$3,$4) ON CONFLICT(worktree_id,host_id) DO UPDATE SET local_path=EXCLUDED.local_path,coordination_path=EXCLUDED.coordination_path`, [binding.worktree_id, hostId, root, coordination]);
       await tx.executeRaw(`UPDATE persistence_worktrees SET owner_host_id=$2::uuid,owner_epoch=owner_epoch+1,state='active',heartbeat_at=now() WHERE id=$1::uuid`, [binding.worktree_id, hostId]);

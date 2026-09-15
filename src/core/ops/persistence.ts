@@ -88,12 +88,14 @@ async function visible(ctx: OperationContext, row: WriteRequest): Promise<boolea
   }
 }
 
-async function publicReceipt(row: WriteRequest): Promise<Record<string, unknown>> {
+async function publicReceipt(ctx: OperationContext, row: WriteRequest): Promise<Record<string, unknown>> {
   const { receiptFor } = await import('../persistence/journal.ts');
+  const { publicEffectsForRequest } = await import('../persistence/effect-journal.ts');
   return {
     ...publicWriteReceipt(receiptFor(row)),
     operation: row.operation, source_id: row.source_id, slug: row.slug,
     ...(isWriteErrorCode(row.error_code) ? { write_error: row.error_code } : {}),
+    effects: await publicEffectsForRequest(ctx.engine, row.id),
   };
 }
 
@@ -118,7 +120,7 @@ export const persistenceOperations: Operation[] = [
       const { getWriteRequest } = await import('../persistence/journal.ts');
       const row = await getWriteRequest(ctx.engine, principal, id);
       if (!row || !await visible(ctx, row)) throw missing();
-      return publicReceipt(row);
+      return publicReceipt(ctx, row);
     },
   },
   {
@@ -147,7 +149,7 @@ export const persistenceOperations: Operation[] = [
         slugPrefixes: access.slugPrefixes, operations: access.operations, slugAllowList,
         authorize: row => visible(ctx, row),
       });
-      return { requests: await Promise.all(result.requests.map(publicReceipt)), next: result.next };
+      return { requests: await Promise.all(result.requests.map(row => publicReceipt(ctx, row))), next: result.next };
     },
   },
   {
@@ -172,7 +174,7 @@ export const persistenceOperations: Operation[] = [
         },
       });
       if (!cancelled) throw missing();
-      return publicReceipt(cancelled);
+      return publicReceipt(ctx, cancelled);
     },
   },
 ];

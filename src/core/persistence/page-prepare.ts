@@ -24,10 +24,10 @@ function canonical(page: Pick<Page, 'type' | 'title' | 'compiled_truth' | 'timel
   return { type: page.type, title: page.title, compiled_truth: page.compiled_truth, timeline: page.timeline ?? '',
     frontmatter: page.frontmatter, tags: [...new Set(tags)].sort() };
 }
-export async function prepareFileTarget(engine: BrainEngine, row: WriteRequest, snapshot: PageSnapshot | null,
-  content: string | null): Promise<PreparedMutation['file']> {
+export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequest, 'source_id' | 'worktree_id' | 'slug'>, snapshot: PageSnapshot | null,
+  content: string | null, hostId?: string): Promise<PreparedMutation['file']> {
   if (!row.worktree_id) return undefined;
-  const binding = await getWorktreeBinding(engine, row.source_id);
+  const binding = await getWorktreeBinding(engine, row.source_id, hostId);
   if (!binding?.local_path) throw new OperationError('owner_unavailable', 'The canonical worktree is unavailable on this host.');
   const root = join(binding.local_path, binding.relative_path);
   const path = resolveSourceLocalFilePath(root, snapshot?.page.source_path, row.slug) ?? join(root, `${row.slug}.md`);

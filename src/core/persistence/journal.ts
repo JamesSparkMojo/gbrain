@@ -116,6 +116,7 @@ export async function claimNextWrite(engine: BrainEngine, hostId: string, leaseM
       LEFT JOIN persistence_worktrees w ON w.id=r.worktree_id
       WHERE r.state='queued' AND (r.worktree_id IS NULL OR (w.owner_host_id=$1::uuid AND w.state='active'))
       AND NOT (COALESCE(r.worktree_id::text,'db:'||r.source_incarnation::text)=ANY($2::text[]))
+      AND NOT EXISTS (SELECT 1 FROM persistence_effects blocked WHERE blocked.worktree_id=r.worktree_id AND blocked.recovery IS NOT NULL)
       AND NOT EXISTS (SELECT 1 FROM persistence_requests earlier
         WHERE COALESCE(earlier.worktree_id::text,'db:'||earlier.source_incarnation::text)
               =COALESCE(r.worktree_id::text,'db:'||r.source_incarnation::text)

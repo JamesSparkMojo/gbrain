@@ -82,6 +82,20 @@ even when its physical mirror is pending. Imports and rebuilds honor the
 withdrawal ledger. History and backups can remain; withdrawal is not a promise
 of physical erasure. See [MEMORY_VERBS v1](../protocol/MEMORY_VERBS_v1.md).
 
+Git, embeddings, and physical withdrawal mirrors report their own `effects`
+states on receipt reads. Their retries never change the committed canonical
+result. Mirror recovery checks the recorded bytes and blocks its worktree if
+an unexpected edit needs repair. Other worktrees can continue. Recovery space
+is reserved before touching a file; insufficient capacity leaves the withdrawal
+effective and its physical mirror queued.
+
+Git work runs only for repositories already opted into durability hardening.
+It commits the affected file without invoking legacy hooks, then attempts a
+plain push to the configured tracking remote. It never pulls or rebases source
+files. An unconfigured remote is reported as a skipped push. Embeddings wait
+for an enabled, configured provider and install only if the page revision and
+its text projection still match.
+
 ## Receipt access and explicit grant migration
 
 `get_write_request`, `list_write_requests`, and `cancel_write_request` require

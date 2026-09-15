@@ -15,6 +15,8 @@ import { withCoordinatedWrite } from './context.ts';
 import { withFilesystemPublication } from './filesystem-guard.ts';
 import { mayReprepare } from './semantic.ts';
 import { tryAcquirePublicationCapacity } from './pool-capacity.ts';
+import { queuePublicationEffects } from './effect-journal.ts';
+import { authorizePageVisibility } from './page-visibility.ts';
 
 export interface PreparedMutation {
   observedRevision: string | null;
@@ -48,6 +50,9 @@ function publishFile(file: NonNullable<PreparedMutation['file']>): void {
   } else atomicWriteFileSync(file.path, file.content, { durable: true });
   flushDirectory(file.path);
 }
+// Effect recovery uses the same confined durable publication primitive, under
+// its own recovery record and native root capability.
+export { fileHash as persistenceFileHash, publishFile as publishPersistenceFile };
 function requestError(error: unknown): { code: string; message: string } {
   if (error instanceof OperationError) return { code: error.code, message: error.message };
   const code = (error as { code?: string })?.code;
@@ -93,6 +98,11 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
         await releaseUnpublishedClaim(engine, row, 'writer_busy');
         return (await getWriteRequestById(engine, row.id))!;
       }
+      const blocked = await engine.executeRaw('SELECT id FROM persistence_effects WHERE worktree_id=$1::uuid AND recovery IS NOT NULL LIMIT 1', [row.worktree_id]);
+      if (blocked.length) {
+        await releaseUnpublishedClaim(engine, row, 'recovery_required');
+        return (await getWriteRequestById(engine, row.id))!;
+      }
     }
     releaseCapacity = tryAcquirePublicationCapacity(engine);
     if (!releaseCapacity) {
@@ -128,6 +138,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       if (!current || current.execution_token !== row.execution_token || current.state !== 'running') throw new OperationError('write_claim_lost', 'Execution claim changed before publication.');
       await tx.lockPageKeys([{ sourceId: row.source_id, slug: row.slug },...(prepared.additionalPageKeys??[])]);
       const snapshot = await tx.readPageSnapshot(row.slug, { sourceId: row.source_id, includeDeleted: true });
+      await authorizePageVisibility(tx, row.authority, row.slug);
       if ((snapshot?.page.id ?? null) !== row.page_id) throw new OperationError('page_identity_changed', 'The accepted page was deleted or recreated.');
       if ((snapshot?.revision ?? null) !== prepared.observedRevision) throw new OperationError('revision_conflict', 'The page changed during preparation.', 'Read its current revision and submit the updated intent with a new request_id.');
       await prepared.validate?.(tx);
@@ -145,7 +156,8 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       const final = await tx.readPageSnapshot(row.slug, { sourceId: row.source_id, includeDeleted: true });
       if (final) outcome.revision = final.revision;
       outcome.persistence = { mode: prepared.file ? 'filesystem' : 'database', ...(prepared.file ? { file_written: !prepared.noop } : {}) };
-      outcome.write_through = prepared.file ? { written: !prepared.noop } : { written: false, skipped: 'no_repo_configured' };
+      outcome.write_through = prepared.file ? { written: !prepared.noop } : { written: false, skipped: row.authority.databaseOnlyReason ?? 'no_repo_configured' };
+      await queuePublicationEffects(tx, row, final?.revision, outcome, prepared);
       await hooks.boundary?.('before_commit', row);
       return completeWrite(tx, current, 'committed', outcome);
     });

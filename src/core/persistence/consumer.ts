@@ -1,12 +1,13 @@
 import type { BrainEngine } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
-import { claimNextWrite, getWriteRequestById, releaseUnpublishedClaim, renewWriteClaim } from './journal.ts';
+import { claimNextWrite, compactWriteReceipts, getWriteRequestById, releaseUnpublishedClaim, renewWriteClaim } from './journal.ts';
 import { finishUnpublishedFailure, publishMutation, recoverPublication, type PreparedMutation } from './coordinator.ts';
 import { localHostId } from './identity.ts';
 import { isTerminal, type WriteRequest } from './model.ts';
 import { refreshManagedFilesystemRoots } from './filesystem-guard.ts';
 import { rebuildPendingPageProjections } from '../page-state/projections.ts';
 import { publicationConcurrency } from './pool-capacity.ts';
+import { runPersistenceEffects } from './effects.ts';
 
 export type PrepareMutation = (engine: BrainEngine, row: WriteRequest, config: GBrainConfig) => Promise<PreparedMutation>;
 export class PersistenceConsumer {
@@ -16,12 +17,16 @@ export class PersistenceConsumer {
   private active = new Set<Promise<void>>();
   private activeRoots = new Set<string>();
   private projectionWorker: Promise<unknown> | undefined;
+  private effectsWorker: Promise<void> | undefined;
+  private maintenanceWorker: Promise<unknown> | undefined;
+  private nextMaintenance = 0;
+  private abort = new AbortController();
   readonly hostId: string;
   constructor(readonly engine: BrainEngine, readonly config: GBrainConfig, readonly prepare: PrepareMutation,
     private opts: { hostId?: string; concurrency?: number; pollMs?: number; onError?: (error: unknown) => void } = {}) {
     this.hostId = opts.hostId ?? localHostId();
   }
-  start(): void { this.stopping = false; this.schedule(0); }
+  start(): void { this.stopping = false; this.abort = new AbortController(); this.schedule(0); }
   private schedule(ms: number): void {
     if (this.stopping || this.timer) return;
     this.timer = setTimeout(() => { this.timer = undefined; void this.tick().finally(() => this.schedule(this.opts.pollMs ?? 250)); }, ms);
@@ -35,6 +40,14 @@ export class PersistenceConsumer {
   private async doTick(): Promise<void> {
     if (this.stopping) return;
     await refreshManagedFilesystemRoots(this.engine);
+    if (!this.effectsWorker) this.effectsWorker = runPersistenceEffects(this.engine, this.config,
+      { hostId: this.hostId, limit: 2, signal: this.abort.signal }).catch(error => this.report(error))
+      .finally(() => { this.effectsWorker = undefined; });
+    if (!this.maintenanceWorker && Date.now() >= this.nextMaintenance) {
+      this.nextMaintenance = Date.now() + 60_000;
+      this.maintenanceWorker = compactWriteReceipts(this.engine).catch(error => this.report(error))
+        .finally(() => { this.maintenanceWorker = undefined; });
+    }
     if (!this.projectionWorker) this.projectionWorker = rebuildPendingPageProjections(this.engine, 2)
       .catch(error => this.report(error)).finally(() => { this.projectionWorker = undefined; });
     // Recover only our owner roots. Kernel exclusion, not elapsed heartbeat,
@@ -96,9 +109,12 @@ export class PersistenceConsumer {
   /** Mandatory barrier: engine.close must be sequenced AFTER this promise. */
   async stop(): Promise<void> {
     this.stopping = true;
+    this.abort.abort();
     if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
     await this.tickPromise;
     await Promise.allSettled([...this.active]);
     await this.projectionWorker;
+    await this.effectsWorker;
+    await this.maintenanceWorker;
   }
 }

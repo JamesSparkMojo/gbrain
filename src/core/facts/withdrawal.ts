@@ -41,10 +41,11 @@ export async function recordFactWithdrawal(
         WHERE source_id=$1 RETURNING id,slug,knowledge_revision`, [sourceId]);
     await tx.executeRaw('DELETE FROM content_chunks WHERE page_id IN (SELECT id FROM pages WHERE source_id=$1)', [sourceId]);
     if (opts.requestId) {
-      for (const page of pages) await tx.executeRaw(`INSERT INTO persistence_effects(request_id,kind,revision,data)
-        VALUES ($1::uuid,$2,$3::uuid,$4::text::jsonb) ON CONFLICT(request_id,kind) DO NOTHING`,
-      [opts.requestId, `withdrawal-mirror:${page.id}`, page.knowledge_revision,
-        JSON.stringify({ source_id: sourceId, slug: page.slug, revision: page.knowledge_revision })]);
+      await tx.executeRaw(`INSERT INTO persistence_effects(request_id,kind,data,source_id,source_incarnation,worktree_id)
+        SELECT $1::uuid,k.kind,jsonb_build_object('source_id',s.id,'source_scan',true),s.id,s.incarnation,b.worktree_id
+        FROM sources s LEFT JOIN persistence_source_bindings b ON b.source_id=s.id AND b.source_incarnation=s.incarnation
+        CROSS JOIN (VALUES ('withdrawal-mirror'),('git'),('embedding')) AS k(kind)
+        WHERE s.id=$2 ON CONFLICT(request_id,kind) DO NOTHING`, [opts.requestId, sourceId]);
     }
     return { withdrawn: true, pages: pages.map(page => ({ sourceId, slug: page.slug, revision: page.knowledge_revision })) };
   });

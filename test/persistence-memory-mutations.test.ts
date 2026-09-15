@@ -177,6 +177,9 @@ describe('journaled memory publication, both engines', () => {
       expect(await engine.executeRaw('SELECT kind FROM persistence_effects WHERE request_id=$1::uuid', [request.id])).not.toHaveLength(0);
       await engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], () => tx.executeRaw('DELETE FROM facts WHERE id=$1', [Number(remembered.id)])));
       expect(await submitForgetMutation(context(engine), 'forget', params)).toEqual(forgotten);
+      // The fixture's offline owner is synthetic. Durable effects otherwise
+      // deliberately retain their worktree identity until reconciliation.
+      await engine.executeRaw('DELETE FROM persistence_effects WHERE worktree_id=$1::uuid', [worktreeId]);
       await engine.executeRaw('DELETE FROM persistence_source_bindings WHERE source_id=$1', [sourceId]);
       await engine.executeRaw('DELETE FROM persistence_worktrees WHERE id=$1::uuid', [worktreeId]);
     }
