@@ -104,6 +104,35 @@ describe('durable mutation journal', () => {
     } finally { await blocker; }
   });
 
+  test('persistent Postgres contention returns a bounded typed error without inventing an accepted receipt', async () => {
+    const engine = engines.find(candidate => candidate.kind === 'postgres');
+    if (!engine) return;
+    const a = await admission(engine, 'admission-bounded-contention');
+    let held!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>(resolve => { held = resolve; });
+    const released = new Promise<void>(resolve => { release = resolve; });
+    const blocker = engine.transaction(async tx => {
+      await tx.executeRaw("SELECT key FROM persistence_counters WHERE key='brain' FOR UPDATE");
+      held();
+      await released;
+    });
+    await ready;
+    const started = performance.now();
+    try {
+      const error = await admitWrite(engine, a).then(() => null, error => error);
+      expect(error).toBeInstanceOf(OperationError);
+      expect(error).toMatchObject({ code: 'storage_error', writeError: 'storage_error' });
+      expect(error.suggestion).toContain(a.requestId!);
+      expect(error.writeRequest).toBeUndefined();
+      expect(performance.now() - started).toBeLessThan(6000);
+      expect(await getWriteRequest(engine, a.principal, a.requestId!)).toBeNull();
+    } finally { release(); await blocker; }
+    const accepted = await admitWrite(engine, a);
+    expect(accepted.request_id).toBe(a.requestId!);
+    await cancelWriteRequest(engine, a.principal, a.requestId!);
+  });
+
   test('activation rejects legacy canonical writers but accepts guarded publication', async () => {
     for (const engine of engines) {
       await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');

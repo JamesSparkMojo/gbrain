@@ -59,12 +59,13 @@ describe('#3874 gbrain call federated scope parity', () => {
       const engine = makeEngine({ resolveSlugsOpts: [] });
       engine.resolveSlugs = async () => { throw error; };
       const outs: string[] = [];
+      const priorExitCode = process.exitCode;
       try {
         await runCall(engine, ['resolve_slugs', '{"partial":"example"}'], async payload => { outs.push(payload); });
         expect(outs).toHaveLength(1);
         expect(JSON.parse(outs[0])).toMatchObject({ error: 'revision_conflict', write_error: 'revision_conflict', write_request: receipt });
         expect(currentExitCode()).toBe(1);
-      } finally { _resetCliExitVerdictForTests(); }
+      } finally { _resetCliExitVerdictForTests(); process.exitCode = priorExitCode ?? 0; }
     });
   });
 

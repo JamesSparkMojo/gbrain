@@ -163,7 +163,7 @@ export async function prepareRecovery(engine: BrainEngine, row: WriteRequest, re
   await engine.transaction(async tx => {
     // A crash after rename must never lose the earlier recovery reservation,
     // even when the deployment defaults ordinary transactions to async commit.
-    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
+    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout','1s',true),set_config('statement_timeout','5s',true)");
     const counters = await lockCounters(tx, ['brain', `worktree:${row.worktree_id}`]);
     const [current] = await tx.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE id=$1::uuid FOR UPDATE', [row.id]);
     if (!current || current.execution_token !== row.execution_token || current.state !== 'running') throw new OperationError('write_claim_lost', 'The write execution claim was superseded.');
