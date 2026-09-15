@@ -1077,11 +1077,9 @@ async function clientsCmd(args: string[]) {
 /**
  * Parse `auth create` args into `{ name, takesHolders, scopes }`.
  *
- * Exported + pure so the positional-vs-flag logic is unit-testable. Only
- * excludes flag VALUES from the positional search when their flag is
- * present — the pre-v0.41 inline version used `rest[takesIdx + 1]` which
- * resolved to `rest[0]` when `takesIdx === -1`, silently dropping the name on
- * the bare `gbrain auth create <name>` form.
+ * Exported + pure so the positional-vs-flag logic is unit-testable. Flag
+ * VALUES are excluded from the positional search only when their flag is
+ * present, so the bare `gbrain auth create <name>` form keeps its name.
  *
  * --scopes accepts comma- and/or whitespace-separated input (the
  * register-client #3990 normalization precedent). Validation against the
@@ -1089,11 +1087,9 @@ async function clientsCmd(args: string[]) {
  */
 export function parseAuthCreateArgs(rest: string[]): { name: string; takesHolders?: string[]; scopes?: string[]; source?: string; error?: string } {
   // Every flag accepts the bare (`--flag <v>`) and inline (`--flag=<v>`)
-  // forms — the CLI flag validator admits both for `auth`, and a parser that
-  // matched only the bare token silently dropped the inline value and minted
-  // a grandfathered FULL-ACCESS token (the fail-open-by-silent-precedence
-  // class the harness parser rejects [X14]). Fail closed on a missing, empty
-  // or flag-like value in either form.
+  // forms (the CLI flag validator admits both for `auth`). A missing, empty
+  // or flag-like value fails closed in either form: a silently dropped
+  // --scopes would otherwise mint a full-access token.
   const findFlag = (flag: string) => {
     const idx = rest.findIndex(a => a === flag || a.startsWith(`${flag}=`));
     const inline = idx >= 0 && rest[idx] !== flag;
@@ -1125,11 +1121,10 @@ export function parseAuthCreateArgs(rest: string[]): { name: string; takesHolder
   if (source !== undefined && source.length === 0) {
     return { name: '', error: 'the source flag requires a non-empty value (e.g. workspace)' };
   }
-  // Exclude flag VALUES by position, not by string equality: a token named
-  // after its source (`auth create workspace --source workspace`) is the
-  // natural shape, and a value-equality filter swallowed the name. Only the
-  // BARE forms occupy a value slot; an inline `--scopes=read` token is itself
-  // `--`-prefixed and already skipped.
+  // Flag VALUES are excluded from the positional scan by index, not by string
+  // equality, so a token named after its source (`auth create workspace
+  // --source workspace`) keeps its name. Only the BARE forms occupy a value
+  // slot; an inline `--scopes=read` token is itself `--`-prefixed and skipped.
   const valueIdx = new Set<number>();
   for (const f of [takes, scopesFlag, sourceFlag]) {
     if (f.idx >= 0 && !f.inline) valueIdx.add(f.idx + 1);

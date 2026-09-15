@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeEach, afterAll } from 'bun:test';
+import { createHash } from 'node:crypto';
 import {
   configureGateway,
   resetGateway,
@@ -551,7 +552,11 @@ describe('embedding response integrity', () => {
         const err = await embed(['first', 'second']).then(() => undefined, (e: unknown) => e);
         expect(err).toBeInstanceOf(AIConfigError);
         expect((err as Error).message).toContain(expectedMessage);
-        expect((err as Error).message).toMatch(/at batch index 0 \(input: "first"\)/);
+        // Content-free diagnostic (query_hash norm): sha256 prefix + length,
+        // never the raw chunk/fact/query text — this lands in stderr/--json/job records.
+        const inputHash = createHash('sha256').update('first', 'utf8').digest('hex').slice(0, 8);
+        expect((err as Error).message).toContain(`at batch index 0 (input sha256 ${inputHash}, 5 chars)`);
+        expect((err as Error).message).not.toContain('first');
       } finally {
         __setEmbedTransportForTests(null);
       }

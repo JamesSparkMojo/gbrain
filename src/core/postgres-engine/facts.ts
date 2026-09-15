@@ -703,8 +703,9 @@ function toPgVectorLiteral(v: Float32Array | number[]): string {
 
 /**
  * Cursor-paged selector for the facts embedding backfill. The predicate is
- * the `facts_pending` counter from the `migrate embeddings` status report, verbatim
- * (embedding IS NULL AND expired_at IS NULL), so the two numbers agree.
+ * the `facts_pending` counter from the `migrate embeddings` status report
+ * (embedding IS NULL AND expired_at IS NULL, minus AUDIT_ROW_SOURCES rows —
+ * audit provenance is never embedded), so the two numbers agree.
  */
 export async function listFactsNeedingEmbedding(
   deps: PgFactsDeps,

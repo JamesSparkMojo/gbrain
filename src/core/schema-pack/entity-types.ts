@@ -1,22 +1,18 @@
 // #4772: pack-driven entity types for the READ-ONLY counters (getHealth,
 // doctor graph_coverage / orphan_ratio, the init nudge).
 //
-// "Is this page an entity?" used to be a hardcoded SQL literal at every
-// counter site (`type IN ('entity','person','company')` in the engines,
-// a 4-name spelling in doctor/onboard) that never consulted the active
-// pack's `primitive`. A brain whose entity pages carry pack-declared types
-// the literal did not name read as "0 entity pages" — coverage null,
-// most_connected empty, doctor short-circuiting graph_coverage.
-//
 // Deliberate design for COUNTERS: the pack's `primitive: entity` types are
 // UNIONED with the legacy literal set, so every page counted today keeps
 // counting (no pack declares `entity` or `organization`, yet brains hold
-// such pages) and pack-declared types start counting. This is the opposite
-// of the capability helpers' no-fallback rule in best-effort.ts — a counter
-// that undercounts is a false "no entities" signal, not a user-intent
-// violation. Write/dispatch sites (onboard checks.ts VISIBLE_ENTITY_PREDICATE,
-// extract-ner target types, by-mention gazetteer) are NOT routed here; each
-// changes what is written and needs its own change.
+// such pages) and pack-declared types count too — a page whose type only
+// the pack names must not read as "not an entity" (coverage null,
+// most_connected empty, graph_coverage short-circuited). This is the
+// opposite of the capability helpers' no-fallback rule in best-effort.ts —
+// a counter that undercounts is a false "no entities" signal, not a
+// user-intent violation. Write/dispatch sites (onboard checks.ts
+// VISIBLE_ENTITY_PREDICATE, extract-ner target types, by-mention gazetteer)
+// are deliberately literal and NOT routed here; each changes what is
+// written and needs its own change.
 
 import type { BrainEngine } from '../engine.ts';
 import type { SchemaPackManifest } from './manifest-v1.ts';

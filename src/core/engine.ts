@@ -2239,8 +2239,8 @@ export interface BrainEngine {
   /**
    * #4812: cursor-paged selector for `gbrain embed --stale --facts`. Same
    * predicate as the `facts_pending` counter in the `migrate embeddings` status report
-   * (embedding IS NULL AND expired_at IS NULL). `sourceId` narrows to one
-   * source; `afterId` is the exclusive id cursor. Ordered by id ASC.
+   * (embedding IS NULL AND expired_at IS NULL, minus AUDIT_ROW_SOURCES rows). `sourceId`
+   * narrows to one source; `afterId` is the exclusive id cursor. Ordered by id ASC.
    */
   listFactsNeedingEmbedding(opts: { limit: number; afterId?: number; sourceId?: string | null }): Promise<StaleFactRow[]>;
 

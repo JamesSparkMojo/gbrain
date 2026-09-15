@@ -793,7 +793,8 @@ function toPgVectorLiteral(v: Float32Array | number[]): string {
 
 /**
  * Cursor-paged selector for the facts embedding backfill. Parity twin of
- * postgres-engine/facts.ts: same `facts_pending` predicate, same ordering.
+ * postgres-engine/facts.ts: same `facts_pending` predicate (embedding IS NULL
+ * AND expired_at IS NULL, minus AUDIT_ROW_SOURCES rows), same ordering.
  */
 export async function listFactsNeedingEmbedding(
   deps: PgliteFactsDeps,

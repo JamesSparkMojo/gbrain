@@ -2154,17 +2154,17 @@ export function __getShrinkStateForTests(recipeId: string): ShrinkEntry | undefi
 /**
  * #4616 — pgvector rejects non-finite components at insert and its cosine
  * HNSW silently SKIPS a zero-norm vector, so a degenerate provider vector is a
- * stored embedding that no vector search can ever reach (while `get` and
- * keyword search still see the row). Fail loud here, before upsertChunks.
- * Checked on the float32 view — what the column stores — so a vector that
- * flushes to all-zero at float32 precision counts as zero-norm too.
+ * stored embedding no vector search can reach (`get` / keyword search still see the
+ * row). Fail loud here, before upsertChunks. Checked on the float32 view (what the column
+ * stores), so a vector flushing to all-zero at float32 precision is zero-norm too. The input
+ * is named by sha256 prefix + length, never by content (query_hash norm; this reaches stderr/--json/job records).
  */
 function assertIndexableEmbedding(vector: Float32Array, modelId: string, index: number, input?: string | MultimodalInput): Float32Array {
   const norm = vector.reduce((sum, x) => sum + x * x, 0);
   if (norm > 0 && Number.isFinite(norm)) return vector;
   const text = typeof input === 'string' ? input : input?.kind === 'text' ? input.text : undefined;
   throw new AIConfigError(
-    `Embedding provider returned a ${norm === 0 ? 'zero-norm' : 'non-finite'} vector for model ${modelId} at batch index ${index}${text === undefined ? '' : ` (input: ${JSON.stringify(text.slice(0, 40))})`}; it cannot be indexed for vector search.`,
+    `Embedding provider returned a ${norm === 0 ? 'zero-norm' : 'non-finite'} vector for model ${modelId} at batch index ${index}${text === undefined ? '' : ` (input sha256 ${createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 8)}, ${text.length} chars)`}; it cannot be indexed for vector search.`,
     `Retry the import after checking provider health; a degenerate vector would be stored but never reachable by search.`,
   );
 }

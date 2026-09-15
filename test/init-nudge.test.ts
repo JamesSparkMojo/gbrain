@@ -10,8 +10,13 @@
  *     non-empty, so the takes nudge still fires
  *   - non-empty + healthy + one rejected arm → partial-checks notice
  *   - non-empty + takes 0 → "0 takes" opportunity nudge
- *   - a hanging schema-pack lookup (getConfig never resolves) is raced
- *     against the 3s budget: legacy entity types, nudge still completes
+ *   - a hanging schema-pack lookup (getConfig never resolves) loses its own
+ *     1s sub-budget: legacy entity types, and the counts still RUN (the
+ *     signal is not yet aborted) so the "0 takes" nudge prints, not the
+ *     "incomplete" notice
+ *
+ * The stub honors `opts.signal` like the real engines (AbortError once
+ * aborted), so a fallback that only fired at the 3s mark would fail here.
  *
  * The gate is process.stderr.isTTY (NOT process.env), so monkeypatching it
  * here does not trip the serial-isolation rules for env-mutating tests.
@@ -50,7 +55,9 @@ function stubEngine(counts: ProbeCounts): BrainEngine {
     return counts.pages ?? 0;
   };
   return {
-    executeRaw: async (sql: string) => {
+    executeRaw: async (sql: string, _params: unknown[] = [], opts?: { signal?: AbortSignal }) => {
+      // Both real engines reject on an already-aborted signal.
+      if (opts?.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
       const r = route(sql);
       if (r instanceof Error) throw r;
       return [{ count: r }];
@@ -142,24 +149,28 @@ describe('runInitNudge — non-empty brain opportunities', () => {
   });
 });
 
-describe('runInitNudge — schema-pack lookup is budget-bound', () => {
-  test('getConfig that never resolves → legacy entity types, nudge completes within the budget', async () => {
+describe('runInitNudge — schema-pack lookup has its own sub-budget', () => {
+  test('getConfig that never resolves → legacy entity types, counts still run, "0 takes" nudge prints', async () => {
     const base = stubEngine({ stale: 0, entities: 0, linked: 0, timeline: 0, takes: 0, pages: 5 });
     let getConfigCalls = 0;
     const seenTypes: unknown[] = [];
     const engine = {
       getConfig: () => { getConfigCalls++; return new Promise(() => {}); },
-      executeRaw: async (sql: string, params: unknown[] = []) => {
+      executeRaw: async (sql: string, params: unknown[] = [], opts?: { signal?: AbortSignal }) => {
         if (sql.includes('$1::text[]')) seenTypes.push(params[0]);
-        return base.executeRaw(sql, params);
+        return base.executeRaw(sql, params, opts);
       },
     } as unknown as BrainEngine;
     const t0 = Date.now();
     const out = await runNudgeCaptured(engine);
-    // Budget is 3s; the lookup lost the race and the counts still ran.
-    expect(Date.now() - t0).toBeLessThan(4500);
+    // The lookup lost its 1s sub-budget, well inside the 3s nudge budget, so
+    // the signal was still live and every count ran (the stub throws
+    // AbortError on an aborted signal, so a 3s fallback would fail here).
+    expect(Date.now() - t0).toBeLessThan(2500);
     expect(getConfigCalls).toBeGreaterThan(0);
-    expect(out).toContain('0 takes');
+    expect(out).toContain('Brain has opportunities: 0 takes');
+    expect(out).not.toContain('Init checks incomplete');
+    expect(out).not.toContain('checks complete');
     expect(seenTypes).toHaveLength(3);
     for (const types of seenTypes) expect(types).toEqual([...LEGACY_ENTITY_TYPES]);
   });
