@@ -73,6 +73,16 @@ UUID, without fabricating a queued receipt or opening another PGLite engine.
 Legacy callers that omit a request ID and lose the entire acknowledgment cannot
 recover exact replay identity from the content alone.
 
+Local Unix listeners keep their existing socket addresses when they fit the
+portable 103-byte limit. Longer addresses use a deterministic private directory
+under `/private/tmp` on macOS or `/tmp` on Linux, independent of `HOME` and
+`TMPDIR`. Both CLI discovery and resident servers derive it without opening the
+database. The directory must belong to the current OS user with mode `0700`;
+clients require a socket with mode `0600`. Unsafe entries are refused. Existing
+credentials and hook-secret locations are unchanged. A native binding lock
+serializes startup and remains held until the listener has actually closed.
+
+
 Admission retries confirmed database lock/serialization aborts for up to five
 seconds using the same UUID. Persistent contention returns a storage error with
 that UUID and no fabricated queued receipt. Keep the ID for the next attempt.

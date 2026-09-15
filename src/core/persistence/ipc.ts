@@ -1,11 +1,12 @@
 /** Dedicated, bounded local persistence transport. Hook IPC keeps its own small frame budget. */
 import net, { type Server, type Socket } from 'node:net';
-import { chmodSync, lstatSync, mkdirSync, unlinkSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join } from 'node:path';
+import { chmodSync, lstatSync, unlinkSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
 import { OperationError } from '../ops/contract.ts';
 import { resolveSocketPathForConfig, socketHasLiveListener } from '../context/resolve-ipc.ts';
 import { isWriteErrorCode, isWriteReceipt, isWriteRequestId, publicWriteReceipt } from './types.ts';
 import { isPersistenceAdminOperation, PERSISTENCE_ADMIN_OPERATIONS, type PersistenceAdminOperation } from './admin-contract.ts';
+import { claimLocalIpcBinding, isWindowsIpcPipe, prepareLocalIpcPath } from '../context/ipc-path.ts';
 
 export const PERSISTENCE_IPC_VERSION = 1;
 // Five million content bytes can require six JSON bytes each (e.g. NUL).
@@ -84,8 +85,7 @@ export function isPersistenceIpcMutation(value: string): boolean {
 }
 
 export function persistenceSocketPathForConfig(config: Parameters<typeof resolveSocketPathForConfig>[0]): string | null {
-  const path = resolveSocketPathForConfig(config);
-  return path ? join(dirname(path), basename(path).replace('resolve', 'persistence')) : null;
+  return resolveSocketPathForConfig(config, 'persistence');
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -143,15 +143,18 @@ export async function startPersistenceIpcServer(
   provider: PersistenceIpcProvider,
 ): Promise<PersistenceIpcBinding | null> {
   if (!isWriteRequestId(provider.brainId)) throw new Error('Persistence IPC requires a durable brain UUID.');
-  mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
-  if (process.platform !== 'win32') chmodSync(dirname(socketPath), 0o700);
-  if (await socketHasLiveListener(socketPath)) return null;
+  const binding = await claimLocalIpcBinding(socketPath);
+  if (!binding) return null;
+  socketPath = binding.socketPath;
+  if (await socketHasLiveListener(socketPath)) { await binding.release(); return null; }
   try {
     // Refuse to remove ordinary files or symlinks from the discovery path.
-    if (!lstatSync(socketPath).isSocket()) throw new Error('Persistence IPC path is not a socket.');
-    unlinkSync(socketPath);
+    if (!isWindowsIpcPipe(socketPath)) {
+      if (!lstatSync(socketPath).isSocket()) throw new Error('Persistence IPC path is not a socket.');
+      unlinkSync(socketPath);
+    }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { await binding.release(); throw error; }
   }
 
   const sockets = new Set<Socket>();
@@ -208,6 +211,8 @@ export async function startPersistenceIpcServer(
       })();
     });
   });
+  let listened = false;
+  server.once('close', () => { void binding.release(); });
   const bound = await new Promise<boolean>((resolve, reject) => {
     const onError = (error: NodeJS.ErrnoException) => {
       if (error.code === 'EADDRINUSE') resolve(false);
@@ -215,18 +220,21 @@ export async function startPersistenceIpcServer(
     };
     server.once('error', onError);
     server.listen(socketPath, () => {
+      listened = true;
       try {
         if (process.platform !== 'win32') chmodSync(socketPath, 0o600);
         server.off('error', onError);
         server.on('error', () => {});
         resolve(true);
       } catch (error) {
+        closing = true;
         server.close();
+        for (const socket of sockets) socket.destroy();
         reject(error);
       }
     });
-  });
-  if (!bound) return null;
+  }).catch(async error => { if (!listened) await binding.release(); throw error; });
+  if (!bound) { await binding.release(); return null; }
   return {
     server, socketPath,
     close() {
@@ -275,6 +283,8 @@ function remoteOperationError(value: unknown): OperationError {
 /** One bounded exchange. No automatic reconnect or replay after any request bytes are sent. */
 async function exchange(socketPath: string, request: unknown, timeoutMs: number, requestId?: string): Promise<unknown> {
   const frame = responseFrame(request);
+  try { socketPath = prepareLocalIpcPath(socketPath); }
+  catch { throw new PersistenceIpcTransportError(false, requestId); }
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
     let sent = false;

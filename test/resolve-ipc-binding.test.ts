@@ -143,7 +143,9 @@ describe('both serve transports bind through the shared helper (#4474)', () => {
     // error (ENOENT / ECONNREFUSED) may authorize cleanup.
     const src = await readSrc('src/core/context/resolve-ipc.ts').text();
     expect(src).toContain("probe.once('timeout', () => finish('unknown'))");
-    expect(src).toContain("probe.once('error', () => finish('dead'))");
+    expect(src).toContain("probe.once('error', failed)");
+    expect(src).toContain("['ENOENT', 'ECONNREFUSED', 'ENOTSOCK']");
+    expect(src).toContain("? 'dead' : 'unknown'");
     expect(src).not.toContain("probe.once('timeout', () => finish(false))");
     // One budget constant, not a literal that can drift from the client's.
     expect(src).toContain('probe.setTimeout(CLIENT_TIMEOUT_MS)');

@@ -4,14 +4,16 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const args = process.argv.slice(2);
 if (args.length !== 2 || args[0] !== '--binary') throw new Error('Usage: bun scripts/native/cli-persistence-smoke.ts --binary <release executable>');
 const root = mkdtempSync(join(tmpdir(), 'gbrain-release-persistence-'));
 const binary = join(root, process.platform === 'win32' ? 'gbrain.exe' : 'gbrain');
-const database = join(root, 'brain.pglite'), checkout = join(root, 'pages');
+const database = process.platform === 'win32' ? join(root, 'brain.pglite')
+  : join(root, 'long-界'.repeat(18), 'brain.pglite');
+const checkout = join(root, 'pages');
 const childTemp = join(root, 'tmp');
 // Copying the artifact away from the checkout also rules out adjacent source
 // files or native prebuilds accidentally satisfying a broken release bundle.
@@ -107,7 +109,7 @@ async function stopOwner() {
 }
 
 try {
-  mkdirSync(checkout); mkdirSync(childTemp);
+  mkdirSync(checkout); mkdirSync(childTemp); mkdirSync(dirname(database), { recursive: true });
   copyFileSync(resolve(args[1]), binary); chmodSync(binary, 0o700);
   await run(['init', '--pglite', '--path', database, '--non-interactive', '--no-embedding', '--json'], 0, 120000);
   const config = JSON.parse(readFileSync(join(root, '.gbrain', 'config.json'), 'utf8'));
@@ -162,7 +164,8 @@ try {
   // probe; never retry a mutation or mistake a queued receipt for readiness.
   const persistenceDeadline = performance.now() + 60000;
   const socketPath = join(database, '.gbrain-persistence.sock');
-  const diagnostics = () => `socket_path_bytes=${Buffer.byteLength(socketPath)}; owner stderr: ${ownerErrors.slice(-6000)}`;
+  if (process.platform !== 'win32') assert(Buffer.byteLength(socketPath) > 103, 'Release smoke must exercise the long Unix address fallback.');
+  const diagnostics = () => `legacy_socket_path_bytes=${Buffer.byteLength(socketPath)}; owner stderr: ${ownerErrors.slice(-6000)}`;
   for (;;) {
     assert.equal(owner.exitCode, null, `Resident CLI exited before persistence readiness: ${diagnostics()}`);
     assert(!ownerErrors.includes('[persistence-ipc] listener unavailable'), `Resident persistence listener failed to bind: ${diagnostics()}`);
@@ -191,7 +194,7 @@ try {
   await readPage(slug, residentRevision, 'Resident canonical release sentinel.');
   assert.equal(committed(await call('put_page', resident), residentId), residentRevision, 'Receipt did not survive resident shutdown and reopen.');
   console.log(JSON.stringify({ ok: true, target: status.native_lock.target, binary: 'release artifact',
-    checks: ['keyless-init', 'native-probe', 'filesystem-publication', 'durable-replay', 'revision-conflict', 'authenticated-owner-readiness', 'resident-ipc', 'shutdown-reopen'] }));
+    legacy_socket_path_bytes: Buffer.byteLength(socketPath), checks: [...(process.platform === 'win32' ? [] : ['long-unicode-ipc-path']), 'keyless-init', 'native-probe', 'filesystem-publication', 'durable-replay', 'revision-conflict', 'authenticated-owner-readiness', 'resident-ipc', 'shutdown-reopen'] }));
 } finally {
   try { await stopOwner(); }
   finally {
