@@ -300,7 +300,7 @@ const fetch_page: Operation = {
 
 const put_page: Operation = {
   name: 'put_page',
-  description: 'Write or replace a page (markdown with frontmatter). REPLACES the entire page; this is not a partial edit. Before modifying an existing page, read its canonical content with `get_page include_content:true`, then submit the complete page. Chunks, embeds, reconciles tags, and (when auto_link/auto_timeline are enabled) extracts + reconciles graph links and timeline entries. Remote (MCP) callers: body wikilinks are NOT reconciled into the graph — auto_link/auto_timeline are skipped for untrusted writers (response reports auto_links: {skipped: "remote"}); use local capture/put_page for link extraction. For large content on Windows (pipe-buffer limit ~45KB) or any file-as-input workflow, use `gbrain capture --file PATH --slug SLUG` — capture reads the file as a Buffer with a binary-NUL guard and adds provenance write-through (v0.39.3.0).',
+  description: 'Replace a complete canonical Markdown page. Read get_page with include_content:true and pass its revision as expected_revision; force explicitly overwrites the current revision. Omitting both permits creation only. Retain a UUID request_id and repeat identical arguments after transport failure or a pending receipt. Content, tags, sanitized text projections, versions and the committed receipt publish together; embedding and optional Git effects have separate status. Remote round trips preserve protected facts/takes fences. For file input use gbrain capture --file PATH --slug SLUG.',
   params: {
     ...PAGE_MUTATION_PARAMS,
     slug: { type: 'string', required: true, description: 'Page slug' },

@@ -168,7 +168,7 @@ Every non-localOnly operation on the MCP surface: 125 tools across 23 areas. **S
 | `get_write_request` | Read your durable write receipt by request_id. | write | yes |  |
 | `list_pages` | List pages with optional filters. | read | yes |  |
 | `list_write_requests` | List your currently authorized write receipts in one source, newest first. | write | yes |  |
-| `put_page` | Write or replace a page (markdown with frontmatter). | write | yes |  |
+| `put_page` | Replace a complete canonical Markdown page. | write | yes |  |
 | `put_raw_data` | Store raw API response data for a page | write |  |  |
 | `resolve_slugs` | Fuzzy-resolve a partial slug to matching page slugs | read | yes |  |
 | `restore_page` | v0.26.5 — restore a soft-deleted page (clear deleted_at). | write |  |  |
@@ -243,6 +243,6 @@ Every non-localOnly operation on the MCP surface: 125 tools across 23 areas. **S
 
 | Tool | Description | Scope | Starter | Gate |
 |---|---|---|---|---|
-| `add_timeline_entry` | Add timeline entry to a page. | write | yes |  |
+| `add_timeline_entry` | Append an entry to the canonical Markdown timeline and structured timeline store in one committed write. | write | yes |  |
 | `get_timeline` | Get timeline entries for a page, optionally filtered by date window | read |  |  |
 
