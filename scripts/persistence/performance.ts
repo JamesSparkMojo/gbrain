@@ -20,11 +20,11 @@ export async function runReadPerformance(options: ReadWorkloadOptions & { manife
   function sourceHashes() {
     return Object.fromEntries(['scripts/persistence/performance.ts', 'scripts/persistence/read-workload.ts', 'scripts/persistence/read-metrics.ts',
       'tests/heavy/_read_latency_workload.ts', 'src/core/persistence/coordinator.ts', 'src/core/persistence/journal.ts',
-      'src/core/persistence/consumer.ts', 'src/core/persistence/page-mutations.ts', 'src/core/search/hybrid.ts',
+      'src/core/persistence/consumer.ts', 'src/core/persistence/activation.ts', 'src/core/persistence/page-mutations.ts', 'src/core/search/hybrid.ts',
       'src/core/pglite-engine.ts', 'src/core/postgres-engine.ts'].map(file =>
       [file, createHash('sha256').update(readFileSync(resolve(import.meta.dir, '../..', file))).digest('hex')]));
   }
-  const manifest: Record<string, any> = { version: 1, engine, runtime: `bun-${Bun.version}`, platform: process.platform,
+  const manifest: Record<string, any> = { version: 1, engine, managed_persistence: true, runtime: `bun-${Bun.version}`, platform: process.platform,
     architecture: process.arch, started_at: new Date().toISOString(), status: 'running', requested,
     storage: engine === 'pglite' ? 'in-memory PGLite (original heavy workload)' : 'fresh PostgreSQL database per run',
     environment: { logical_cpus: availableParallelism(), cpu_model: cpus()[0]?.model, memory_bytes: totalmem(), load_average_at_start: loadavg() },

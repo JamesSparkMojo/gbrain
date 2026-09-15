@@ -12,8 +12,8 @@ import type { Page } from '../src/core/types.ts';
 
 let engine: PGLiteEngine;
 let root: string;
-beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); });
-afterAll(async () => { await engine.disconnect(); resetGateway(); });
+beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }, 60_000);
+afterAll(async () => { await engine.disconnect(); resetGateway(); }, 60_000);
 beforeEach(async () => {
   await resetPgliteState(engine); resetGateway();
   root = mkdtempSync(join(tmpdir(), 'gbrain-verify-')); const brain = join(root, 'brain'); mkdirSync(brain);

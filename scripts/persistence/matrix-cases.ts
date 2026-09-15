@@ -9,7 +9,7 @@ import { publishMutation } from '../../src/core/persistence/coordinator.ts';
 import { PersistenceConsumer } from '../../src/core/persistence/consumer.ts';
 import { acceptWriterTransfer, getWorktreeBinding, prepareWriterTransfer } from '../../src/core/persistence/ownership.ts';
 import { tryAcquireNativeLock } from '../../src/core/persistence/native-lock.ts';
-import { admission, assertCommittedSnapshot, assertConservation, deferred, fixtures, openEngine, prepared, type HarnessConfig } from './harness.ts';
+import { admission, assertCommittedSnapshot, assertConservation, deferred, fixtures, openEngine, prepared, selectFixtureHost, type HarnessConfig } from './harness.ts';
 
 export interface RuntimeCase extends HarnessConfig { rls: boolean; dual: boolean; role: string; route: 'direct' | 'pgbouncer'; }
 async function bounded<T>(work: Promise<T>, label: string, timeoutMs = 10_000): Promise<T> {
@@ -56,8 +56,6 @@ export async function runtimeCase(config: RuntimeCase) {
     }
     assert.deepEqual(errors, []); await assertConservation(engine);
     // Probe actual RLS under a non-superuser/non-bypass role, through scoped reads.
-    for (const source of sources.slice(0, 2)) await engine.putPage('rls-probe', { type: 'note', title: 'RLS fixture',
-      compiled_truth: source.id, timeline: '', frontmatter: {} }, { sourceId: source.id });
     await engine.executeRaw(`GRANT USAGE ON SCHEMA public TO ${config.role}`);
     await engine.executeRaw(`GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${config.role}`);
     for (const table of ['sources', 'tags', 'fact_withdrawals', 'slug_aliases']) {
@@ -92,6 +90,7 @@ export async function ownershipCases(config: HarnessConfig) {
     const input = admission(config, source, 'owner', 'replacement'); const accepted = await admitWrite(engine, input);
     assert.equal(await claimNextWrite(engine, successor), null, 'nonowner accepts durable work but cannot execute it');
     const offer = await prepareWriterTransfer(engine, source.id, config.hostId);
+    selectFixtureHost(successor);
     writeFileSync(join(successorRoot, 'owner.md'), 'wrong-checkout');
     await assert.rejects(acceptWriterTransfer(engine, source.id, successorRoot, offer.owner_epoch, offer.manifest.digest, successor), { code: 'writer_manifest_mismatch' });
     writeFileSync(join(successorRoot, 'owner.md'), 'original');
@@ -120,14 +119,22 @@ export async function ownershipCases(config: HarnessConfig) {
     const replacement = await claimNextWrite(engine, successor); assert(replacement);
     await assertCommittedSnapshot(engine, await publishMutation(engine, replacement, prepared(replacement, movedSources, null, true), successor));
     const oldSource = sources[1]; const obsolete = admission(config, oldSource, 'recreated', 'obsolete'); await admitWrite(engine, obsolete);
-    await engine.executeRaw('DELETE FROM sources WHERE id=$1', [oldSource.id]);
-    await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', [oldSource.id, oldSource.root]);
+    await assert.rejects(engine.executeRaw('DELETE FROM sources WHERE id=$1', [oldSource.id]), /writer_coordinator_required/);
+    // Explicit database-administrator fault injection: ordinary topology writes
+    // remain refused, while incarnation checks still fence a privileged recreate.
+    await engine.transaction(async tx => {
+      await tx.executeRaw("SELECT set_config('gbrain.topology_change','on',true),set_config('gbrain.write_sources',$1,true)", [JSON.stringify([oldSource.id])]);
+      await tx.executeRaw('DELETE FROM sources WHERE id=$1', [oldSource.id]);
+      await tx.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', [oldSource.id, oldSource.root]);
+    });
+    selectFixtureHost(config.hostId);
     const obsoleteClaim = await claimNextWrite(engine, config.hostId); assert(obsoleteClaim);
     const rejected = await publishMutation(engine, obsoleteClaim, prepared(obsoleteClaim, sources), config.hostId);
     assert.equal(rejected.state, 'conflict'); assert.equal(rejected.error_code, 'source_changed');
     assert.equal(await engine.getPage('recreated', { sourceId: oldSource.id }), null);
     await assertConservation(engine);
     return { nonowner_admission: true, manifest_mismatch_refused: true, owner_transfer: true, stale_owner_refused: true,
-      root_replacement_retains_lock_path: true, source_incarnation_fenced: true, counters_conserved: true };
+      root_replacement_retains_lock_path: true, ordinary_topology_write_refused: true, source_incarnation_fenced: true,
+      source_recreate_fault: 'fixture database administrator transaction with explicit topology and source capability', counters_conserved: true };
   } finally { await engine.disconnect(); }
 }

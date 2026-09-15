@@ -10,6 +10,7 @@ import { hybridSearch } from '../../src/core/search/hybrid.ts';
 import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
 import { getWriteRequest } from '../../src/core/persistence/journal.ts';
 import { readLocalWriter } from '../../src/core/persistence/identity.ts';
+import { activatePersistence } from '../../src/core/persistence/activation.ts';
 import { assertSafeE2eDatabaseUrl } from '../../test/helpers/db-guard.ts';
 import { distribution } from './harness.ts';
 import { overlapPercent } from './read-metrics.ts';
@@ -87,6 +88,7 @@ export async function runReadLatencyWorkload(options: ReadWorkloadOptions = {}) 
     if (engine instanceof PostgresEngine) { assertSafeE2eDatabaseUrl(options.databaseUrl!); await engine.connect({ database_url: options.databaseUrl, poolSize: 4 }); }
     else await engine.connect({});
     await engine.initSchema();
+    assert.equal((await activatePersistence(engine, { confirmQuiesced: true })).enabled, true);
     process.stderr.write(`[_read_latency] ${kind}: seeding ${pages} pages through public mutations\n`);
     let seedIndex = 0;
     await Promise.all(Array.from({ length: 4 }, async () => { for (;;) { const i = seedIndex++; if (i >= pages) return; await write(i, 'Fixture'); } }));

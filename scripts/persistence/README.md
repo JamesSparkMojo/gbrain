@@ -66,6 +66,13 @@ under Bun 1.3.11 and 1.3.13 and uploads every manifest. Native OS/architecture
 coverage is separately required by `native-locks.yml`; its configured matrix
 must not be mistaken for locally executed runtime evidence.
 
+All stress fixtures explicitly activate managed persistence after registering
+canonical roots. Workers assert that activation remains enabled and use a
+synthetic host identity confined to the runner's temporary home. Matrix read
+probes are seeded before activation; the measured writes use the coordinator.
+Known permanent transaction failures stay failed after conditional filesystem
+recovery, allowing the next request for that root to proceed.
+
 The same workflow executes `scripts/persistence/matrix.ts`, requiring both
 `DATABASE_URL` (direct test connection) and `GBRAIN_PGBOUNCER_URL` (a real
 transaction-mode pooler with wildcard database routing). Its 24 cells cover

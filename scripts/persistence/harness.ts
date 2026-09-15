@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import type { BrainEngine } from '../../src/core/engine.ts';
@@ -10,21 +10,41 @@ import { admitWrite, type WriteAdmission } from '../../src/core/persistence/jour
 import { publishMutation, type PreparedMutation } from '../../src/core/persistence/coordinator.ts';
 import type { Principal, WriteAuthority, WriteRequest } from '../../src/core/persistence/model.ts';
 import { assertSafeE2eDatabaseUrl } from '../../test/helpers/db-guard.ts';
+import { activatePersistence } from '../../src/core/persistence/activation.ts';
+import { localHostId, persistenceHome } from '../../src/core/persistence/identity.ts';
 
 /** Synthetic fixtures only. The runner supplies a fresh datastore and scratch home. */
 export interface HarnessConfig {
   kind: 'pglite' | 'postgres'; root: string; dataDir: string; databaseUrl?: string;
   hostId: string; seed: number; schedules: number; operations: number;
   sourceIds: string[]; principalIds: string[];
-  poolSize?: number;
+  poolSize?: number; seedReadProbe?: boolean;
+}
+/** Synthetic host switching is confined to the runner's fresh child home. */
+export function selectFixtureHost(hostId: string): void {
+  const home = process.env.GBRAIN_PERSISTENCE_FIXTURE_HOME;
+  assert(home && home === process.env.GBRAIN_HOME, 'Fixture host identity requires the isolated runner home');
+  const relativeHome = relative(resolve(home), persistenceHome());
+  assert(relativeHome && !relativeHome.startsWith('..') && !relativeHome.startsWith('/'), 'Fixture identity must remain inside its scratch home');
+  mkdirSync(persistenceHome(), { recursive: true, mode: 0o700 });
+  const path = join(persistenceHome(), 'host.json');
+  if (!existsSync(path) || JSON.parse(readFileSync(path, 'utf8')).id !== hostId) {
+    const staged = `${path}.${randomUUID()}.fixture`;
+    writeFileSync(staged, JSON.stringify({ version: 1, id: hostId }), { mode: 0o600 });
+    renameSync(staged, path);
+  }
+  assert.equal(localHostId(), hostId);
 }
 export async function openEngine(config: HarnessConfig, initialize = false): Promise<BrainEngine> {
+  selectFixtureHost(config.hostId);
   const engine: BrainEngine = config.kind === 'pglite' ? new PGLiteEngine() : new PostgresEngine();
   if (engine instanceof PostgresEngine) {
     assertSafeE2eDatabaseUrl(config.databaseUrl!);
     await engine.connect({ database_url: config.databaseUrl!, poolSize: config.poolSize ?? 4 });
   } else await engine.connect({ database_path: config.dataDir });
   if (initialize) await engine.initSchema();
+  else assert.equal((await engine.executeRaw<{ enabled: boolean }>('SELECT enabled FROM persistence_brain WHERE singleton=1'))[0].enabled,
+    true, 'Every stress worker must exercise activated managed persistence');
   return engine;
 }
 export async function initializeFixtures(engine: BrainEngine, config: HarnessConfig): Promise<void> {
@@ -33,6 +53,10 @@ export async function initializeFixtures(engine: BrainEngine, config: HarnessCon
     await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', [config.sourceIds[i], root]);
     await claimWorktree(engine, config.sourceIds[i], root, config.hostId);
   }
+  if (config.seedReadProbe) for (const sourceId of config.sourceIds.slice(0, 2)) {
+    await engine.putPage('rls-probe', { type: 'note', title: 'RLS fixture', compiled_truth: sourceId, timeline: '', frontmatter: {} }, { sourceId });
+  }
+  assert.equal((await activatePersistence(engine, { confirmQuiesced: true })).enabled, true);
   for (const id of config.principalIds) await engine.executeRaw(`INSERT INTO persistence_local_writers
     (id,lane,credential_hash,grant_ceiling) VALUES($1::uuid,'cli',$2,$3::text::jsonb)`,
   [id, `synthetic-${id}`, JSON.stringify({ sourceIds: config.sourceIds, scopes: ['read', 'write'], operations: null, slugPrefixes: null })]);

@@ -17,7 +17,7 @@ export function childEnvironment(home: string): Record<string, string> {
   // Preserve the runtime executable/search paths, never an operator's brain or provider configuration.
   const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined &&
     !/^(GBRAIN_|CONDUCTOR_|MCP_|OPENCLAW_|ANTHROPIC_|OPENAI_|DATABASE_URL$)/.test(key))) as Record<string, string>;
-  return keylessBrainEnv(env, home, { GBRAIN_CI_DISABLE_TEST_ENV_FILE: '1' });
+  return keylessBrainEnv(env, home, { GBRAIN_CI_DISABLE_TEST_ENV_FILE: '1', GBRAIN_PERSISTENCE_FIXTURE_HOME: home });
 }
 export function spawnWorker(configPath: string, home: string, role: string, args: string[] = [], environment: Record<string, string> = {}) {
   const child = Bun.spawn([process.execPath, '--no-env-file', resolve(import.meta.dir, 'worker.ts'), role, configPath, ...args],
@@ -64,7 +64,7 @@ export async function runValidation(options: ValidationOptions) {
     platform: process.platform, architecture: process.arch, seed: options.seed ?? 5105,
     environment: { logical_cpus: availableParallelism(), memory_bytes: totalmem(), load_average_at_start: loadavg() },
     started_at: new Date().toISOString(), status: 'running', requested: { ...counts, crashes: options.crashes !== false },
-    scope: 'real journal/coordinator; fixture-only loopback transport for PGLite producers', crash_cases: [], phase_inputs: {} };
+    managed_persistence: true, scope: 'activated real journal/coordinator; fixture-only loopback transport for PGLite producers', crash_cases: [], phase_inputs: {} };
   const at = performance.now();
   try {
     if (options.engine === 'postgres') {
@@ -75,7 +75,8 @@ export async function runValidation(options: ValidationOptions) {
       const root = join(scratch, name); mkdirSync(root);
       manifest.phase_inputs[name] = Object.fromEntries(['scripts/persistence/harness.ts', 'scripts/persistence/schedules.ts',
         'scripts/persistence/worker.ts', 'src/core/persistence/coordinator.ts', 'src/core/persistence/consumer.ts',
-        'src/core/persistence/journal.ts', 'src/core/pglite-engine.ts', 'src/core/postgres-engine.ts'].map(file =>
+        'src/core/persistence/journal.ts', 'src/core/persistence/activation.ts', 'src/core/persistence/filesystem-guard.ts',
+        'src/core/persistence/identity.ts', 'src/core/persistence/ownership.ts', 'src/core/pglite-engine.ts', 'src/core/postgres-engine.ts'].map(file =>
         [file, createHash('sha256').update(readFileSync(resolve(import.meta.dir, '../..', file))).digest('hex')]));
       let databaseUrl: string | undefined;
       if (admin) {

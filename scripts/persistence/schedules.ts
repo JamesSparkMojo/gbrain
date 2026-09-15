@@ -117,10 +117,10 @@ export async function runSchedules(config: HarnessConfig) {
         assert.equal((await claim()).id, otherRow.id); await commit((await getWriteRequestById(engine, otherRow.id))!);
         assert.equal(await claimNextWrite(engine, config.hostId), null, 'unknown bytes must block the entire root');
         await assertConservation(engine); writeFileSync(path, body);
-        assert.equal((await recoverPublication(engine, row.id, config.hostId)).state, 'queued');
+        const recovered = await recoverPublication(engine, row.id, config.hostId);
+        assert.equal(recovered.state, 'failed', 'A known failed transaction body must not run again after recovery');
+        assert.equal(recovered.error_code, 'storage_error');
         assert.equal(readFileSync(path, 'utf8'), 'original');
-        const retry = await claim(); assert.equal(retry.id, row.id);
-        await assertCommittedSnapshot(engine, await publishMutation(engine, retry, prepared(retry, sources, null, true), config.hostId));
         assert.equal((await claim()).id, next.id); await commit((await getWriteRequestById(engine, next.id))!);
       } else if (type === 'admission_quota') {
         const attempts = Array.from({ length: 3 + Math.floor(choose() * 4) }, () => ({ ...a, requestId: randomUUID() }));

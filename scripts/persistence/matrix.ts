@@ -14,7 +14,7 @@ export async function runRuntimeMatrix(options: { directUrl: string; pooledUrl: 
   const admin = postgres(options.directUrl, { max: 1, onnotice() {} });
   const databases: string[] = []; const roles: string[] = []; const children: ReturnType<typeof spawnWorker>[] = [];
   const manifest: Record<string, any> = { version: 1, runtime: `bun-${Bun.version}`, platform: process.platform,
-    architecture: process.arch, started_at: new Date().toISOString(), status: 'running', cases: [], ownership: null };
+    architecture: process.arch, managed_persistence: true, started_at: new Date().toISOString(), status: 'running', cases: [], ownership: null };
   function start(path: string, role: string, env: Record<string, string> = {}) {
     const child = spawnWorker(path, home, role, [], env); children.push(child); return child;
   }
@@ -27,7 +27,7 @@ export async function runRuntimeMatrix(options: { directUrl: string; pooledUrl: 
       const pooled = new URL(options.pooledUrl); pooled.pathname = `/${database}`;
       const root = join(scratch, token); mkdirSync(root);
       const config: RuntimeCase = { kind: 'postgres', root, dataDir: join(root, 'unused'), databaseUrl: direct.toString(),
-        hostId: randomUUID(), seed: 5105, schedules: 0, operations: 0, poolSize: 3,
+        hostId: randomUUID(), seed: 5105, schedules: 0, operations: 0, poolSize: 3, seedReadProbe: true,
         sourceIds: Array.from({ length: 4 }, (_, i) => `matrix-test-${i}`), principalIds: Array.from({ length: 4 }, () => randomUUID()), route, rls, dual, role };
       const path = join(root, 'config.json'); writeFileSync(path, JSON.stringify(config), { mode: 0o600 });
       await start(path, 'initialize').done();
