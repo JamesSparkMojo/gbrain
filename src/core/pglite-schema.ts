@@ -1,5 +1,6 @@
 import { PERSISTENCE_SCHEMA_STATEMENTS } from './persistence/schema.ts';
 import { PAGE_PROJECTION_SCHEMA_SQL } from './page-state/projection-schema.ts';
+import { LEASE_TOKEN_SCHEMA_SQL } from './lease-schema.ts';
 import { PAGE_STATE_SCHEMA_SQL } from './page-state/schema.ts';
 /**
  * PGLite schema — derived from schema-embedded.ts (Postgres schema).
@@ -659,6 +660,7 @@ CREATE TABLE IF NOT EXISTS gbrain_cycle_locks (
   last_refreshed_at  TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_cycle_locks_ttl ON gbrain_cycle_locks(ttl_expires_at);
+${LEASE_TOKEN_SCHEMA_SQL}
 
 -- Eval capture (v0.25.0). PGLite ignores RLS — see src/schema.sql for the
 -- cross-engine spec.

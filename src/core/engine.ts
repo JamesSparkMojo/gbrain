@@ -754,6 +754,10 @@ export interface BrainEngine {
   reconnect(ctx?: { error?: unknown }): Promise<void>;
   initSchema(): Promise<void>;
   transaction<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T>;
+  /** Short control transaction on the existing direct route; honors nested transaction scope. */
+  transactionDirect<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T>;
+  /** Mandatory resident-consumer stop barrier before datastore/pool shutdown. */
+  registerBeforeDisconnect(stop: () => Promise<void>): () => void;
   /**
    * Run `fn` with a dedicated connection (Postgres: reserved backend;
    * PGLite: pass-through). See `ReservedConnection` for semantics and

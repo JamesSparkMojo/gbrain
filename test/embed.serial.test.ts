@@ -229,6 +229,7 @@ describe('runEmbed --all (parallel)', () => {
     const fakeLock: DbLockHandle = {
       id: 'fake-hanging-refresh',
       acquiredAt: '0',
+      acquisitionToken: '00000000-0000-4000-8000-000000000001',
       release: async () => {},
       refresh: async (opts?: { signal?: AbortSignal }) => {
         refreshCalls++;
@@ -1488,6 +1489,7 @@ describe('#4647: heartbeat tick timeout — never-settling refresh', () => {
     const fakeLock: DbLockHandle = {
       id: 'wedged-pool-refresh',
       acquiredAt: '0',
+      acquisitionToken: '00000000-0000-4000-8000-000000000001',
       release: async () => {},
       // The #4647 shape: never settles, never observes the abort signal.
       refresh: () => {

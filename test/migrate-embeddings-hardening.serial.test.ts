@@ -286,6 +286,7 @@ describe('locks + schema honesty', () => {
     const fakeLock: DbLockHandle = {
       id: 'fake-held-lock',
       acquiredAt: '0',
+      acquisitionToken: '00000000-0000-4000-8000-000000000001',
       release: async () => {},
       refresh: async () => false,
     };
@@ -997,6 +998,7 @@ describe('smoke-check miss + heartbeat resilience', () => {
       const alwaysThrows: DbLockHandle = {
         id: 'fake-throwing-lock',
         acquiredAt: '0',
+      acquisitionToken: '00000000-0000-4000-8000-000000000001',
         release: async () => {},
         refresh: async () => {
           throwCalls += 1;
@@ -1022,6 +1024,7 @@ describe('smoke-check miss + heartbeat resilience', () => {
       const flaky: DbLockHandle = {
         id: 'fake-flaky-lock',
         acquiredAt: '0',
+      acquisitionToken: '00000000-0000-4000-8000-000000000001',
         release: async () => {},
         refresh: async () => {
           flakyCalls += 1;

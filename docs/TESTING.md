@@ -41,6 +41,24 @@ addon and runs the compiled smoke on its two release platforms. Rebuild
 instructions and the precise packaging/runtime distinction are in
 `native/locks/README.md`.
 
+### Datastore shutdown and lease ownership
+
+`test/pglite-lock.test.ts` proves process pause/crash handoff, metadata damage,
+legacy migration refusal and stable ownership across datastore replacement.
+`test/pglite-engine-disconnect.serial.test.ts` uses actual disk-backed PGLite
+for concurrent opens, consumer/statement drains, persisted reopen, delayed
+close and failed close. A close deadline retains the kernel lock; it is never
+successful shutdown evidence. Watchdog and telemetry regression suites cover
+loop starvation and background statement teardown.
+
+`test/db-lock-concurrency.test.ts` proves unique identities even when two
+acquisitions have identical database timestamps, exact successor-safe cleanup,
+renewal cancellation/late-completion drain and mandatory loss propagation.
+`test/e2e/db-lock-acquisition-token.test.ts` repeats acquisition/cleanup
+invariants against real Postgres; the E2E map selects it for lease and engine
+changes. `test/engine-control-routing.test.ts` pins direct/shared pool routing,
+nested transaction confinement and the Postgres resident-stop barrier.
+
 ### PGLite schema snapshot (default-on)
 
 `scripts/build-pglite-snapshot.ts` (`bun run build:pglite-snapshot`) bakes a

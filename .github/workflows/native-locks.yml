@@ -41,7 +41,7 @@ jobs:
       - name: Verify Darwin ABI against the native SDK
         if: runner.os == 'macOS'
         run: cc -std=c11 native/locks/abi-check.c -o "${{ runner.temp }}/native-abi-check"
-      - run: bun test test/native-lock.test.ts
+      - run: bun test test/native-lock.test.ts test/pglite-lock.test.ts
       - run: bun scripts/native/compiled-smoke.ts
 
   musl:
@@ -73,6 +73,6 @@ jobs:
           docker run --rm -v "$PWD:/work" -w /work "oven/bun:${BUN_VERSION}-alpine" sh -eu -c '
             bun install --frozen-lockfile --ignore-scripts
             bun scripts/native/verify.ts
-            bun test test/native-lock.test.ts
+            bun test test/native-lock.test.ts test/pglite-lock.test.ts
             bun scripts/native/compiled-smoke.ts
           '

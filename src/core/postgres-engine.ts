@@ -152,6 +152,14 @@ export class PostgresEngine implements BrainEngine {
   /** Transaction clones keep chunk invalidation and replacement atomic. */
   private _chunkWritesInTransaction = false;
   readonly kind = 'postgres' as const;
+  private readonly _beforeDisconnect = new Set<() => Promise<void>>();
+  private _disconnectPromise: Promise<void> | null = null;
+
+  registerBeforeDisconnect(stop: () => Promise<void>): () => void {
+    this._beforeDisconnect.add(stop);
+    return () => { this._beforeDisconnect.delete(stop); };
+  }
+
   private _sql: ReturnType<typeof postgres> | null = null;
   /** Saved config for reconnection. */
   private _savedConfig: (EngineConfig & { poolSize?: number; parentConnectionManager?: ConnectionManager }) | null = null;
@@ -370,6 +378,15 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async disconnect(): Promise<void> {
+    if (this._disconnectPromise) return this._disconnectPromise;
+    const work = this.disconnectInternal();
+    this._disconnectPromise = work;
+    try { await work; }
+    finally { if (this._disconnectPromise === work) this._disconnectPromise = null; }
+  }
+
+  private async disconnectInternal(): Promise<void> {
+    for (const stop of this._beforeDisconnect) await stop();
     // v0.41.25.0 (#1570) — instrument disconnect calls to identify the
     // mid-process caller behind the singleton-null bug. The audit log
     // captures connection_style so we can tell instance-pool teardowns
@@ -534,7 +551,16 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async transaction<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
-    const conn = this.sql;
+    return this.transactionOn(this.sql, fn);
+  }
+
+  async transactionDirect<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
+    const conn = !this._pageTransaction && this.connectionManager?.isDualPoolActive()
+      ? await this.connectionManager.ddl() : this.sql;
+    return this.transactionOn(conn, fn);
+  }
+
+  private async transactionOn<T>(conn: ReturnType<typeof postgres>, fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
     // try/finally, not .finally on the chained promise: begin() can throw
     // SYNCHRONOUSLY (e.g. nested transaction on a tx clone whose conn has no
     // .begin), which would skip a chained .finally and leak the counter.
