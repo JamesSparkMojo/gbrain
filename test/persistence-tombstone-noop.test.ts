@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
-import { serializePageToMarkdown } from '../src/core/markdown.ts';
+import { parseMarkdown, serializePageToMarkdown } from '../src/core/markdown.ts';
 import { activatePersistence } from '../src/core/persistence/activation.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
@@ -15,6 +15,10 @@ import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 interface Fixture { engine: BrainEngine; root: string; context: OperationContext; }
+function canonicalMarkdown(content: string, slug: string) {
+  const { type, title, compiled_truth, timeline, frontmatter, tags } = parseMarkdown(content, slug);
+  return { type, title, compiled_truth, timeline: timeline ?? '', frontmatter, tags };
+}
 const fixtures: Fixture[] = [];
 const sourceId = 'tombstone-noop-example';
 let home: string;
@@ -94,10 +98,27 @@ for (const operation of ['put_page', 'capture', 'revert_version'] as const) {
           expect(restored!.revision).not.toBe(tombstone.revision);
           expect(committed.revision).toBe(restored!.revision);
           expect(restored!.page.text_projection_revision).toBe(restored!.revision);
-          expect(readFileSync(file, 'utf8')).toBe(bytes);
-          expect(readFileSync(file, 'utf8')).toBe(serializePageToMarkdown(restored!.page, restored!.tags));
+          expect(restored!.page.deleted_at).toBeNull();
+          expect(restored!.page.frontmatter).toEqual(before.page.frontmatter);
+          expect(restored!.page.source_kind).toBe(before.page.source_kind);
+          expect(restored!.page.ingested_via).toBe(before.page.ingested_via);
+          expect(restored!.page.ingested_at).toEqual(before.page.ingested_at);
+          const restoredBytes = readFileSync(file, 'utf8');
+          // JSONB changes key order. A real restoration preserves every
+          // canonical value; only no-ops/replays promise unchanged file bytes.
+          expect(canonicalMarkdown(restoredBytes, slug)).toEqual(canonicalMarkdown(bytes, slug));
+          expect(canonicalMarkdown(restoredBytes, slug)).toEqual({ type: restored!.page.type, title: restored!.page.title,
+            compiled_truth: restored!.page.compiled_truth, timeline: restored!.page.timeline ?? '',
+            frontmatter: restored!.page.frontmatter, tags: restored!.tags });
           expect(await submit(operation, params)).toEqual(committed);
+          expect(readFileSync(file, 'utf8')).toBe(restoredBytes);
           expect((await engine.readPageSnapshot(slug, { sourceId }))!.revision).toBe(restored!.revision);
+          const versions = await engine.executeRaw('SELECT id FROM page_versions WHERE page_id=$1 ORDER BY id', [before.page.id]);
+          const noop = await submit(operation, { ...intent, expected_revision: restored!.revision });
+          expect(noop).toMatchObject({ state: 'committed', noop: true, revision: restored!.revision });
+          expect(await engine.readPageSnapshot(slug, { sourceId })).toEqual(restored);
+          expect(readFileSync(file, 'utf8')).toBe(restoredBytes);
+          expect(await engine.executeRaw('SELECT id FROM page_versions WHERE page_id=$1 ORDER BY id', [before.page.id])).toEqual(versions);
         }
       } finally { for (const fixture of fixtures) await disposePersistenceConsumer(fixture.engine); }
     });
