@@ -105,8 +105,8 @@ export async function ownershipCases(config: HarnessConfig) {
     const next = await claimNextWrite(engine, successor); assert(next);
     await assertCommittedSnapshot(engine, await publishMutation(engine, next, prepared(next, movedSources, null, true), successor));
     assert.equal(readFileSync(join(successorRoot, 'owner.md'), 'utf8'), 'replacement'); assert.equal(readFileSync(originalPath, 'utf8'), 'original');
-    // A root replacement retains the same coordination path and epoch, and
-    // source reincarnation rejects queued work rather than importing it anew.
+    // The external coordination inode survives directory replacement, while
+    // the physical-root stamp refuses publication into the substituted copy.
     const coordinationPath = rebound.coordination_path!;
     const held = await tryAcquireNativeLock(coordinationPath); assert(held);
     try {
@@ -117,7 +117,19 @@ export async function ownershipCases(config: HarnessConfig) {
     assert.equal((await getWorktreeBinding(engine, source.id, successor))!.coordination_path, coordinationPath);
     await admitWrite(engine, admission(config, source, 'after-replacement', 'preserved-owner'));
     const replacement = await claimNextWrite(engine, successor); assert(replacement);
-    await assertCommittedSnapshot(engine, await publishMutation(engine, replacement, prepared(replacement, movedSources, null, true), successor));
+    const refused = await publishMutation(engine, replacement, prepared(replacement, movedSources, null, true), successor);
+    assert.equal(refused.state, 'failed'); assert.equal(refused.error_code, 'recovery_required');
+    assert.equal(existsSync(join(successorRoot, 'after-replacement.md')), false);
+    assert.equal(readFileSync(join(successorRoot, 'owner.md'), 'utf8'), 'replacement');
+    // Restore the original inode without discarding the unexpected copy.
+    const restoreLock = await tryAcquireNativeLock(coordinationPath); assert(restoreLock);
+    try {
+      renameSync(successorRoot, `${successorRoot}-substituted`);
+      renameSync(`${successorRoot}-retired`, successorRoot);
+    } finally { await restoreLock.release(); }
+    await admitWrite(engine, admission(config, source, 'after-restoration', 'preserved-owner'));
+    const restored = await claimNextWrite(engine, successor); assert(restored);
+    await assertCommittedSnapshot(engine, await publishMutation(engine, restored, prepared(restored, movedSources, null, true), successor));
     const oldSource = sources[1]; const obsolete = admission(config, oldSource, 'recreated', 'obsolete'); await admitWrite(engine, obsolete);
     await assert.rejects(engine.executeRaw('DELETE FROM sources WHERE id=$1', [oldSource.id]), /writer_coordinator_required/);
     // Explicit database-administrator fault injection: ordinary topology writes
@@ -134,7 +146,8 @@ export async function ownershipCases(config: HarnessConfig) {
     assert.equal(await engine.getPage('recreated', { sourceId: oldSource.id }), null);
     await assertConservation(engine);
     return { nonowner_admission: true, manifest_mismatch_refused: true, owner_transfer: true, stale_owner_refused: true,
-      root_replacement_retains_lock_path: true, ordinary_topology_write_refused: true, source_incarnation_fenced: true,
+      root_replacement_retains_lock_path: true, substituted_root_refused: true, original_inode_restoration_resumes: true,
+      ordinary_topology_write_refused: true, source_incarnation_fenced: true,
       source_recreate_fault: 'fixture database administrator transaction with explicit topology and source capability', counters_conserved: true };
   } finally { await engine.disconnect(); }
 }
