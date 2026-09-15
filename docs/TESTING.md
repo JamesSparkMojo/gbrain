@@ -81,6 +81,16 @@ successor manifests, stale owners, root replacement under a held kernel
 lock, and actual source deletion/recreation. The reusable persistence lane
 runs this matrix on both supported Bun versions and uploads its manifest.
 
+The required persistence lane also runs `scripts/persistence/performance.ts`
+on both engines and Bun versions. Three independent instances use the
+existing 500-page/200-query read-latency corpus, with public `put_page`
+mutations and actual in-flight interval coverage of at least 90%. Any read
+or write failure invalidates the sample. Median loaded p99 must be at most
+1.5 times median idle p99 on the same runner. Manifests retain each sample,
+admission/commit latency, queue age, RSS, recovery bytes and pool activity.
+The original heavy shell entry invokes this harness; its optional strict
+flag affects only the latency threshold, never validity requirements.
+
 ### PGLite schema snapshot (default-on)
 
 `scripts/build-pglite-snapshot.ts` (`bun run build:pglite-snapshot`) bakes a
