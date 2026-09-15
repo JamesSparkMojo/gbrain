@@ -102,6 +102,7 @@ jobs:
             test/persistence-withdrawal-retry.test.ts \
             test/persistence-tombstone-noop.test.ts \
             test/persistence-version-deletion.test.ts \
+            test/version-history-privacy.test.ts \
             test/persistence-take-receipt-authority.test.ts \
             test/import-revision-revival.test.ts \
             test/persistence-source-lifecycle.test.ts \
