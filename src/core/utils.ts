@@ -599,7 +599,6 @@ export function staleFactRowToRow(row: Record<string, unknown>): StaleFactRow {
   return {
     fact_id: Number(row.fact_id),
     fact: String(row.fact),
-    entity_slug: row.entity_slug == null ? null : String(row.entity_slug),
   };
 }
 

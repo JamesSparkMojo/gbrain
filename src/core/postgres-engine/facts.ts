@@ -715,7 +715,7 @@ export async function listFactsNeedingEmbedding(
   const afterId = Math.max(0, Math.floor(opts.afterId ?? 0) || 0);
   const sourceId = opts.sourceId ?? null;
   const rows = await sql`
-    SELECT id AS fact_id, fact, entity_slug
+    SELECT id AS fact_id, fact
       FROM facts
      WHERE embedding IS NULL AND expired_at IS NULL
        AND (${sourceId}::text IS NULL OR source_id = ${sourceId})

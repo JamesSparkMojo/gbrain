@@ -8,7 +8,6 @@
 export interface StaleFactRow {
   fact_id: number;
   fact: string;
-  entity_slug: string | null;
 }
 
 /** Vector write for an existing fact row. */

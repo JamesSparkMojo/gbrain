@@ -802,7 +802,7 @@ export async function listFactsNeedingEmbedding(
   const limit = Math.max(1, Math.floor(opts.limit) || 1);
   const afterId = Math.max(0, Math.floor(opts.afterId ?? 0) || 0);
   const { rows } = await deps.db.query(
-    `SELECT id AS fact_id, fact, entity_slug
+    `SELECT id AS fact_id, fact
        FROM facts
       WHERE embedding IS NULL AND expired_at IS NULL
         AND ($1::text IS NULL OR source_id = $1)

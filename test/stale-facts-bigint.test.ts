@@ -9,7 +9,6 @@ import type { PgliteFactsDeps } from '../src/core/pglite-engine/facts.ts';
 const rawRow = {
   fact_id: 42n,
   fact: 'Alice prefers async standups',
-  entity_slug: 'people/alice-example',
 };
 
 describe('listFactsNeedingEmbedding bigint normalization', () => {
@@ -20,17 +19,18 @@ describe('listFactsNeedingEmbedding bigint normalization', () => {
     expect(rows).toEqual([{
       fact_id: 42,
       fact: 'Alice prefers async standups',
-      entity_slug: 'people/alice-example',
     }]);
     expect(() => JSON.stringify(rows)).not.toThrow();
   });
 
   test('PGLite rows use the same normalized boundary', async () => {
-    const db = { query: async () => ({ rows: [{ ...rawRow, entity_slug: null }] }) };
+    const db = { query: async () => ({ rows: [rawRow] }) };
     const rows = await listPgliteStaleFacts({ db } as unknown as PgliteFactsDeps, { limit: 10 });
 
-    expect(rows[0]?.fact_id).toBe(42);
-    expect(rows[0]?.entity_slug).toBeNull();
+    expect(rows).toEqual([{
+      fact_id: 42,
+      fact: 'Alice prefers async standups',
+    }]);
     expect(() => JSON.stringify(rows)).not.toThrow();
   });
 });
