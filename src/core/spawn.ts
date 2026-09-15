@@ -13,8 +13,8 @@
  * `windowsHide` is a documented no-op on every other platform.
  *
  * Import `spawn`/`exec`/... from here exactly as you would from
- * `node:child_process`; everything else that module exports (`ChildProcess`,
- * the option types, ...) is re-exported unchanged. A caller that must show a
+ * `node:child_process`; the handle and option TYPES (`ChildProcess`,
+ * `SpawnOptions`, ...) are re-exported type-only. A caller that must show a
  * window passes `windowsHide: false` explicitly — the merge keeps it.
  * `test/spawn-windows-hide-guard.test.ts` fails on any `child_process` /
  * `Bun.spawn` use in src/ outside this file.
@@ -22,7 +22,34 @@
 
 import * as cp from 'child_process';
 
-export * from 'child_process';
+// Type-only re-exports: they vanish at compile time. A namespace re-export
+// (`export * from 'child_process'`) is NOT safe here — `bun build --compile`
+// emits a `__reExport(..., child_process)` against an undefined binding for a
+// node builtin, and the compiled binary dies at load with
+// "ReferenceError: child_process is not defined" (caught by
+// scripts/check-pglite-embedded.sh). Values other than the wrapped six below
+// are deliberately not re-exported: add a wrapped export if a call site needs
+// one, so the windowsHide merge stays universal.
+export type {
+  ChildProcess,
+  ChildProcessWithoutNullStreams,
+  ChildProcessByStdio,
+  SpawnOptions,
+  SpawnOptionsWithoutStdio,
+  SpawnSyncOptions,
+  SpawnSyncOptionsWithStringEncoding,
+  SpawnSyncReturns,
+  ExecOptions,
+  ExecException,
+  ExecSyncOptions,
+  ExecSyncOptionsWithStringEncoding,
+  ExecFileOptions,
+  ExecFileException,
+  ExecFileSyncOptions,
+  ExecFileSyncOptionsWithStringEncoding,
+  StdioOptions,
+  IOType,
+} from 'child_process';
 
 /**
  * Return `args` (the argument list of one child_process call, command first)
