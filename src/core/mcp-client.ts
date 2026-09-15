@@ -22,6 +22,7 @@ import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontex
 import { anySignal } from './abort-check.ts';
 import type { GBrainConfig } from './config.ts';
 import { discoverOAuth, mintClientCredentialsToken } from './remote-mcp-probe.ts';
+import { isWriteErrorCode, isWriteReceipt, publicWriteReceipt, type WriteErrorCode, type WriteReceipt } from './persistence/types.ts';
 
 interface CachedToken {
   access_token: string;
@@ -69,6 +70,9 @@ export interface RemoteMcpErrorDetail {
   kind?: 'timeout' | 'aborted' | 'unreachable';
   /** v0.31.1: server-supplied error code on tool_error (e.g. 'missing_scope'). */
   code?: string;
+  /** An accepted mutation's receipt survives the transport's tool-error wrapper. */
+  write_request?: WriteReceipt;
+  write_error?: WriteErrorCode;
 }
 
 export class RemoteMcpError extends Error {
@@ -92,6 +96,9 @@ export class RemoteMcpError extends Error {
  * the callRemoteTool funnel.
  */
 export function toRemoteMcpError(e: unknown, mcpUrl: string, signal?: AbortSignal): RemoteMcpError {
+  // A received receipt is stronger evidence than a deadline that fired while
+  // unwinding the call. Losing it invites a second mutation after acceptance.
+  if (e instanceof RemoteMcpError && e.detail?.write_request) return e;
   if (signal?.aborted) {
     const kind = signal.reason instanceof Error && signal.reason.name === 'TimeoutError'
       ? 'timeout' : 'aborted';
@@ -151,6 +158,20 @@ export function extractToolErrorCode(message: string): string | undefined {
     return 'missing_scope';
   }
   return undefined;
+}
+
+/** Keep only validated public receipt fields from a tool's JSON error body. */
+export function extractToolErrorDetail(message: string): RemoteMcpErrorDetail {
+  const code = extractToolErrorCode(message);
+  const detail: RemoteMcpErrorDetail = code ? { code } : {};
+  try {
+    const body: unknown = JSON.parse(message);
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) return detail;
+    const envelope = body as Record<string, unknown>;
+    if (isWriteReceipt(envelope.write_request)) detail.write_request = publicWriteReceipt(envelope.write_request);
+    if (isWriteErrorCode(envelope.write_error)) detail.write_error = envelope.write_error;
+  } catch { /* Older servers can return plain text; preserve existing code extraction. */ }
+  return detail;
 }
 
 function requireRemoteMcp(config: GBrainConfig | null): NonNullable<GBrainConfig['remote_mcp']> {
@@ -338,11 +359,10 @@ export async function callRemoteTool(
           // v0.31.1: extract structured error code (e.g. 'missing_scope') so
           // the dispatcher can produce a pinpoint hint instead of a generic
           // "tool error" message.
-          const code = extractToolErrorCode(message);
           throw new RemoteMcpError(
             'tool_error',
             `Remote tool ${toolName} failed: ${message}`,
-            { mcp_url: remote.mcp_url, ...(code ? { code } : {}) },
+            { mcp_url: remote.mcp_url, ...extractToolErrorDetail(message) },
           );
         }
         return res;

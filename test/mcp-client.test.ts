@@ -418,6 +418,22 @@ describe('callRemoteTool — error surfaces', () => {
       expect((e as RemoteMcpError).reason).toBe('tool_error');
     }
   });
+
+  test('an accepted write receipt survives the real HTTP MCP error envelope without replay', async () => {
+    const receipt = { request_id: 'd7599b95-65c2-4d54-aa4e-cb5745af90cf', state: 'queued', retry_after_ms: 1000 };
+    mcpResponseFor = () => ({
+      content: [{ type: 'text', text: JSON.stringify({ error: 'unavailable', protocol_version: 1,
+        message: 'Accepted and pending.', suggestion: 'Retry the same request_id.',
+        write_error: 'write_pending', write_request: receipt }) }],
+      isError: true,
+    });
+    await expect(callRemoteTool(makeConfig(), 'remember', { fact: 'fixture', provenance: 'test', request_id: receipt.request_id }))
+      .rejects.toMatchObject({ reason: 'tool_error', detail: {
+        code: 'unavailable', write_error: 'write_pending', write_request: receipt,
+      } });
+    expect(toolExecutions).toBe(1);
+    expect(tokenMintCount).toBe(1);
+  });
 });
 
 describe('unpackToolResult', () => {

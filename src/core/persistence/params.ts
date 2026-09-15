@@ -1,0 +1,45 @@
+import type { ParamDef } from '../ops/contract.ts';
+import { WRITE_REQUEST_STATES } from './types.ts';
+
+/** Leaf definitions: safe to import while the frozen verb registry is evaluating. */
+export const WRITE_REQUEST_PARAM: ParamDef = {
+  type: 'string',
+  description: 'Optional caller-generated UUID for this write. Reuse the same UUID and original arguments to recover its outcome after a timeout; a different intent requires a new UUID.',
+};
+
+export const PAGE_MUTATION_PARAMS: Record<string, ParamDef> = {
+  expected_revision: {
+    type: 'string',
+    description: 'Revision returned by the page read. Required when replacing an existing page unless force is true. Omit both for create-only writes.',
+  },
+  force: {
+    type: 'boolean',
+    description: 'Explicitly overwrite the current revision. Mutually exclusive with expected_revision; does not bypass authorization or the empty-content guard.',
+  },
+  request_id: WRITE_REQUEST_PARAM,
+};
+
+/** Additive response schema shared by frozen memory-verb success and error envelopes. */
+export const WRITE_RECEIPT_SCHEMA = {
+  type: 'object',
+  required: ['request_id', 'state', 'retry_after_ms'],
+  properties: {
+    request_id: { type: 'string' },
+    state: { type: 'string', enum: [...WRITE_REQUEST_STATES] },
+    retry_after_ms: { type: ['integer', 'null'] },
+    revision: { type: 'string' },
+    compacted: { type: 'boolean' },
+    outcome: { type: 'object' },
+    persistence: {
+      type: 'object',
+      required: ['mode'],
+      properties: {
+        mode: { type: 'string', enum: ['filesystem', 'database'] },
+        file_written: { type: 'boolean' },
+        git_state: { type: 'string' },
+      },
+    },
+    created_at: { type: 'string' },
+    updated_at: { type: 'string' },
+  },
+};

@@ -280,6 +280,35 @@ already-expired fact returns `expired: false` (success); unknown id ⇒
 
 Response: `{ id, expired, reason, protocol_version }`.
 
+#### Durable write receipts (additive)
+
+Write receipts distinguish accepted work from committed memory. Their public
+shape is `{request_id, state, retry_after_ms, revision?, outcome?, persistence?,
+compacted?, created_at?, updated_at?}`. States are `queued`, `running`,
+`recovering`, `committed`, `conflict`, `failed`, and `cancelled`. Terminal
+receipts have `retry_after_ms: null`. `persistence.mode` distinguishes a
+filesystem-backed write from an intentional database-only write; Git progress
+does not change the meaning of committed memory.
+
+A pending write is a protocol `unavailable` error with a populated suggestion,
+`protocol_version: 1`, and optional `write_request` and `write_error` fields.
+It never returns a success `status` or `expired` value. `write_error` carries
+the detailed concurrency reason without changing the frozen protocol error
+enum. A committed receipt retains the original memory-verb success fields.
+Compaction may remove diagnostics, but must preserve those frozen result fields.
+
+The optional caller-generated UUID `request_id` identifies one write intent.
+Retry the same verb with the original arguments and the same ID to recover
+its outcome, including on the verbs-only surface. A terminal request is never
+executed again. Corrected input requires a new ID. Clients that lose a response
+without retaining its request ID cannot assume that retrying content is an
+exactly-once write. A receipt never contains queued content, recovery paths or
+execution credentials.
+
+For `forget`, a committed source- and visibility-scoped withdrawal is the
+durable memory outcome. Its filesystem mirror may remain pending; stale
+source imports must still respect the withdrawal.
+
 ### context_pack(entities, budget_tokens?, since?, session_id?, include_private?) — read, zero LLM
 
 One deterministic, budget-packed bundle for a set of standing

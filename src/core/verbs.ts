@@ -24,6 +24,8 @@
  */
 
 import type { Operation } from './operations.ts';
+import { WRITE_RECEIPT_SCHEMA } from './persistence/params.ts';
+import { WRITE_ERROR_CODES } from './persistence/types.ts';
 
 /** Frozen protocol version for the MEMORY_VERBS v1 verb set. Single source of truth. */
 export const MEMORY_VERBS_VERSION = 1;
@@ -517,6 +519,7 @@ export const RESPONSE_SCHEMAS: Record<VerbName, Record<string, unknown>> = {
       entity_slug: { type: ['string', 'null'] },
       valid_until: { type: ['string', 'null'], description: 'ISO 8601 or null (never expires).' },
       degraded_dedup: { type: 'boolean', description: 'Present (true) when no embedding provider — near-duplicates may insert.' },
+      write_request: WRITE_RECEIPT_SCHEMA,
     },
   },
   entity: {
@@ -636,6 +639,7 @@ export const RESPONSE_SCHEMAS: Record<VerbName, Record<string, unknown>> = {
       id: { type: 'string' },
       expired: { type: 'boolean', description: 'true = this call expired the fact; false = it was ALREADY expired (idempotent re-forget).' },
       reason: { type: ['string', 'null'] },
+      write_request: WRITE_RECEIPT_SCHEMA,
     },
   },
   // v0.45.7 (issue #1) — ambient recall. World-only by default; include_private
@@ -812,5 +816,7 @@ export const ERROR_SCHEMA: Record<string, unknown> = {
     suggestion: { type: 'string', description: 'Populated on every verb error: problem + cause + fix.' },
     detail: { type: 'string', description: 'Freeform specifics (e.g. which dependency failed).' },
     protocol_version: { type: 'integer', const: MEMORY_VERBS_VERSION },
+    write_request: WRITE_RECEIPT_SCHEMA,
+    write_error: { type: 'string', enum: [...WRITE_ERROR_CODES] },
   },
 };
