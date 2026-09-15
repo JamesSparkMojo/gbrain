@@ -42,6 +42,7 @@
     "build:llms": "bun run scripts/build-llms.ts",
     "wave-security-scan": "bash scripts/wave-security-scan.sh",
     "build:flag-registry": "bun run scripts/generate-flag-registry.ts",
+    "weights:mine": "bun run scripts/mine-shard-weights.ts",
     "build:pglite-snapshot": "bun run scripts/build-pglite-snapshot.ts",
     "test": "bash scripts/run-unit-parallel.sh",
     "eval:autocut": "bun test test/search/autocut-eval.test.ts",

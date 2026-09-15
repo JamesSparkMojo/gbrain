@@ -43,6 +43,7 @@
 #   .context/test-shards/        per-shard logs + exit codes (cleared at start)
 
 set -uo pipefail
+unset SHARD # This wrapper assigns its own children; ambient routing must not reach nested runners.
 
 # Fixture tests that `git commit` in temp repos must not inherit the developer's
 # global commit.gpgsign — a signing gpg-agent can OOM under full-suite memory

@@ -3,7 +3,7 @@
 #
 # Runs the unit suite for a single shard. Excludes test/e2e/* (those are run
 # by scripts/run-e2e.sh in the E2E phase). When SHARD=N/M is set, keeps every
-# M-th file starting at index N (1-indexed); otherwise runs the full unit set.
+# weighted partition N (1-indexed); otherwise runs the full unit set.
 #
 # Used by scripts/ci-local.sh to fan 4 unit-shard workers in parallel inside
 # the runner container, each pinned to its own postgres shard for the
@@ -13,6 +13,9 @@
 # shard's file list); parallel across shards (4 of these run concurrently).
 
 set -euo pipefail
+
+RUNNER_SHARD="${SHARD:-}"
+unset SHARD
 
 # #3485: unit/slow tests need no database — strip ambient DB URLs at this
 # wrapper boundary so the bunfig preload guard passes and nothing can reach a
@@ -51,28 +54,25 @@ while IFS= read -r f; do
 done < <(find test -name '*.test.ts' -not -path 'test/e2e/*' -not -name '*.slow.test.ts' -not -name '*.serial.test.ts' | sort)
 
 files=()
-if [ -n "${SHARD:-}" ]; then
-  shard_n=${SHARD%/*}
-  shard_m=${SHARD#*/}
-  if ! printf '%s' "$shard_n" | grep -qE '^[0-9]+$' || \
+if [ -n "$RUNNER_SHARD" ]; then
+  shard_n=${RUNNER_SHARD%/*}
+  shard_m=${RUNNER_SHARD#*/}
+  if ! [[ "$RUNNER_SHARD" =~ ^[0-9]+/[0-9]+$ ]] || ! printf '%s' "$shard_n" | grep -qE '^[0-9]+$' || \
      ! printf '%s' "$shard_m" | grep -qE '^[0-9]+$' || \
      [ "$shard_n" -lt 1 ] || [ "$shard_m" -lt 1 ] || [ "$shard_n" -gt "$shard_m" ]; then
-    echo "ERROR: invalid SHARD=$SHARD (expected N/M with 1<=N<=M, both integers)" >&2
+    echo "ERROR: invalid SHARD=$RUNNER_SHARD (expected N/M with 1<=N<=M, both integers)" >&2
     exit 1
   fi
-  i=0
-  for f in "${all_files[@]}"; do
-    if [ $((i % shard_m + 1)) -eq "$shard_n" ]; then
-      files+=("$f")
-    fi
-    i=$((i + 1))
-  done
+  selected=$(printf '%s\n' "${all_files[@]}" | bun scripts/sharding.ts "$shard_n" "$shard_m")
+  while IFS= read -r f; do
+    [ -n "$f" ] && files+=("$f")
+  done <<< "$selected"
 else
   files=("${all_files[@]}")
 fi
 
 if [ "${#files[@]}" -eq 0 ]; then
-  echo "[unit-shard ${SHARD:-(unsharded)}] no files; exiting clean."
+  echo "[unit-shard ${RUNNER_SHARD:-(unsharded)}] no files; exiting clean."
   exit 0
 fi
 
@@ -92,7 +92,7 @@ if ! printf '%s' "$MULT" | grep -qE '^[0-9]+$' || [ "$MULT" -lt 1 ]; then
 fi
 TEST_TIMEOUT_MS=$((60000 * MULT))
 
-echo "[unit-shard ${SHARD:-(unsharded)}] running ${#files[@]} files (timeout=${TEST_TIMEOUT_MS}ms)"
+echo "[unit-shard ${RUNNER_SHARD:-(unsharded)}] running ${#files[@]} files (timeout=${TEST_TIMEOUT_MS}ms)"
 if [ -n "$MAX_CONC" ]; then
   exec bun test --max-concurrency="$MAX_CONC" --timeout="$TEST_TIMEOUT_MS" "${files[@]}"
 fi
