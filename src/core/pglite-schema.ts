@@ -1,3 +1,4 @@
+import { PAGE_STATE_SCHEMA_SQL } from './page-state/schema.ts';
 /**
  * PGLite schema — derived from schema-embedded.ts (Postgres schema).
  *
@@ -1251,6 +1252,8 @@ CREATE INDEX IF NOT EXISTS page_aliases_lookup_idx
   ON page_aliases (source_id, alias_norm);
 CREATE INDEX IF NOT EXISTS page_aliases_slug_idx
   ON page_aliases (source_id, slug);
+${PAGE_STATE_SCHEMA_SQL}
+
 `;
 
 /**

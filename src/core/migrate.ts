@@ -1,3 +1,4 @@
+import { PAGE_STATE_SCHEMA_SQL } from './page-state/schema.ts';
 import type { BrainEngine } from './engine.ts';
 import { slugifyPath } from './sync.ts';
 import { getFtsLanguage } from './fts-language.ts';
@@ -6551,6 +6552,7 @@ CREATE TRIGGER minion_queue_protocol BEFORE INSERT OR UPDATE ON minion_jobs
   FOR EACH ROW EXECUTE FUNCTION enforce_minion_queue_protocol();
     `,
   },
+  { version: 150, name: 'canonical_page_revisions_and_guards', idempotent: true, sql: PAGE_STATE_SCHEMA_SQL },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

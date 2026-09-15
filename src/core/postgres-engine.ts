@@ -1,3 +1,10 @@
+import { mutatePageTag } from './page-state/tags.ts';
+import type { PageKey, PageSnapshot, PageSnapshotOptions, PageWriteOptions } from './page-state/types.ts';
+import { assertPageRevision } from './page-state/types.ts';
+import { lockPageKeys as acquirePageKeys } from './page-state/guards.ts';
+import { readPageSnapshot as readCanonicalPageSnapshot } from './page-state/snapshot.ts';
+import { createPageVersion } from './page-state/versions.ts';
+import { composablePostgresTransaction } from './page-state/transactions.ts';
 import type { PageReadScope } from './types.ts';
 import type { PageReadPolicy } from './types.ts';
 import { readRelationalFanout, readAliases, readBacklinkCounts, readAdjacencyBoosts, readContentFlags, readExtractionStates, readEffectiveDates, readSalienceScores } from './search/read-enrichment.ts';
@@ -274,27 +281,17 @@ export class PostgresEngine implements BrainEngine {
     } else if (sourceId) {
       scopesValue = sourceId;
     }
-    // Note on nesting: a postgres.js transaction handle exposes
-    // `.savepoint()` not `.begin()`, so callbacks must not try to open
-    // their own `tx.begin()` inside this wrap — they'd fail with
-    // `tx.begin is not a function`. Callbacks that need SET LOCAL emit it
-    // directly on the handle (it shares this transaction).
-    //
-    // `sql.begin<T>(...)` returns `UnwrapPromiseArray<T>` in postgres.js's typings
-    // — TypeScript strict-generics can't narrow that back to `T` for arbitrary
-    // callback return shapes (TS2322). The unwrap is a no-op when the callback
-    // returns a single value (not an array of promises), so the cast is safe.
-    return (await this.sql.begin(async (tx: any) => {
-      if (this.rlsScopeBindingEnabled) {
-        // `SET LOCAL` doesn't accept parameters in PostgreSQL — using
-        // `tx\`SET LOCAL ... = ${val}\`` binds val as $1 and errors with
-        // `syntax error at or near "$1"`. set_config() is a regular function
-        // and accepts a parameterised value; passing `true` as the third
-        // argument makes it transaction-local (same scope as SET LOCAL).
-        await tx`SELECT set_config('app.scopes', ${scopesValue}, true)`;
-      }
-      return await callback(tx as ReturnType<typeof postgres>);
-    })) as T;
+    return this.transaction(async engine => {
+      const tx = (engine as PostgresEngine).sql;
+      const previous = this.rlsScopeBindingEnabled
+        ? await tx`SELECT current_setting('app.scopes', true) AS scopes` : [];
+      if (this.rlsScopeBindingEnabled) await tx`SELECT set_config('app.scopes', ${scopesValue}, true)`;
+      const result = await callback(tx);
+      // Successful RELEASE SAVEPOINT retains SET LOCAL; a failed callback
+      // rolls it back with the savepoint and must preserve its original error.
+      if (this.rlsScopeBindingEnabled) await tx`SELECT set_config('app.scopes', ${previous[0]?.scopes ?? ''}, true)`;
+      return result;
+    });
   }
 
   // Lifecycle
@@ -541,18 +538,20 @@ export class PostgresEngine implements BrainEngine {
     // try/finally, not .finally on the chained promise: begin() can throw
     // SYNCHRONOUSLY (e.g. nested transaction on a tx clone whose conn has no
     // .begin), which would skip a chained .finally and leak the counter.
-    this.checkoutGauge.acquire('tx');
+    if (!this._pageTransaction) this.checkoutGauge.acquire('tx');
     try {
-      return await (conn.begin(async (tx) => {
+      return await (conn.begin(async (handle) => {
+        const tx = composablePostgresTransaction(handle);
         // Create a scoped engine with tx as its connection, no shared state mutation
         const txEngine = Object.create(this) as PostgresEngine;
         Object.defineProperty(txEngine, '_chunkWritesInTransaction', { value: true });
+        Object.defineProperty(txEngine, '_pageTransaction', { value: true });
         Object.defineProperty(txEngine, 'sql', { get: () => tx });
         Object.defineProperty(txEngine, '_sql', { value: tx as unknown as ReturnType<typeof postgres>, writable: false });
         return fn(txEngine);
       }) as Promise<T>);
     } finally {
-      this.checkoutGauge.release('tx');
+      if (!this._pageTransaction) this.checkoutGauge.release('tx');
     }
   }
 
@@ -668,46 +667,18 @@ export class PostgresEngine implements BrainEngine {
   }
 
   // Pages CRUD
-  async getPage(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; includeDeleted?: boolean; excludePrivate?: boolean }): Promise<Page | null> {
-    const includeDeleted = opts?.includeDeleted === true;
-    const sourceId = opts?.sourceId;
-    const sourceIds = opts?.sourceIds;
-    // Two layers of defense:
-    //   1. RLS scope binding (opt-in via GBRAIN_RLS_SCOPE_BINDING): wraps the
-    //      query in a transaction that sets `app.scopes` so the row-level
-    //      policy on `pages` filters at the SQL layer. Pass-through when off.
-    //   2. App-layer source filter (#1393): a federated grant (sourceIds[])
-    //      takes precedence over scalar sourceId so the exact-match read
-    //      honors allowedSources, not just one source.
-    return await this.withScopedReadTransaction(sourceIds, sourceId, async (tx) => {
-      // v0.26.5: default hides soft-deleted rows. Compose with optional source
-      // filter via fragment chaining (postgres.js supports sql`` composition).
-      const sourceCondition =
-        sourceIds && sourceIds.length > 0
-          ? tx`AND source_id = ANY(${sourceIds}::text[])`
-          : sourceId
-            ? tx`AND source_id = ${sourceId}`
-            : tx``;
-      const deletedCondition = includeDeleted ? tx`` : tx`AND deleted_at IS NULL`;
-      const privacy = opts?.excludePrivate ? tx.unsafe(`AND ${privatePagesFilterFragment('pages')}`) : tx``;
-      // #3931: anchor on sourceIds[0] (caller's own resolved source, see
-      // localFederatedSourceIds) instead of a hardcoded 'default'.
-      const anchorSourceId = sourceIds && sourceIds.length > 0 ? sourceIds[0] : 'default';
-      const rows = await tx`
-        SELECT id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, deleted_at,
-               effective_date, effective_date_source,
-               source_kind, source_uri, ingested_via, ingested_at,
-               contextual_retrieval_mode
-        FROM pages
-        WHERE slug = ${slug} ${sourceCondition} ${deletedCondition} ${privacy}
-        ORDER BY (source_id = ${anchorSourceId}) DESC, source_id ASC
-        LIMIT 1
-      `;
-      // Deterministic multi-source tiebreak: anchor-source-first, then stable
-      // alpha. Engine parity: pglite-engine.ts carries the identical clause.
-      if (rows.length === 0) return null;
-      return rowToPage(rows[0]);
-    });
+  async getPage(slug: string, opts?: PageSnapshotOptions): Promise<Page | null> {
+    return (await this.readPageSnapshot(slug, opts))?.page ?? null;
+  }
+
+  async readPageSnapshot(slug: string, opts?: PageSnapshotOptions): Promise<PageSnapshot | null> {
+    return this.withScopedReadTransaction(opts?.sourceIds, opts?.sourceId, tx =>
+      readCanonicalPageSnapshot(async (query, params) => Array.from(await tx.unsafe(query, params as never)) as never, slug, opts));
+  }
+
+  async lockPageKeys(keys: readonly PageKey[]): Promise<void> {
+    if (!this._pageTransaction) throw new Error('lockPageKeys requires engine.transaction()');
+    await acquirePageKeys(this, keys);
   }
 
   /**
@@ -735,7 +706,21 @@ export class PostgresEngine implements BrainEngine {
     });
   }
 
-  async putPage(slug: string, page: PageInput, opts?: { sourceId?: string; allowEmptyOverwrite?: boolean }): Promise<Page> {
+  private _pageTransaction = false;
+
+  async putPage(slug: string, page: PageInput, opts?: PageWriteOptions): Promise<Page> {
+    slug = validateSlug(slug);
+    return this.transaction(async tx => {
+      const sourceId = opts?.sourceId ?? 'default';
+      await tx.lockPageKeys([{ sourceId, slug }]);
+      if (opts?.expectedRevision !== undefined || opts?.force !== undefined) {
+        assertPageRevision(await tx.readPageSnapshot(slug, { sourceId, includeDeleted: true }), opts);
+      }
+      return (tx as PostgresEngine)._putPage(slug, page, opts);
+    });
+  }
+
+  private async _putPage(slug: string, page: PageInput, opts?: PageWriteOptions): Promise<Page> {
     slug = validateSlug(slug);
     const sql = this.sql;
     const hash = page.content_hash || contentHash(page);
@@ -814,7 +799,7 @@ export class PostgresEngine implements BrainEngine {
         source_uri            = COALESCE(EXCLUDED.source_uri,            pages.source_uri),
         ingested_via          = COALESCE(EXCLUDED.ingested_via,          pages.ingested_via),
         ingested_at           = COALESCE(EXCLUDED.ingested_at,           pages.ingested_at)
-      RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at
+      RETURNING knowledge_revision, text_projection_revision, id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at
     `;
     return rowToPage(rows[0]);
   }
@@ -3736,29 +3721,11 @@ export class PostgresEngine implements BrainEngine {
 
   // Tags
   async addTag(slug: string, tag: string, opts?: { sourceId?: string }): Promise<void> {
-    const sql = this.sql;
-    const sourceId = opts?.sourceId ?? 'default';
-    // Verify page exists before attempting insert (ON CONFLICT DO NOTHING
-    // swallows the "already tagged" case, but we still need to detect missing
-    // pages). Source-scoped lookup — pre-v0.18 the bare-slug subquery returned
-    // multiple rows in multi-source brains and crashed with Postgres 21000.
-    const page = await sql`SELECT id FROM pages WHERE slug = ${slug} AND source_id = ${sourceId}`;
-    if (page.length === 0) throw new Error(`addTag failed: page "${slug}" (source=${sourceId}) not found`);
-    await sql`
-      INSERT INTO tags (page_id, tag)
-      VALUES (${page[0].id}, ${tag})
-      ON CONFLICT (page_id, tag) DO NOTHING
-    `;
+    return mutatePageTag(this, { sourceId: opts?.sourceId ?? 'default', slug }, tag, true);
   }
 
   async removeTag(slug: string, tag: string, opts?: { sourceId?: string }): Promise<void> {
-    const sql = this.sql;
-    const sourceId = opts?.sourceId ?? 'default';
-    await sql`
-      DELETE FROM tags
-      WHERE page_id = (SELECT id FROM pages WHERE slug = ${slug} AND source_id = ${sourceId})
-        AND tag = ${tag}
-    `;
+    return mutatePageTag(this, { sourceId: opts?.sourceId ?? 'default', slug }, tag, false);
   }
 
   async getTags(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<string[]> {
@@ -4638,16 +4605,7 @@ export class PostgresEngine implements BrainEngine {
 
   // Versions
   async createVersion(slug: string, opts?: { sourceId?: string }): Promise<PageVersion> {
-    const sql = this.sql;
-    const sourceId = opts?.sourceId ?? 'default';
-    const rows = await sql`
-      INSERT INTO page_versions (page_id, compiled_truth, frontmatter)
-      SELECT id, compiled_truth, frontmatter
-      FROM pages WHERE slug = ${slug} AND source_id = ${sourceId}
-      RETURNING *
-    `;
-    if (rows.length === 0) throw new Error(`createVersion failed: page "${slug}" (source=${sourceId}) not found`);
-    return rows[0] as unknown as PageVersion;
+    return createPageVersion(this, slug, opts?.sourceId ?? 'default');
   }
 
   async getVersions(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean }): Promise<PageVersion[]> {
@@ -5101,15 +5059,13 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async setPageAliases(slug: string, sourceId: string, aliasNorms: string[]): Promise<void> {
-    const sql = this.sql;
     const uniq = Array.from(new Set(aliasNorms.filter(a => a.length > 0)));
-    await sql.begin(async tx => {
-      await tx`DELETE FROM page_aliases WHERE source_id = ${sourceId} AND slug = ${slug}`;
-      if (uniq.length === 0) return;
-      await tx`
-        INSERT INTO page_aliases (source_id, alias_norm, slug)
-        SELECT ${sourceId}, a, ${slug} FROM unnest(${uniq}::text[]) AS a
-        ON CONFLICT (source_id, alias_norm, slug) DO NOTHING`;
+    await this.transaction(async tx => {
+      await tx.lockPageKeys([{ sourceId, slug }]);
+      await tx.executeRaw('DELETE FROM page_aliases WHERE source_id=$1 AND slug=$2', [sourceId, slug]);
+      if (!uniq.length) return;
+      await tx.executeRaw(`INSERT INTO page_aliases (source_id,alias_norm,slug)
+        SELECT $1,a,$2 FROM unnest($3::text[]) AS a ON CONFLICT DO NOTHING`, [sourceId, slug, uniq]);
     });
   }
 

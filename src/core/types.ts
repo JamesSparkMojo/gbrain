@@ -91,6 +91,10 @@ export interface Page {
   timeline: string;
   frontmatter: Record<string, unknown>;
   content_hash?: string;
+  /** Opaque canonical state; independent of indexing and telemetry updates. */
+  knowledge_revision?: string;
+  /** Revision whose text/search chunks have been atomically installed. */
+  text_projection_revision?: string | null;
   /** v0.29 — deterministic 0..1 score; populated by the recompute_emotional_weight cycle phase. */
   emotional_weight?: number;
   created_at: Date;
@@ -1645,6 +1649,11 @@ export interface RawData {
 
 // Versions
 export interface PageVersion {
+  knowledge_revision?: string | null;
+  timeline?: string | null;
+  title?: string | null;
+  type?: string | null;
+  tags?: string[] | null;
   id: number;
   page_id: number;
   compiled_truth: string;

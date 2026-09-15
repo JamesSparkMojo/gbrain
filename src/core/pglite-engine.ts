@@ -1,3 +1,10 @@
+import { mutatePageTag } from './page-state/tags.ts';
+import type { PageKey, PageSnapshot, PageSnapshotOptions, PageWriteOptions } from './page-state/types.ts';
+import { assertPageRevision } from './page-state/types.ts';
+import { lockPageKeys as acquirePageKeys } from './page-state/guards.ts';
+import { readPageSnapshot as readCanonicalPageSnapshot } from './page-state/snapshot.ts';
+import { createPageVersion } from './page-state/versions.ts';
+import { composablePgliteTransaction } from './page-state/transactions.ts';
 import { GRANT_COLUMNS_SQL } from './grants/schema.ts';
 import type { PageReadScope } from './types.ts';
 import type { PageReadPolicy } from './types.ts';
@@ -346,7 +353,7 @@ export function computeSnapshotSchemaHash(
       'migrate.ts', 'pglite-schema.ts', 'fts-language.ts', 'vector-index.ts', 'ai/defaults.ts',
       'timeline-dedup-repair.ts', 'pages-upsert-arbiter.ts', 'link-extraction.ts',
       'grants/schema.ts', 'grants/migration.ts', 'grants/model.ts', 'grants/service.ts', 'grants/profiles.ts',
-      'scope.ts', 'sql-query.ts', 'minions/tools/brain-allowlist.ts', 'facts/withdrawal-schema.ts',
+      'page-state/schema.ts', 'scope.ts', 'sql-query.ts', 'minions/tools/brain-allowlist.ts', 'facts/withdrawal-schema.ts',
     ]) {
       hash.update(`${file}\n`);
       hash.update(fs.readFileSync(new URL(`./${file}`, import.meta.url)));
@@ -1671,61 +1678,29 @@ export class PGLiteEngine implements BrainEngine {
     return fn(conn);
   }
 
-  // NOTE: the tx-engine handed to `fn` proxies `db` to a PGLite Transaction,
-  // which has query/sql/exec but NO .transaction — so engine methods that
-  // open their own transaction (searchVector since #3613) will throw if
-  // called on the tx-engine. No current callback does; keep it that way or
-  // add pass-through nesting first.
   async transaction<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
-    return this.db.transaction(async (tx) => {
+    return this.db.transaction(async handle => {
+      const tx = composablePgliteTransaction(handle);
       const txEngine = Object.create(this) as PGLiteEngine;
       Object.defineProperty(txEngine, '_chunkWritesInTransaction', { value: true });
+      Object.defineProperty(txEngine, '_pageTransaction', { value: true });
       Object.defineProperty(txEngine, 'db', { get: () => tx });
       return fn(txEngine);
     });
   }
 
   // Pages CRUD
-  async getPage(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; includeDeleted?: boolean; excludePrivate?: boolean }): Promise<Page | null> {
-    // v0.26.5: hide soft-deleted by default; opt-in via opts.includeDeleted.
-    const includeDeleted = opts?.includeDeleted === true;
-    const sourceId = opts?.sourceId;
-    const sourceIds = opts?.sourceIds;
-    const where: string[] = ['slug = $1'];
-    if (opts?.excludePrivate) where.push(privatePagesFilterFragment('pages'));
-    const params: unknown[] = [slug];
-    // #1393: federated grant (sourceIds[]) wins over scalar sourceId so the
-    // exact-match read honors allowedSources, not just one source.
-    if (sourceIds && sourceIds.length > 0) {
-      params.push(sourceIds);
-      where.push(`source_id = ANY($${params.length}::text[])`);
-    } else if (sourceId) {
-      params.push(sourceId);
-      where.push(`source_id = $${params.length}`);
-    }
-    if (!includeDeleted) {
-      where.push('deleted_at IS NULL');
-    }
-    // #3931: anchor the tiebreak on sourceIds[0] (the caller's own resolved
-    // source — see localFederatedSourceIds) instead of a hardcoded 'default',
-    // so a shadowed slug resolves to the caller's own copy.
-    const anchorSourceId = sourceIds && sourceIds.length > 0 ? sourceIds[0] : 'default';
-    params.push(anchorSourceId);
-    const anchorParamIdx = params.length;
-    const { rows } = await this.db.query(
-      `SELECT id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, deleted_at,
-              effective_date, effective_date_source,
-              source_kind, source_uri, ingested_via, ingested_at,
-              contextual_retrieval_mode
-       FROM pages WHERE ${where.join(' AND ')}
-       ORDER BY (source_id = $${anchorParamIdx}) DESC, source_id ASC
-       LIMIT 1`,
-      params
-    );
-    // Deterministic multi-source tiebreak: anchor-source-first, then stable
-    // alpha. Engine parity: postgres-engine.ts carries the identical clause.
-    if (rows.length === 0) return null;
-    return rowToPage(rows[0] as Record<string, unknown>);
+  async getPage(slug: string, opts?: PageSnapshotOptions): Promise<Page | null> {
+    return (await this.readPageSnapshot(slug, opts))?.page ?? null;
+  }
+
+  async readPageSnapshot(slug: string, opts?: PageSnapshotOptions): Promise<PageSnapshot | null> {
+    return readCanonicalPageSnapshot(this.executeRaw.bind(this), slug, opts);
+  }
+
+  async lockPageKeys(keys: readonly PageKey[]): Promise<void> {
+    if (!this._pageTransaction) throw new Error('lockPageKeys requires engine.transaction()');
+    await acquirePageKeys(this, keys);
   }
 
   /**
@@ -1749,7 +1724,21 @@ export class PGLiteEngine implements BrainEngine {
     return { slug: r.slug, id: Number(r.id) };
   }
 
-  async putPage(slug: string, page: PageInput, opts?: { sourceId?: string; allowEmptyOverwrite?: boolean }): Promise<Page> {
+  private _pageTransaction = false;
+
+  async putPage(slug: string, page: PageInput, opts?: PageWriteOptions): Promise<Page> {
+    slug = validateSlug(slug);
+    return this.transaction(async tx => {
+      const sourceId = opts?.sourceId ?? 'default';
+      await tx.lockPageKeys([{ sourceId, slug }]);
+      if (opts?.expectedRevision !== undefined || opts?.force !== undefined) {
+        assertPageRevision(await tx.readPageSnapshot(slug, { sourceId, includeDeleted: true }), opts);
+      }
+      return (tx as PGLiteEngine)._putPage(slug, page, opts);
+    });
+  }
+
+  private async _putPage(slug: string, page: PageInput, opts?: PageWriteOptions): Promise<Page> {
     slug = validateSlug(slug);
     const hash = page.content_hash || contentHash(page);
     const frontmatter = page.frontmatter || {};
@@ -1825,7 +1814,7 @@ export class PGLiteEngine implements BrainEngine {
          source_uri            = COALESCE(EXCLUDED.source_uri,            pages.source_uri),
          ingested_via          = COALESCE(EXCLUDED.ingested_via,          pages.ingested_via),
          ingested_at           = COALESCE(EXCLUDED.ingested_at,           pages.ingested_at)
-       RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at`,
+       RETURNING knowledge_revision, text_projection_revision, id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at`,
       [sourceId, slug, page.type, pageKind, sanitizeText(page.title), sanitizeText(page.compiled_truth), sanitizeText(page.timeline || ''), JSON.stringify(frontmatter), hash, effectiveDate, effectiveDateSource, importFilename, chunkerVersion, sourcePath, sourceKind, sourceUri, ingestedVia, ingestedAt]
     );
     // PGLite can return zero rows from INSERT ... ON CONFLICT DO UPDATE ...
@@ -4500,31 +4489,11 @@ export class PGLiteEngine implements BrainEngine {
 
   // Tags
   async addTag(slug: string, tag: string, opts?: { sourceId?: string }): Promise<void> {
-    const sourceId = opts?.sourceId ?? 'default';
-    // Pre-check source-scoped page existence; ON CONFLICT only handles the
-    // already-tagged case, not missing pages.
-    const page = await this.db.query(
-      'SELECT id FROM pages WHERE slug = $1 AND source_id = $2',
-      [slug, sourceId]
-    );
-    if (page.rows.length === 0) throw new Error(`addTag failed: page "${slug}" (source=${sourceId}) not found`);
-    await this.db.query(
-      `INSERT INTO tags (page_id, tag)
-       VALUES ($1, $2)
-       ON CONFLICT (page_id, tag) DO NOTHING`,
-      [(page.rows[0] as { id: number }).id, tag]
-    );
+    return mutatePageTag(this, { sourceId: opts?.sourceId ?? 'default', slug }, tag, true);
   }
 
   async removeTag(slug: string, tag: string, opts?: { sourceId?: string }): Promise<void> {
-    const sourceId = opts?.sourceId ?? 'default';
-    // Source-qualify the page-id subquery; slugs are only unique per source.
-    await this.db.query(
-      `DELETE FROM tags
-       WHERE page_id = (SELECT id FROM pages WHERE slug = $1 AND source_id = $2)
-         AND tag = $3`,
-      [slug, sourceId, tag]
-    );
+    return mutatePageTag(this, { sourceId: opts?.sourceId ?? 'default', slug }, tag, false);
   }
 
   async getTags(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<string[]> {
@@ -5394,16 +5363,7 @@ export class PGLiteEngine implements BrainEngine {
 
   // Versions
   async createVersion(slug: string, opts?: { sourceId?: string }): Promise<PageVersion> {
-    const sourceId = opts?.sourceId ?? 'default';
-    const { rows } = await this.db.query(
-      `INSERT INTO page_versions (page_id, compiled_truth, frontmatter)
-       SELECT id, compiled_truth, frontmatter
-       FROM pages WHERE slug = $1 AND source_id = $2
-       RETURNING *`,
-      [slug, sourceId]
-    );
-    if (rows.length === 0) throw new Error(`createVersion failed: page "${slug}" (source=${sourceId}) not found`);
-    return rows[0] as unknown as PageVersion;
+    return createPageVersion(this, slug, opts?.sourceId ?? 'default');
   }
 
   async getVersions(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean }): Promise<PageVersion[]> {
@@ -5849,14 +5809,13 @@ export class PGLiteEngine implements BrainEngine {
 
   async setPageAliases(slug: string, sourceId: string, aliasNorms: string[]): Promise<void> {
     const uniq = Array.from(new Set(aliasNorms.filter(a => a.length > 0)));
-    await this.db.query(`DELETE FROM page_aliases WHERE source_id = $1 AND slug = $2`, [sourceId, slug]);
-    if (uniq.length === 0) return;
-    await this.db.query(
-      `INSERT INTO page_aliases (source_id, alias_norm, slug)
-       SELECT $1, a, $2 FROM unnest($3::text[]) AS a
-       ON CONFLICT (source_id, alias_norm, slug) DO NOTHING`,
-      [sourceId, slug, uniq],
-    );
+    await this.transaction(async tx => {
+      await tx.lockPageKeys([{ sourceId, slug }]);
+      await tx.executeRaw('DELETE FROM page_aliases WHERE source_id=$1 AND slug=$2', [sourceId, slug]);
+      if (!uniq.length) return;
+      await tx.executeRaw(`INSERT INTO page_aliases (source_id,alias_norm,slug)
+        SELECT $1,a,$2 FROM unnest($3::text[]) AS a ON CONFLICT DO NOTHING`, [sourceId, slug, uniq]);
+    });
   }
 
   // Config
