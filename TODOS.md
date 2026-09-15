@@ -2051,11 +2051,14 @@ Staged-deletion discipline (ship replacements → migrate call sites → update 
   same transaction — mirror that on the bare config-set path (or fold the
   reranker model into the knobs hash, the same contamination class as
   graph_signals/relational). Filed from the migration-hardening wave review.
-- [ ] **P2 — Facts re-embed backfill command.** A dimension transition drops
-  `facts.embedding`; facts regenerate only on their next write/`gbrain extract`
-  pass. `migrate embeddings --status` + the completion output now report the
-  pending census, but there is no command to proactively re-embed the backlog.
-  Filed from the migration-hardening wave (outside-voice C5).
+- [x] **P2 — Facts re-embed backfill command.** **Completed:** v0.50.3.0 (2026-09-15).
+  `gbrain embed --stale --facts [--dry-run] [--batch-size N] [--source <id>] [--json]`
+  (`src/core/embed-facts.ts`) drains exactly the rows `migrate embeddings --status`
+  counts as facts pending, on both engines, and the status output now names the
+  command. Original ask: a dimension transition drops `facts.embedding`; facts
+  regenerated only on their next write/`gbrain extract` pass, and the status +
+  completion output reported the pending census with no command to re-embed the
+  backlog. Filed from the migration-hardening wave (outside-voice C5).
 - [ ] **P2 — Tier-preserving re-embed.** A bulk stale re-embed (embedding
   migration included) lands per_chunk_synopsis pages at the TITLE context tier
   (embedding-context.ts:211, embed.ts restamp) — a retrieval-quality downgrade
