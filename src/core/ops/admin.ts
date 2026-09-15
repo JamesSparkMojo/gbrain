@@ -167,7 +167,8 @@ const get_versions: Operation = {
   handler: async (ctx, p) => {
     const versions = await ctx.engine.getVersions(p.slug as string, await readPolicyOpts(ctx));
     if (ctx.remote === false) return versions;
-    return versions.map(v => ({ ...v, compiled_truth: sanitizeRemoteBody(v.compiled_truth) }));
+    return versions.map(v => ({ ...v, compiled_truth: sanitizeRemoteBody(v.compiled_truth),
+      ...(typeof v.timeline === 'string' ? { timeline: sanitizeRemoteBody(v.timeline) } : {}) }));
   },
   scope: 'read',
   cliHints: { name: 'history', positional: ['slug'] },
