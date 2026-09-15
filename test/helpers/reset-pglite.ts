@@ -69,7 +69,10 @@ export async function resetPgliteState(engine: PGLiteEngine): Promise<void> {
   if (targets.length === 0) return;
   const quoted = targets.map(t => `"${t.replace(/"/g, '""')}"`).join(', ');
   await engine.executeRaw(`TRUNCATE ${quoted} RESTART IDENTITY CASCADE`);
-  await engine.executeRaw('UPDATE persistence_brain SET enabled=false,activated_at=NULL WHERE singleton=1');
+  // This fixture deleted every registration and permanent receipt. Give its new
+  // logical brain a new identity so private credentials from the previous test
+  // cannot masquerade as a revoked registration on restart.
+  await engine.executeRaw('UPDATE persistence_brain SET brain_id=gen_random_uuid(),enabled=false,activated_at=NULL WHERE singleton=1');
   // Re-seed the default source row that initSchema() inserts. Mirrors the
   // INSERT in src/core/pglite-schema.ts so the FK target survives reset.
   await engine.executeRaw(
