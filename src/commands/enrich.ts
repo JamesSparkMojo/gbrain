@@ -29,6 +29,7 @@
  * fans out one job per source when --source is omitted.
  */
 
+import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../core/engine.ts';
 import type { EnrichCandidate, PageType } from '../core/types.ts';
 import { operations } from '../core/operations.ts';
@@ -362,11 +363,13 @@ async function enrichOneLocked(ctx: EnrichOneCtx, candidate: EnrichCandidate): P
   const { engine, sourceId } = ctx;
   const slug = candidate.slug;
 
-  const page = await engine.getPage(slug, { sourceId });
-  if (!page) {
+  const snapshot = await engine.readPageSnapshot(slug, { sourceId });
+  if (!snapshot) {
     ctx.result.pages_skipped_disappeared++;
     return;
   }
+  const page = snapshot.page;
+  const requestId = randomUUID();
 
   const kind = inferEnrichKind(page.type, slug);
   const evidence = await retrieveEvidence(engine, sourceId, slug, page.title || slug);
@@ -424,7 +427,7 @@ async function enrichOneLocked(ctx: EnrichOneCtx, candidate: EnrichCandidate): P
   // auto-link + disk write-through fire, exactly like `gbrain capture`. The
   // retrieved context was sanitized in buildEnrichPrompt; the synthesized body
   // is the model's grounded output.
-  const tags = await engine.getTags(slug, { sourceId }).catch(() => [] as string[]);
+  const tags = snapshot.tags;
   const newFrontmatter: Record<string, unknown> = {
     ...page.frontmatter,
     // Provenance survives write-through (it only overrides ingested_via /
@@ -452,7 +455,7 @@ async function enrichOneLocked(ctx: EnrichOneCtx, candidate: EnrichCandidate): P
     remote: false,
     sourceId,
   };
-  await putPageOp.handler(opCtx, { slug, content });
+  await putPageOp.handler(opCtx, { slug, content, expected_revision: snapshot.revision, request_id: requestId });
 
   ctx.result.pages_enriched++;
   ctx.done.add(completedKey(sourceId, slug));
