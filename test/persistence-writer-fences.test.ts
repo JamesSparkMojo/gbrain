@@ -4,7 +4,6 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { PostgresEngine } from '../src/core/postgres-engine.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { addSource, removeSource, recloneIfMissing } from '../src/core/sources-ops.ts';
 import { softDeleteSource, restoreSource, purgeExpiredSources } from '../src/core/destructive-guard.ts';
@@ -17,10 +16,11 @@ import { hardenBrainRepo } from '../src/core/brain-repo-durability.ts';
 import { recordManagedRoots, registeredManagedRoots } from '../src/core/persistence/root-registry.ts';
 import { assertManagedFilesystemWrite, withFilesystemPublication } from '../src/core/persistence/filesystem-guard.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
-import { assertSafeE2eDatabaseUrl } from './helpers/db-guard.ts';
+import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const engines: BrainEngine[] = [];
+let closePostgres: (() => Promise<void>) | undefined;
 const sourceId = 'writer-fence-example';
 const home = mkdtempSync(join(tmpdir(), 'gbrain-writer-fences-'));
 const root = join(home, '.gbrain', 'clones', sourceId);
@@ -28,14 +28,14 @@ beforeAll(async () => {
   mkdirSync(root, { recursive: true }); writeFileSync(join(root, 'sentinel.md'), 'canonical sentinel');
   const lite = new PGLiteEngine(); await lite.connect({}); await lite.initSchema(); engines.push(lite);
   if (process.env.DATABASE_URL) {
-    assertSafeE2eDatabaseUrl(process.env.DATABASE_URL);
-    const pg = new PostgresEngine(); await pg.connect({ database_url: process.env.DATABASE_URL }); await pg.initSchema(); engines.push(pg);
+    const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL); engines.push(pg.engine); closePostgres = pg.close;
   }
   for (const engine of engines) {
     await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
     await engine.executeRaw('DELETE FROM sources WHERE id=$1', [sourceId]);
     await engine.executeRaw('INSERT INTO sources(id,name,local_path,config) VALUES($1,$1,$2,$3::text::jsonb)',
       [sourceId, root, JSON.stringify({ managed_clone: true, remote_url: 'https://example.com/brain.git' })]);
+    await engine.executeRaw("INSERT INTO sources(id,name,archived,archive_expires_at) VALUES($1,$1,true,now()-interval '1 hour')", [`${sourceId}-expired`]);
     await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
   }
 }, 120_000);
@@ -44,18 +44,28 @@ afterAll(async () => {
     await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
     await engine.executeRaw('DELETE FROM sources WHERE id=$1', [sourceId]); await engine.disconnect();
   }
+  await closePostgres?.();
   rmSync(home, { recursive: true, force: true });
 });
 
-test('legacy topology and connector writers refuse before deleting, cloning or provider work', async () => {
+test('unregistered source lifecycle and unsupported legacy writers refuse before deleting, cloning or provider work', async () => {
   await withEnv({ GBRAIN_HOME: home }, async () => {
     for (const engine of engines) {
-      expect(await removeSource(engine, { id: sourceId, dryRun: true })).toMatchObject({ dryRun: true, clone_removed: false });
+      // Managed lifecycle operations now exist, including authorized previews.
+      // An unregistered caller must still fail before staging or provider work.
       for (const work of [
+        () => removeSource(engine, { id: sourceId, dryRun: true }),
         () => removeSource(engine, { id: sourceId, yes: true }),
         () => recloneIfMissing(engine, sourceId),
         () => addSource(engine, { id: 'new-source', remoteUrl: 'https://example.com/brain.git' }),
-        () => softDeleteSource(engine, sourceId), () => restoreSource(engine, sourceId), () => purgeExpiredSources(engine),
+        () => softDeleteSource(engine, sourceId), () => restoreSource(engine, sourceId),
+      ]) await expect(work()).rejects.toMatchObject({ code: 'writer_registration_required' });
+      const purge = await purgeExpiredSources(engine);
+      expect(purge.purged).toEqual([]);
+      expect(purge.blocked).toEqual([{ id: `${sourceId}-expired`, reason: 'This installation has no local writer registration.' }]);
+      expect(await engine.executeRaw('SELECT id FROM sources WHERE id=$1', [`${sourceId}-expired`])).toHaveLength(1);
+      expect(existsSync(join(home, '.gbrain', 'clones', 'new-source'))).toBe(false);
+      for (const work of [
         () => runGitHubSync(engine, sourceId, {} as never, {} as never),
         () => runGoogleSync(engine, sourceId, {} as never, {} as never),
         () => importFromContent(engine, 'blocked', 'canonical material', { sourceId, noEmbed: true }),

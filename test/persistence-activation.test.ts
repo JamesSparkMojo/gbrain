@@ -9,6 +9,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { activatePersistence } from '../src/core/persistence/activation.ts';
 import { runPersistenceAdministration } from '../src/core/persistence/administration.ts';
 import { acceptWriterTransfer, acquireWorktree, claimWorktree, managedPersistenceEnabled, prepareWriterTransfer } from '../src/core/persistence/ownership.ts';
+import { registerLocalWriter } from '../src/core/persistence/identity.ts';
 import { registerManagedFilesystemEngine } from '../src/core/persistence/filesystem-guard.ts';
 import { registeredManagedRoots } from '../src/core/persistence/root-registry.ts';
 import { parsePersistenceAdminArgs } from '../src/commands/persistence-admin.ts';
@@ -42,7 +43,7 @@ async function fixture(run: (engine: PGLiteEngine, root: string, home: string, s
   try {
     await withEnv({ GBRAIN_HOME: home, DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, async () => {
       await disposePersistenceConsumer(engine); await resetPgliteState(engine); await engine.setConfig('version', schemaVersion);
-      const sourceId = `activate-${randomUUID()}`;
+      const sourceId = `activate-${randomUUID().slice(0, 12)}`;
       await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', [sourceId, root]);
       try { await run(engine, root, home, sourceId); }
       finally { await disposePersistenceConsumer(engine); }
@@ -76,6 +77,7 @@ test('activation fsyncs source and selected datastore refusal records before bec
   await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [`${sourceId}-later`]);
   const selected = join(home, 'selected-datastore'); mkdirSync(selected);
   await registerManagedFilesystemEngine(engine, selected);
+  await registerLocalWriter(engine, 'cli');
   expect(await runPersistenceAdministration(engine, 'writer_activate', { confirm_quiesced: true })).toMatchObject({ enabled: true, activated: true });
   expect(registeredManagedRoots()).toContain(root);
   expect(registeredManagedRoots()).toContain(selected);
