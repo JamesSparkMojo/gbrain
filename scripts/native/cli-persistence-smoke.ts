@@ -47,7 +47,7 @@ async function collect(stream: ReadableStream<Uint8Array>, child: OwnedChild, ap
   } finally { reader.releaseLock(); }
 }
 
-async function run(argv: string[], expected = 0, timeoutMs = 60000) {
+async function run(argv: string[], expected: number | null = 0, timeoutMs = 60000) {
   const label = argv[0] === 'call' ? `call ${argv[3]}` : argv.slice(0, 3).join(' ');
   console.log(`[release-cli] ${label}`);
   const child = Bun.spawn([binary, ...argv], { cwd: root, env, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
@@ -57,8 +57,8 @@ async function run(argv: string[], expected = 0, timeoutMs = 60000) {
   try {
     const [stdout, stderr, code] = await Promise.all([collect(child.stdout, child), collect(child.stderr, child), child.exited]);
     assert.equal(timedOut, false, `CLI timed out: ${argv.slice(0, 2).join(' ')}`);
-    assert.equal(code, expected, `${argv.slice(0, 2).join(' ')} exited ${code}: ${stdout.slice(-6000)}\n${stderr.slice(-6000)}`);
-    return { stdout, stderr };
+    if (expected !== null) assert.equal(code, expected, `${argv.slice(0, 2).join(' ')} exited ${code}: ${stdout.slice(-6000)}\n${stderr.slice(-6000)}`);
+    return { stdout, stderr, code };
   } finally { clearTimeout(timer); if (child.exitCode !== null) children.delete(child); }
 }
 
@@ -157,6 +157,29 @@ try {
   }
   owner.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
   assert.equal(ownerPid(), owner.pid);
+  // MCP initialization precedes the separate persistence listener's boot. Use
+  // an authenticated read through the release executable as its readiness
+  // probe; never retry a mutation or mistake a queued receipt for readiness.
+  const persistenceDeadline = performance.now() + 60000;
+  const socketPath = join(database, '.gbrain-persistence.sock');
+  const diagnostics = () => `socket_path_bytes=${Buffer.byteLength(socketPath)}; owner stderr: ${ownerErrors.slice(-6000)}`;
+  for (;;) {
+    assert.equal(owner.exitCode, null, `Resident CLI exited before persistence readiness: ${diagnostics()}`);
+    assert(!ownerErrors.includes('[persistence-ipc] listener unavailable'), `Resident persistence listener failed to bind: ${diagnostics()}`);
+    assert(performance.now() < persistenceDeadline, `Resident persistence readiness timed out: ${diagnostics()}`);
+    const probe = await run(['call', '--source', 'default', 'get_page', JSON.stringify({ slug, include_content: true, source_id: 'default' })],
+      null, Math.max(1, Math.min(15000, persistenceDeadline - performance.now())));
+    const result = json(probe.stdout);
+    if (probe.code === 0) {
+      assert.equal(result.revision, updateRevision);
+      assert(result.content?.includes('Updated canonical release sentinel.'), `Readiness probe returned the wrong page: ${diagnostics()}`);
+      assert.equal(ownerPid(), owner.pid, 'Readiness probe replaced the resident datastore owner.');
+      break;
+    }
+    assert(probe.code === 1 && result.error === 'owner_unavailable' && result.submission_status === 'not_sent',
+      `Readiness probe failed: ${probe.stdout.slice(-6000)}\n${probe.stderr.slice(-6000)}\n${diagnostics()}`);
+    await delay(25);
+  }
   const residentId = randomUUID();
   const resident = { ...update, request_id: residentId, expected_revision: updateRevision, content: '# Release example\n\nResident canonical release sentinel.\n' };
   const residentRevision = committed(await call('put_page', resident), residentId);
@@ -168,7 +191,7 @@ try {
   await readPage(slug, residentRevision, 'Resident canonical release sentinel.');
   assert.equal(committed(await call('put_page', resident), residentId), residentRevision, 'Receipt did not survive resident shutdown and reopen.');
   console.log(JSON.stringify({ ok: true, target: status.native_lock.target, binary: 'release artifact',
-    checks: ['keyless-init', 'native-probe', 'filesystem-publication', 'durable-replay', 'revision-conflict', 'resident-ipc', 'shutdown-reopen'] }));
+    checks: ['keyless-init', 'native-probe', 'filesystem-publication', 'durable-replay', 'revision-conflict', 'authenticated-owner-readiness', 'resident-ipc', 'shutdown-reopen'] }));
 } finally {
   try { await stopOwner(); }
   finally {
