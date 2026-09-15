@@ -13,6 +13,7 @@
  */
 
 import { embedBatch } from './embedding.ts';
+import { AIConfigError } from './ai/errors.ts';
 import { serr } from './console-prefix.ts';
 import { noteEmbedApiResponse } from './embed-stall.ts';
 import { titleTierCorpusGeneration } from './contextual-retrieval-service.ts';
@@ -254,6 +255,11 @@ export async function embedBatchWithBackoff(
  * providers whose wrappers strip `cause.status`.
  */
 export function isEmbedRetriableError(e: unknown): boolean {
+  // A configuration-class error (bad key, unsupported model, a degenerate
+  // vector the provider returned) never becomes retriable, whatever digits its
+  // message happens to carry — the diagnostics below embed hashes and lengths
+  // that would otherwise trip the bare 429/502/503 text matches.
+  if (e instanceof AIConfigError) return false;
   const msg = e instanceof Error ? e.message : String(e);
   return (
     detect429FromCause(e) ||
