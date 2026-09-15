@@ -71,7 +71,7 @@ import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defa
 import { DELETE_BATCH_SIZE, TRAVERSE_PATH_ROW_CAP } from './engine-constants.ts';
 import { PageMissingError } from './engine-errors.ts';
 import { SOURCE_CONFIG_OBJECT_SQL } from './source-config-sql.ts';
-import { SAFE_FENCE_CHUNKER_VERSION, bodyWriteChunkVersion, chunkWriteInvalidation, requiresSafeChunks, safeChunksFilter } from './search/safe-chunks.ts';
+import { SAFE_FENCE_CHUNKER_VERSION, bodyWriteChunkVersion, chunkWriteInvalidation, currentTextProjectionFilter, requiresSafeChunks, safeChunksFilter } from './search/safe-chunks.ts';
 import { acquireLock, releaseLock, type LockHandle } from './pglite-lock.ts';
 // Engine-live path (#3596): static import, never a lazy `import()` in the
 // connect() catch. No cycle: pglite-repair.ts imports nothing from this file.
@@ -353,7 +353,7 @@ export function computeSnapshotSchemaHash(
       'migrate.ts', 'pglite-schema.ts', 'fts-language.ts', 'vector-index.ts', 'ai/defaults.ts',
       'timeline-dedup-repair.ts', 'pages-upsert-arbiter.ts', 'link-extraction.ts',
       'grants/schema.ts', 'grants/migration.ts', 'grants/model.ts', 'grants/service.ts', 'grants/profiles.ts',
-      'page-state/schema.ts', 'persistence/schema.ts', 'persistence/writer-guard-schema.ts', 'scope.ts', 'sql-query.ts', 'minions/tools/brain-allowlist.ts', 'facts/withdrawal-schema.ts',
+      'page-state/schema.ts', 'page-state/projection-schema.ts', 'persistence/schema.ts', 'persistence/writer-guard-schema.ts', 'scope.ts', 'sql-query.ts', 'minions/tools/brain-allowlist.ts', 'facts/withdrawal-schema.ts',
     ]) {
       hash.update(`${file}\n`);
       hash.update(fs.readFileSync(new URL(`./${file}`, import.meta.url)));
@@ -2998,7 +2998,8 @@ export class PGLiteEngine implements BrainEngine {
     }
     const quotedCol = quoteIdentifier(column);
     const { rows } = await this.db.query(
-      `SELECT id, ${quotedCol} AS embedding FROM content_chunks WHERE id = ANY($1::int[]) AND ${quotedCol} IS NOT NULL`,
+      `SELECT cc.id, cc.${quotedCol} AS embedding FROM content_chunks cc JOIN pages p ON p.id=cc.page_id
+        WHERE cc.id = ANY($1::int[]) AND cc.${quotedCol} IS NOT NULL AND ${currentTextProjectionFilter('p')}`,
       [ids]
     );
     const result = new Map<number, Float32Array>();
@@ -3057,13 +3058,13 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   // Chunks
-  async upsertChunks(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string; embeddingColumn?: ResolvedColumn } & BatchOpts): Promise<void> {
+  async upsertChunks(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string; embeddingColumn?: ResolvedColumn; expectedRevision?: string } & BatchOpts): Promise<void> {
     if (this._chunkWritesInTransaction) return this._upsertChunksOnce(slug, chunks, opts);
     return this.batchRetry(opts?.auditSite ?? 'upsertChunks', opts?.signal,
       () => this.transaction(tx => (tx as PGLiteEngine)._upsertChunksOnce(slug, chunks, opts)), chunks.length);
   }
 
-  private async _upsertChunksOnce(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string; embeddingColumn?: ResolvedColumn }): Promise<void> {
+  private async _upsertChunksOnce(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string; embeddingColumn?: ResolvedColumn; expectedRevision?: string }): Promise<void> {
     // Normalize the same way putPage does — pages.slug is stored lowercased,
     // so a raw mixed-case slug here would miss the row it just wrote (#430).
     slug = validateSlug(slug);
@@ -3072,6 +3073,9 @@ export class PGLiteEngine implements BrainEngine {
     // remain untouched so malformed identifiers still reject the transaction.
     chunks = chunks.map(chunk => ({ ...chunk, chunk_text: sanitizeText(chunk.chunk_text) }));
     const sourceId = opts?.sourceId ?? 'default';
+    await this.lockPageKeys([{ sourceId, slug }]);
+    if (opts?.expectedRevision !== undefined) assertPageRevision(
+      await this.readPageSnapshot(slug, { sourceId }), { expectedRevision: opts.expectedRevision });
 
     // Source-scope the page-id lookup so duplicate slugs in different sources
     // do not return multiple rows or target the wrong page.
@@ -3291,7 +3295,7 @@ export class PGLiteEngine implements BrainEngine {
     );
   }
 
-  async getChunks(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; includeEmbedding?: boolean; excludePrivate?: boolean; requireSafeChunks?: boolean }): Promise<Chunk[]> {
+  async getChunks(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; includeEmbedding?: boolean; excludePrivate?: boolean; requireSafeChunks?: boolean; includeUnsealed?: boolean }): Promise<Chunk[]> {
     const sourceIds = opts?.sourceIds && opts.sourceIds.length > 0 ? opts.sourceIds : undefined;
     const source = sourceIds ?? opts?.sourceId ?? 'default';
     // S2: embedding_is_null reports the registry-ACTIVE column's truth —
@@ -3317,6 +3321,7 @@ export class PGLiteEngine implements BrainEngine {
        JOIN pages p ON p.id = cc.page_id
        WHERE p.slug = $1 AND ${sourceIds ? 'p.source_id = ANY($2::text[])' : 'p.source_id = $2'}
          ${opts?.excludePrivate ? `AND ${privatePagesFilterFragment('p')}` : ''}
+          ${opts?.includeUnsealed ? '' : `AND ${currentTextProjectionFilter('p')}`}
           ${requiresSafeChunks(opts) ? `AND ${safeChunksFilter('p')}` : ''}
        ORDER BY cc.chunk_index`,
       [slug, source]
@@ -5868,14 +5873,14 @@ export class PGLiteEngine implements BrainEngine {
       ? await this.db.query(
           `SELECT cc.* FROM content_chunks cc
            JOIN pages p ON p.id = cc.page_id
-           WHERE p.slug = $1 AND p.source_id = $2
+           WHERE ${currentTextProjectionFilter('p')} AND p.slug = $1 AND p.source_id = $2
            ORDER BY cc.chunk_index`,
           [slug, sourceId]
         )
       : await this.db.query(
           `SELECT cc.* FROM content_chunks cc
            JOIN pages p ON p.id = cc.page_id
-           WHERE p.slug = $1
+           WHERE ${currentTextProjectionFilter('p')} AND p.slug = $1
            ORDER BY cc.chunk_index`,
           [slug]
         );

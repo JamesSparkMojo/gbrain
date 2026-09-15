@@ -32,7 +32,8 @@ function overlayWithdrawals(body: string, normalizedBody: string, withdrawals: P
 export async function readPageSnapshot(query: ReadQuery, slug: string, opts?: PageSnapshotOptions): Promise<PageSnapshot | null> {
   const params: unknown[] = [slug, opts?.resolveAlias === true];
   const where = [`(p.slug=$1 OR ($2::boolean AND EXISTS (SELECT 1 FROM slug_aliases a
-    WHERE a.alias_slug=$1 AND a.source_id=p.source_id AND a.canonical_slug=p.slug)))`];
+    WHERE a.alias_slug=$1 AND a.source_id=p.source_id AND a.canonical_slug=p.slug
+      AND EXISTS (SELECT 1 FROM sources alias_source WHERE alias_source.id=a.source_id AND NOT alias_source.archived))))`];
   if (opts?.sourceIds?.length) {
     params.push(opts.sourceIds);
     where.push(`p.source_id=ANY($${params.length}::text[])`);
@@ -53,13 +54,16 @@ export async function readPageSnapshot(query: ReadQuery, slug: string, opts?: Pa
       ORDER BY w.visibility,w.fact_hash) FROM fact_withdrawals w WHERE w.source_id=p.source_id
       ${opts?.excludePrivate ? "AND w.visibility='world'" : ''}), '[]'::jsonb) AS snapshot_withdrawals,
     (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord)
-      FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_body
+      FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_body,
+    (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord)
+      FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_timeline
     FROM chosen p`, params);
   if (!rows.length) return null;
   const row = rows[0];
   const page = rowToPage(row);
   const withdrawals = row.snapshot_withdrawals as PageWithdrawal[];
   page.compiled_truth = overlayWithdrawals(page.compiled_truth, String(row.fingerprint_body ?? ''), withdrawals);
+  page.timeline = overlayWithdrawals(page.timeline, String(row.fingerprint_timeline ?? ''), withdrawals);
   return { page, tags: row.snapshot_tags as string[], revision: String(row.knowledge_revision),
     sourceIncarnation: String(row.source_incarnation), withdrawals };
 }

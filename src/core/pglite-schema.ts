@@ -1,4 +1,5 @@
 import { PERSISTENCE_SCHEMA_STATEMENTS } from './persistence/schema.ts';
+import { PAGE_PROJECTION_SCHEMA_SQL } from './page-state/projection-schema.ts';
 import { PAGE_STATE_SCHEMA_SQL } from './page-state/schema.ts';
 /**
  * PGLite schema — derived from schema-embedded.ts (Postgres schema).
@@ -1255,6 +1256,7 @@ CREATE INDEX IF NOT EXISTS page_aliases_slug_idx
   ON page_aliases (source_id, slug);
 ${PAGE_STATE_SCHEMA_SQL}
 ${PERSISTENCE_SCHEMA_STATEMENTS.join(';\n')};
+${PAGE_PROJECTION_SCHEMA_SQL}
 
 `;
 

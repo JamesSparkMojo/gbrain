@@ -65,7 +65,7 @@ import {
   EmbeddingColumnNotRegisteredError,
 } from './search/embedding-column.ts';
 import { getFtsLanguage, applyFtsLanguagePolicy } from './fts-language.ts';
-import { SAFE_FENCE_CHUNKER_VERSION, bodyWriteChunkVersion, chunkWriteInvalidation, requiresSafeChunks, safeChunksFilter } from './search/safe-chunks.ts';
+import { SAFE_FENCE_CHUNKER_VERSION, bodyWriteChunkVersion, chunkWriteInvalidation, currentTextProjectionFilter, requiresSafeChunks, safeChunksFilter } from './search/safe-chunks.ts';
 import type {
   Page, PageInput, PageFilters, PageType,
   Chunk, ChunkInput, StaleChunkRow, StalePageRow, ChunklessPageRow,
@@ -2150,8 +2150,8 @@ export class PostgresEngine implements BrainEngine {
     const quotedCol = quoteIdentifier(column);
     const sql = this.sql;
     const rawQuery = `
-      SELECT id, ${quotedCol} AS embedding FROM content_chunks
-      WHERE id = ANY($1::int[]) AND ${quotedCol} IS NOT NULL
+      SELECT cc.id, cc.${quotedCol} AS embedding FROM content_chunks cc JOIN pages p ON p.id=cc.page_id
+      WHERE cc.id = ANY($1::int[]) AND cc.${quotedCol} IS NOT NULL AND ${currentTextProjectionFilter('p')}
     `;
     const rows = await sql.unsafe(rawQuery, [ids] as Parameters<typeof sql.unsafe>[1]);
     const result = new Map<number, Float32Array>();
@@ -2241,13 +2241,13 @@ export class PostgresEngine implements BrainEngine {
   }
 
   // Chunks
-  async upsertChunks(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string; embeddingColumn?: ResolvedColumn } & BatchOpts): Promise<void> {
+  async upsertChunks(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string; embeddingColumn?: ResolvedColumn; expectedRevision?: string } & BatchOpts): Promise<void> {
     if (this._chunkWritesInTransaction) return this._upsertChunksOnce(slug, chunks, opts);
     return this.batchRetry(opts?.auditSite ?? 'upsertChunks', opts?.signal,
       () => this.transaction(tx => (tx as PostgresEngine)._upsertChunksOnce(slug, chunks, opts)), chunks.length);
   }
 
-  private async _upsertChunksOnce(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string; embeddingColumn?: ResolvedColumn }): Promise<void> {
+  private async _upsertChunksOnce(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string; embeddingColumn?: ResolvedColumn; expectedRevision?: string }): Promise<void> {
     // Normalize the same way putPage does — pages.slug is stored lowercased,
     // so a raw mixed-case slug here would miss the row it just wrote (#430).
     slug = validateSlug(slug);
@@ -2257,6 +2257,9 @@ export class PostgresEngine implements BrainEngine {
     chunks = chunks.map(chunk => ({ ...chunk, chunk_text: sanitizeText(chunk.chunk_text) }));
     const sql = this.sql;
     const sourceId = opts?.sourceId ?? 'default';
+    await this.lockPageKeys([{ sourceId, slug }]);
+    if (opts?.expectedRevision !== undefined) assertPageRevision(
+      await this.readPageSnapshot(slug, { sourceId }), { expectedRevision: opts.expectedRevision });
 
     // Source-scope the page-id lookup. Without this filter, multi-source
     // brains where the slug exists in 2+ sources return >1 row and the
@@ -2489,7 +2492,7 @@ export class PostgresEngine implements BrainEngine {
     );
   }
 
-  async getChunks(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; includeEmbedding?: boolean; excludePrivate?: boolean; requireSafeChunks?: boolean }): Promise<Chunk[]> {
+  async getChunks(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; includeEmbedding?: boolean; excludePrivate?: boolean; requireSafeChunks?: boolean; includeUnsealed?: boolean }): Promise<Chunk[]> {
     const sourceIds = opts?.sourceIds && opts.sourceIds.length > 0 ? opts.sourceIds : undefined;
     const scalarSourceId = opts?.sourceId ?? 'default';
     // S2: embedding_is_null reports the registry-ACTIVE column's truth —
@@ -2522,6 +2525,7 @@ export class PostgresEngine implements BrainEngine {
         JOIN pages p ON p.id = cc.page_id
         WHERE p.slug = ${slug} AND ${scope}
           ${opts?.excludePrivate ? tx.unsafe(`AND ${privatePagesFilterFragment('p')}`) : tx``}
+          ${opts?.includeUnsealed ? tx`` : tx.unsafe(`AND ${currentTextProjectionFilter('p')}`)}
           ${requiresSafeChunks(opts) ? tx.unsafe(`AND ${safeChunksFilter('p')}`) : tx``}
         ORDER BY cc.chunk_index
       `;
@@ -5170,13 +5174,13 @@ export class PostgresEngine implements BrainEngine {
       ? await conn`
           SELECT cc.* FROM content_chunks cc
           JOIN pages p ON p.id = cc.page_id
-          WHERE p.slug = ${slug} AND p.source_id = ${sourceId}
+          WHERE ${this.sql.unsafe(currentTextProjectionFilter('p'))} AND p.slug = ${slug} AND p.source_id = ${sourceId}
           ORDER BY cc.chunk_index
         `
       : await conn`
           SELECT cc.* FROM content_chunks cc
           JOIN pages p ON p.id = cc.page_id
-          WHERE p.slug = ${slug}
+          WHERE ${this.sql.unsafe(currentTextProjectionFilter('p'))} AND p.slug = ${slug}
           ORDER BY cc.chunk_index
         `;
     return rows.map((r) => rowToChunk(r as Record<string, unknown>, true));

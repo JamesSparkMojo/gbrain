@@ -1071,7 +1071,7 @@ export async function importFromContent(
     }
     // Seal only the completed, full-body sanitized replacement. A body-only
     // write or a failed transaction must never certify old stored fragments.
-    await tx.executeRaw('UPDATE pages SET chunker_version = $1 WHERE source_id = $2 AND slug = $3',
+    await tx.executeRaw('UPDATE pages SET chunker_version = $1,text_projection_revision=knowledge_revision WHERE source_id = $2 AND slug = $3',
       [MARKDOWN_CHUNKER_VERSION, txOpts.sourceId, slug]);
 
     // v0.19.0 E1 — doc↔impl linking: if this markdown page cites code paths
@@ -1588,7 +1588,7 @@ export async function importCodeFile(
     } else {
       await tx.deleteChunks(slug, txOpts);
     }
-    await tx.executeRaw('UPDATE pages SET chunker_version = $1 WHERE source_id = $2 AND slug = $3',
+    await tx.executeRaw('UPDATE pages SET chunker_version = $1,text_projection_revision=knowledge_revision WHERE source_id = $2 AND slug = $3',
       [MARKDOWN_CHUNKER_VERSION, txOpts.sourceId, slug]);
   });
 
@@ -1763,7 +1763,7 @@ export async function withImportTransaction(
       }
     }
     if (spec.safeChunks && spec.chunks !== undefined) {
-      await tx.executeRaw('UPDATE pages SET chunker_version = $1 WHERE source_id = $2 AND slug = $3',
+      await tx.executeRaw('UPDATE pages SET chunker_version = $1,text_projection_revision=knowledge_revision WHERE source_id = $2 AND slug = $3',
         [MARKDOWN_CHUNKER_VERSION, sourceId, spec.slug]);
     }
     if (spec.after) await spec.after(tx);

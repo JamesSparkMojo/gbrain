@@ -1,3 +1,4 @@
+import { readProjectionSnapshot, installPageProjection, installPageEmbeddings } from '../core/page-state/projections.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { currentEmbeddingSignature } from '../core/embedding.ts';
 import type { ChunkInput } from '../core/types.ts';
@@ -978,7 +979,8 @@ async function embedPage(
   quiet?: boolean,
 ) {
   const opts = sourceId ? { sourceId } : undefined;
-  const page = await engine.getPage(slug, opts);
+  const snapshot = await engine.readPageSnapshot(slug, opts);
+  const page = snapshot?.page;
   if (!page) {
     throw new Error(`Page not found: ${slug}`);
   }
@@ -1011,7 +1013,7 @@ async function embedPage(
     }
 
     if (inputs.length > 0) {
-      await engine.upsertChunks(slug, inputs, opts);
+      await installPageProjection(engine, snapshot!, inputs, { seal: true });
       chunks = await engine.getChunks(slug, opts);
     }
   } else if (!dryRun) {
@@ -1084,7 +1086,8 @@ async function embedPage(
     token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
   }));
 
-  await engine.upsertChunks(slug, updated, opts);
+  if (!await installPageEmbeddings(engine, { snapshot: snapshot!, chunks }, updated,
+    failed === 0 && toEmbed.length === chunks.length ? currentEmbeddingSignature() ?? undefined : undefined)) return;
   // v0.41.31: stamp provenance so a later model/dims swap is detectable as
   // stale. embedPage is the per-slug path used by `gbrain embed <slug>` AND
   // by `gbrain sync`'s post-import embed step (runEmbedCore({slugs})).
@@ -1094,12 +1097,6 @@ async function embedPage(
   // such a page and then stamps it. #3037: a partial failure leaves failed
   // chunks NULL, so don't stamp then either.
   if (failed === 0 && toEmbed.length === chunks.length) {
-    // D9 honesty: no stamp when the gateway is unconfigured — a wrong
-    // signature is worse than none (NULL = unknown provenance).
-    const stampSig = currentEmbeddingSignature();
-    if (stampSig) {
-      await engine.setPageEmbeddingSignature(slug, { sourceId, signature: stampSig });
-    }
     // #3507: a fully re-embedded per_chunk_synopsis page landed at the
     // title tier — keep the stamped mode honest.
     await restampIfDemotedToTitleTier(engine, page, slug, page.source_id);
@@ -1226,7 +1223,10 @@ async function embedAll(
     // target the correct (source_id, slug) row, not the 'default' source.
     const pageSourceId = page.source_id;
     const pageOpts = pageSourceId ? { sourceId: pageSourceId } : undefined;
-    const chunks = await observed(pacer, () => engine.getChunks(page.slug, pageOpts));
+    const prepared = await observed(pacer, () => readProjectionSnapshot(engine, page.slug, pageSourceId));
+    if (!prepared) return;
+    page = prepared.snapshot.page;
+    const chunks = prepared.chunks;
     const toEmbed = chunks; // staleOnly path handled above via embedAllStale
 
     result.total_chunks += chunks.length;
@@ -1272,17 +1272,13 @@ async function embedAll(
         embedding: embeddingMap.get(c.chunk_index) ?? undefined,
         token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
       }));
-      await observed(pacer, () => engine.upsertChunks(page.slug, updated, pageOpts));
+      if (!await observed(pacer, () => installPageEmbeddings(engine, prepared, updated, failed === 0 ? signature : undefined))) return;
       // v0.41.31: stamp embedding provenance so a later model swap is
       // detectable as stale. #3037: not on partial failure — failed chunks
       // stay NULL under unknown provenance. D9: no stamp without a gateway
       // (signature undefined) — a wrong stamp is worse than none.
       if (failed === 0) {
-        if (signature) {
-          await observed(pacer, () =>
-            engine.setPageEmbeddingSignature(page.slug, { sourceId: pageSourceId, signature }),
-          );
-        }
+
         // #3507: --all fully re-embeds; a per_chunk_synopsis page landed at
         // the title tier — keep the stamped mode honest. #3037: gated on
         // failed === 0 — a partially-failed page was NOT fully re-embedded,
@@ -1498,15 +1494,15 @@ async function healChunklessPages(
         // rather than clobber if a concurrent writer already chunked this
         // page since we listed it.
         const [livePage, stillChunkless] = await Promise.all([
-          observed(activePacer, () => engine.getPage(page.slug, { sourceId: page.source_id })),
+          observed(activePacer, () => engine.readPageSnapshot(page.slug, { sourceId: page.source_id })),
           observed(activePacer, () => engine.getChunks(page.slug, { sourceId: page.source_id })),
         ]);
         if (!livePage || stillChunkless.length > 0) continue;
-        const inputs = buildInputs(livePage.compiled_truth, livePage.timeline);
+        const inputs = buildInputs(livePage.page.compiled_truth, livePage.page.timeline);
         if (inputs.length === 0) continue;
 
         await observed(activePacer, () =>
-          engine.upsertChunks(page.slug, inputs, { sourceId: page.source_id }),
+          installPageProjection(engine, livePage, inputs, { seal: true }),
         );
         pagesHealed++;
         try {
@@ -1947,16 +1943,16 @@ async function embedAllStale(
           // silently stripping contextual prefixes — `embed --stale` is the
           // NORMAL post-model-migration path, so raw-text embedding here
           // quietly converted whole corpora to the unwrapped convention.
-          const pageRow = await observed(pacer, () => engine.getPage(slug, { sourceId: keySourceId }));
-          // #3037: per-chunk failure isolation — one bad chunk costs one
-          // chunk, not the whole page's siblings. The wrapped texts feed the
-          // fan-out too, so an isolation retry never strips the prefixes.
+          const prepared = await observed(pacer, () => readProjectionSnapshot(engine, slug, keySourceId));
+          if (!prepared) return;
+          const selected = new Map(stale.map(c => [c.chunk_index, c]));
+          const existing = prepared.chunks;
+          stale = existing.filter(c => selected.get(c.chunk_index)?.chunk_text === c.chunk_text)
+            .map(c => ({ ...selected.get(c.chunk_index)!, ...c }));
+          if (!stale.length) return;
+          const pageRow = prepared.snapshot.page;
           const { embeddings, failed, firstError } = await embedPageTexts(
-            wrapChunkTextsForStoredMode(pageRow, stale),
-            { abortSignal: effectiveSignal },
-          );
-          // Re-fetch existing chunks and merge to avoid deleting non-stale chunks.
-          const existing = await observed(pacer, () => engine.getChunks(slug, { sourceId: keySourceId }));
+            wrapChunkTextsForStoredMode(pageRow, stale), { abortSignal: effectiveSignal });
           const staleIdxToEmbedding = new Map<number, Float32Array>();
           for (let j = 0; j < stale.length; j++) {
             const emb = embeddings[j];
@@ -1972,7 +1968,7 @@ async function embedAllStale(
             embedding: staleIdxToEmbedding.get(c.chunk_index) ?? undefined,
             token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
           }));
-          await observed(pacer, () => engine.upsertChunks(slug, merged, { sourceId: keySourceId }));
+          if (!await observed(pacer, () => installPageEmbeddings(engine, prepared, merged))) return;
           // Stamp provenance from DB state, not this batch (#4825): the keyset
           // drain has no page alignment, so a page straddling a batch boundary
           // is never wholly in one batch — the batch that lands its last chunk

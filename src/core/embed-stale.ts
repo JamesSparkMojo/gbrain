@@ -1,3 +1,4 @@
+import { readProjectionSnapshot, installPageEmbeddings } from './page-state/projections.ts';
 /**
  * Stale-chunk embedding loop, extracted from `src/commands/embed.ts:embedAllStale`
  * for reuse by the v0.40 `embed-backfill` Minion handler (D15.2 — codex
@@ -172,23 +173,26 @@ export async function stampIfPageProvenanceComplete(
   sourceId: string,
   { signature, column }: ProvenanceStamp,
 ): Promise<boolean> {
+  return engine.transaction(async tx => {
+    await tx.lockPageKeys([{ sourceId, slug }]);
   // Signature is `<provider:model>:<dims>`; the model part is what
   // upsertChunks records in content_chunks.model.
   const model = signature.slice(0, signature.lastIndexOf(':'));
   const colId = quoteIdentifier(column);
-  const rows = await engine.executeRaw<{ complete: boolean }>(
+  const rows = await tx.executeRaw<{ complete: boolean }>(
     `SELECT count(*) > 0
             AND bool_and(COALESCE(
               cc.${colId} IS NOT NULL
               AND cc.model = $1
               AND cc.embedded_text_hash = md5(cc.chunk_text), false)) AS complete
        FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
-      WHERE p.slug = $2 AND p.source_id = $3`,
+      WHERE p.slug = $2 AND p.source_id = $3 AND p.text_projection_revision=p.knowledge_revision`,
     [model, slug, sourceId],
   );
   if (rows[0]?.complete !== true) return false;
-  await engine.setPageEmbeddingSignature(slug, { sourceId, signature });
+  await tx.setPageEmbeddingSignature(slug, { sourceId, signature });
   return true;
+  });
 }
 
 /** Probe input for `probeEmbedder`. Exported so tests can detect probe calls. */
@@ -282,7 +286,9 @@ export async function embedStalePages(
       // SUP-3874: split legacy oversized rows before embedding so a single
       // pre-cap chunk cannot permanently fail the page.
       await healOversizedPageChunks(engine, slug, { sourceId });
-      const existing = await engine.getChunks(slug, { sourceId });
+      const prepared = await readProjectionSnapshot(engine, slug, sourceId);
+      if (!prepared) continue;
+      const existing = prepared.chunks;
       const staleIdx = new Set(
         (await engine.executeRaw<{ chunk_index: number }>(
           `SELECT cc.chunk_index
@@ -294,7 +300,7 @@ export async function embedStalePages(
       );
       if (staleIdx.size === 0) continue;
       const stale = existing.filter(c => staleIdx.has(c.chunk_index));
-      const pageRow = await engine.getPage(slug, { sourceId });
+      const pageRow = prepared.snapshot.page;
       const embeddings = await embedFn(
         wrapChunkTextsForStoredMode(pageRow, stale),
         { abortSignal: opts.signal },
@@ -310,10 +316,8 @@ export async function embedStalePages(
         embedding: staleIdxToEmbedding.get(c.chunk_index) ?? undefined,
         token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
       }));
-      await engine.upsertChunks(slug, merged, { sourceId });
-      if (opts.embeddingSignature && stale.length === existing.length) {
-        await engine.setPageEmbeddingSignature(slug, { sourceId, signature: opts.embeddingSignature });
-      }
+      if (!await installPageEmbeddings(engine, prepared, merged,
+        opts.embeddingSignature && stale.length === existing.length ? opts.embeddingSignature : undefined)) continue;
       if (stale.length === existing.length) {
         await restampIfDemotedToTitleTier(engine, pageRow, slug, sourceId);
       }
@@ -463,16 +467,16 @@ export async function embedStaleForSource(
         // re-embed reproduces the page's wrapping convention instead of
         // silently stripping contextual prefixes (mirrors
         // src/commands/embed.ts:embedAllStale).
-        const pageRow = await observed(pacer, () =>
-          engine.getPage(slug, { sourceId: keySourceId }),
-        );
-        const embeddings = await embedFn(
-          wrapChunkTextsForStoredMode(pageRow, stale),
-          { abortSignal: signal },
-        );
-        const existing = await observed(pacer, () =>
-          engine.getChunks(slug, { sourceId: keySourceId }),
-        );
+        const prepared = await observed(pacer, () => readProjectionSnapshot(engine, slug, keySourceId));
+        if (!prepared) return;
+        const selected = new Map(stale.map(c => [c.chunk_index, c]));
+        const existing = prepared.chunks;
+        stale = existing.filter(c => selected.get(c.chunk_index)?.chunk_text === c.chunk_text)
+          .map(c => ({ ...selected.get(c.chunk_index)!, ...c }));
+        if (!stale.length) return;
+        const pageRow = prepared.snapshot.page;
+        const embeddings = await embedFn(wrapChunkTextsForStoredMode(pageRow, stale), { abortSignal: signal });
+
         const staleIdxToEmbedding = new Map<number, Float32Array>();
         for (let j = 0; j < stale.length; j++) {
           staleIdxToEmbedding.set(stale[j].chunk_index, embeddings[j]);
@@ -484,7 +488,7 @@ export async function embedStaleForSource(
           embedding: staleIdxToEmbedding.get(c.chunk_index) ?? undefined,
           token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
         }));
-        await observed(pacer, () => engine.upsertChunks(slug, merged, { sourceId: keySourceId }));
+        if (!await observed(pacer, () => installPageEmbeddings(engine, prepared, merged))) return;
         // Stamp provenance from DB state, not this batch (#4825): the keyset
         // drain has no page alignment, so a page straddling a batch boundary
         // is never wholly in one batch — the batch that lands its last chunk

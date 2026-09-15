@@ -34,7 +34,7 @@ export function sanitizeRemoteBody(body: string): string {
     if (open.facts) {
       try {
         const parsed = parseFactsFence(body.slice(open.start, cursor));
-        if (parsed.warnings.length === 0) output.push(renderFactsTable(parsed.facts.filter(row => row.visibility === 'world')));
+        if (parsed.warnings.length === 0) output.push(renderFactsTable(parsed.facts.filter(row => row.visibility === 'world' && !row.forgotten)));
       } catch {
         // A protected block that cannot be parsed is omitted, never echoed.
       }

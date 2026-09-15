@@ -1,23 +1,52 @@
 import type { BrainEngine } from '../engine.ts';
 import { parseFactsFence, renderFactsTable, replaceOrInsertFactsFence, type ParsedFact } from '../facts-fence.ts';
 
-/** Commit intent before any best-effort filesystem mirror; never inferred from TTL. */
-export async function recordFactWithdrawal(engine: BrainEngine, id: number, sourceId: string, worldOnly = false): Promise<void> {
-  await engine.transaction(async tx => {
-    // Same serialization point as the insert trigger; no disk IO under lock.
+export interface WithdrawalCommit {
+  withdrawn: boolean;
+  pages: Array<{ sourceId: string; slug: string; revision: string }>;
+}
+
+/** DB-first: no filesystem ownership, provider work or root lock is required. */
+export async function recordFactWithdrawal(
+  engine: BrainEngine, id: number, sourceId: string, worldOnly = false,
+  opts: { requestId?: string } = {},
+): Promise<WithdrawalCommit> {
+  return engine.transaction(async tx => {
+    // A managed caller takes this EXCLUSIVE source lock before authority,
+    // counters and request rows. Repeating an already-held lock is safe.
     await tx.executeRaw('SELECT id FROM sources WHERE id=$1 FOR UPDATE', [sourceId]);
+    const visible = await tx.executeRaw<{ visibility: string; fact: string }>(
+      `SELECT visibility,fact FROM facts WHERE id=$1 AND source_id=$2
+        AND ($3::boolean=false OR visibility='world')`, [id, sourceId, worldOnly]);
+    if (!visible.length) return { withdrawn: false, pages: [] };
+    // Derived provenance can be incomplete or already rebuilt. Conservatively
+    // invalidate this source's pages rather than miss an unindexed duplicate.
+    const pageKeys = await tx.executeRaw<{ slug: string }>('SELECT slug FROM pages WHERE source_id=$1 ORDER BY slug', [sourceId]);
+    await tx.lockPageKeys(pageKeys.map(page => ({ sourceId, slug: page.slug })));
     const rows = await tx.executeRaw<{ visibility: string; fact: string }>(
       `SELECT visibility,fact FROM facts WHERE id=$1 AND source_id=$2
         AND ($3::boolean=false OR visibility='world') FOR UPDATE`, [id, sourceId, worldOnly]);
-    if (!rows.length) return;
+    if (!rows.length) return { withdrawn: false, pages: [] };
     const row = rows[0];
-    await tx.executeRaw(`INSERT INTO fact_withdrawals(source_id,visibility,fact_hash)
-      VALUES ($1,$2,gbrain_fact_fingerprint($3)) ON CONFLICT DO NOTHING`, [sourceId,row.visibility,row.fact]);
-    // Repeated instances of the same claim cannot remain active after recall
-    // forgets one of them. Visibility and source stay exact authorization axes.
+    const inserted = await tx.executeRaw(`INSERT INTO fact_withdrawals(source_id,visibility,fact_hash)
+      VALUES ($1,$2,gbrain_fact_fingerprint($3)) ON CONFLICT DO NOTHING RETURNING fact_hash`, [sourceId,row.visibility,row.fact]);
     await tx.executeRaw(`UPDATE facts SET expired_at=now(),valid_until=LEAST(COALESCE(valid_until,now()),now())
       WHERE source_id=$1 AND visibility=$2 AND gbrain_fact_fingerprint(fact)=gbrain_fact_fingerprint($3)
         AND expired_at IS NULL`, [sourceId,row.visibility,row.fact]);
+    if (!inserted.length) return { withdrawn: false, pages: [] };
+    // Logical revision and projection invalidation commit with the withdrawal.
+    // The revision trigger queues durable rebuild work even for unmanaged calls.
+    const pages = await tx.executeRaw<{ id: number; slug: string; knowledge_revision: string }>(
+      `UPDATE pages SET knowledge_revision=gen_random_uuid(),text_projection_revision=NULL,embedding_signature=NULL
+        WHERE source_id=$1 RETURNING id,slug,knowledge_revision`, [sourceId]);
+    await tx.executeRaw('DELETE FROM content_chunks WHERE page_id IN (SELECT id FROM pages WHERE source_id=$1)', [sourceId]);
+    if (opts.requestId) {
+      for (const page of pages) await tx.executeRaw(`INSERT INTO persistence_effects(request_id,kind,revision,data)
+        VALUES ($1::uuid,$2,$3::uuid,$4::text::jsonb) ON CONFLICT(request_id,kind) DO NOTHING`,
+      [opts.requestId, `withdrawal-mirror:${page.id}`, page.knowledge_revision,
+        JSON.stringify({ source_id: sourceId, slug: page.slug, revision: page.knowledge_revision })]);
+    }
+    return { withdrawn: true, pages: pages.map(page => ({ sourceId, slug: page.slug, revision: page.knowledge_revision })) };
   });
 }
 
