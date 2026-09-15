@@ -12,7 +12,7 @@ import {
 } from '../core/embed-stall.ts';
 import { createProgress, type ProgressReporter } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
-import { assertEmbeddingEnabled } from '../core/embedding-dim-check.ts';
+import { assertEmbeddingEnabled, readFactsEmbeddingDim } from '../core/embedding-dim-check.ts';
 import { invalidateStaleSignatureEmbeddingsGuarded } from '../core/embedding-invalidation.ts';
 import { loadConfig } from '../core/config.ts';
 import { slog, serr } from '../core/console-prefix.ts';
@@ -27,7 +27,8 @@ import {
   type PaceKeyOverrides,
 } from '../core/pace-mode.ts';
 import { tryAcquireDbLock, type DbLockHandle } from '../core/db-lock.ts';
-import { embedBackfillLockId } from '../core/embed-backfill-lock.ts';
+import { embedBackfillLockId, embedFactsBackfillLockId, EMBED_BACKFILL_LOCK_TTL_MIN } from '../core/embed-backfill-lock.ts';
+import { assertValidSourceId } from '../core/source-id.ts';
 import { AITransientError } from '../core/ai/errors.ts';
 import { wrapChunkTextsForStoredMode } from '../core/embedding-context.ts';
 import {
@@ -827,6 +828,21 @@ export function isKeylessStaleRefusal(args: string[], embeddingDisabled: boolean
     && embeddingDisabled === true;
 }
 
+/**
+ * `--name <v>` / `--name=<v>` for the --facts branch. undefined = flag absent;
+ * '' = flag present without a usable value (nothing after it, or the next
+ * token is itself a flag) so the caller can fail closed instead of running
+ * unscoped.
+ */
+function factsFlagValue(args: string[], name: string): string | undefined {
+  const inline = args.find((a) => a.startsWith(`${name}=`));
+  if (inline !== undefined) return inline.slice(name.length + 1);
+  const i = args.indexOf(name);
+  if (i < 0) return undefined;
+  const v = args[i + 1];
+  return v === undefined || v.startsWith('--') ? '' : v;
+}
+
 export async function runEmbed(engine: BrainEngine, args: string[]): Promise<EmbedResult | undefined> {
   // Keyless clean refusal — see isKeylessStaleRefusal. Checked BEFORE the
   // background block so we never queue a job that can only fail. stderr only;
@@ -852,30 +868,108 @@ export async function runEmbed(engine: BrainEngine, args: string[]): Promise<Emb
     // --background is the chunk-only embed-backfill job; the facts pass is
     // foreground-only, so refuse rather than silently ignore the flag.
     if (!args.includes('--stale') || args.includes('--background')) {
-      serr('Usage: gbrain embed --stale --facts [--dry-run] [--batch-size N] [--source <id>] [--json]');
+      serr('Usage: gbrain embed --stale --facts [--dry-run] [--batch-size N] [--source <id>|--source=<id>] [--json]');
       process.exit(1);
     }
     const dryRun = args.includes('--dry-run');
+    // #4867 review: flag values fail closed, BEFORE the creds preflight and any
+    // provider call. `args[i + 1]` turned a missing / flag-like / inline
+    // (`--source=x`) value into undefined and drained EVERY source;
+    // `parseInt(...) || undefined` turned `0` / `abc` into the default.
+    const sourceRaw = factsFlagValue(args, '--source');
+    let sourceId: string | undefined;
+    if (sourceRaw !== undefined) {
+      if (sourceRaw === '') {
+        serr('--source requires a value: --source <id> or --source=<id>');
+        process.exit(1);
+      }
+      try {
+        assertValidSourceId(sourceRaw);
+      } catch (e) {
+        serr(e instanceof Error ? e.message : String(e));
+        process.exit(1);
+      }
+      const known = await engine.executeRaw<{ id: string }>(`SELECT id FROM sources WHERE id = $1`, [sourceRaw]);
+      if (known.length === 0) {
+        serr(`source "${sourceRaw}" does not exist — check the spelling with \`gbrain sources list\`.`);
+        process.exit(1);
+      }
+      sourceId = sourceRaw;
+    }
+    const batchSizeRaw = factsFlagValue(args, '--batch-size');
+    const batchSize = batchSizeRaw === undefined ? undefined : Number.parseInt(batchSizeRaw, 10);
+    if (batchSize !== undefined && (!Number.isInteger(batchSize) || batchSize < 1)) {
+      serr(`Invalid --batch-size "${batchSizeRaw}". Expected a positive integer.`);
+      process.exit(1);
+    }
     if (!dryRun) {
       assertEmbeddingEnabled(loadConfig());
       const { validateEmbeddingCreds } = await import('../core/embed-preflight.ts');
       validateEmbeddingCreds();
+      // #4867 review: facts.embedding width vs the configured width, mirroring
+      // preflightDimMismatch on the chunk path. A halfvec(1280) column under a
+      // 1536 config paid the provider for every batch and failed every write.
+      // Computed inside the try, acted on outside it (process.exit must not be
+      // swallowed); an unreadable column / unconfigured gateway falls open.
+      let drift: { have: number; type: string; want: number } | null = null;
+      try {
+        const col = await readFactsEmbeddingDim(engine);
+        const { getEmbeddingDimensions } = await import('../core/ai/gateway.ts');
+        const want = getEmbeddingDimensions();
+        if (col.dims !== null && col.dims !== want) drift = { have: col.dims, type: col.columnType ?? 'vector', want };
+      } catch { /* pre-v40 schema or unconfigured gateway: the drain surfaces real errors */ }
+      if (drift) {
+        serr(`[embed] facts.embedding is ${drift.type}(${drift.have}) but the configured embedding model produces ${drift.want}-d vectors; refusing to call the provider. Run \`gbrain doctor\` for the paste-ready fix, or follow docs/embedding-migrations.md (\`gbrain migrate embeddings\`) to move the brain to the configured model — or set embedding_model/embedding_dimensions to match the column.`);
+        process.exit(1);
+      }
     }
-    const srcI = args.indexOf('--source');
-    const bsI = args.indexOf('--batch-size');
+    const scope = sourceId ? `source "${sourceId}"` : 'all sources';
+    // Single-flight (#4867 review): a cron run plus a hand run paid the
+    // provider twice for the same NULL rows. Own key (not the chunk drain's);
+    // dry-run stays lock-free; a lock-subsystem error fails open like the
+    // chunk path (undefined = proceed unlocked, null = held elsewhere).
+    let lock: DbLockHandle | null | undefined;
+    if (!dryRun) {
+      try {
+        lock = await tryAcquireDbLock(engine, embedFactsBackfillLockId(), EMBED_BACKFILL_LOCK_TTL_MIN);
+      } catch {
+        lock = undefined;
+      }
+      if (lock === null) {
+        serr(`  [embed] another facts backfill is already running (${scope}); skipping (single-flight).`);
+        process.exit(1);
+      }
+    }
+    // Progress rides the shared reporter (stderr; --quiet / --progress-json
+    // honored). The drain reports cumulative done per batch, so tick the delta.
+    const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
+    let progressDone = -1;
     const { embedStaleFacts } = await import('../core/embed-facts.ts');
-    const r = await embedStaleFacts(engine, {
-      dryRun,
-      sourceId: srcI >= 0 ? args[srcI + 1] : undefined,
-      batchSize: bsI >= 0 ? (parseInt(args[bsI + 1] ?? '', 10) || undefined) : undefined,
-    });
-    if (args.includes('--json')) console.log(JSON.stringify(r, null, 2));
-    else if (dryRun) slog(`[dry-run] Would embed ${r.would_embed} active fact(s)`);
-    else {
-      slog(`Embedded ${r.embedded} fact(s); ${r.total_stale - r.embedded} remain stale.`);
-      if (r.failures > 0) serr(`[embed] Failed to embed ${r.failures} fact(s): ${r.failure_samples[0] ?? 'unknown error'}`);
+    try {
+      const r = await embedStaleFacts(engine, {
+        dryRun,
+        sourceId,
+        batchSize,
+        onProgress: (done, total) => {
+          if (progressDone < 0) {
+            progress.start('embed.facts', total);
+            progressDone = 0;
+          }
+          progress.tick(done - progressDone);
+          progressDone = done;
+        },
+      });
+      if (args.includes('--json')) console.log(JSON.stringify(r, null, 2));
+      else if (dryRun) slog(`[dry-run] Would embed ${r.would_embed} active fact(s) (${scope})`);
+      else {
+        slog(`Embedded ${r.embedded} fact(s) (${scope}); ${r.total_stale - r.embedded} remain stale.`);
+        if (r.failures > 0) serr(`[embed] Failed to embed ${r.failures} fact(s): ${r.failure_samples[0] ?? 'unknown error'}`);
+      }
+      return { embedded: r.embedded, skipped: 0, would_embed: r.would_embed, total_chunks: r.total_stale, pages_processed: 0, failures: r.failures, failure_samples: r.failure_samples, dryRun, chunkless_pages_healed: 0 };
+    } finally {
+      if (progressDone >= 0) progress.finish();
+      if (lock) await lock.release().catch(() => { /* best-effort */ });
     }
-    return { embedded: r.embedded, skipped: 0, would_embed: r.would_embed, total_chunks: r.total_stale, pages_processed: 0, failures: r.failures, failure_samples: r.failure_samples, dryRun, chunkless_pages_healed: 0 };
   }
 
   // v0.36+ T7: --background submits via Minion queue, returns job_id to
