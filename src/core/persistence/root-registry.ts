@@ -55,7 +55,12 @@ function markerExists(path: string): boolean {
 export function hasManagedRootMarker(path: string): boolean {
   let current = canonicalFilesystemPath(path);
   for (;;) {
+    // A prepared claim is already a durable refusal, including when its target
+    // directory does not yet exist. Ownership still requires SQL/native proof.
+    const reservation = join(dirname(current), `.gbrain-owner-${createHash('sha256').update(current).digest('hex')}.json`);
+    if (markerExists(reservation)) return true;
     if (existsSync(current) && statSync(current).isDirectory()) {
+      if (markerExists(join(current, '.gbrain-owner.json'))) return true;
       const metadata = gitMetadataDirectory(current);
       if (markerExists(join(current, '.gbrain-managed')) || metadata && markerExists(join(metadata, 'gbrain-managed.json'))) return true;
     }
