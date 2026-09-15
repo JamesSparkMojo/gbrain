@@ -12,6 +12,7 @@ import { clearResolvedRecovery, completeWrite, getWriteRequestById, lockCounters
 import { isTerminal, principalKey, requestPrincipal, type RecoveryRecord, type WriteRequest } from './model.ts';
 import type { NativeLockHandle } from './native-lock.ts';
 import { withCoordinatedWrite } from './context.ts';
+import { withFilesystemPublication } from './filesystem-guard.ts';
 
 export interface PreparedMutation {
   observedRevision: string | null;
@@ -119,7 +120,8 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
         await hooks.boundary?.('before_publication', row);
         // Mark before the call: a rename followed by an fsync error still needs recovery.
         published = true;
-        try { publishFile(prepared.file); } catch (error) { filesystemFailed = true; throw error; }
+        try { await withFilesystemPublication([prepared.file.root], async () => publishFile(prepared.file!)); }
+        catch (error) { filesystemFailed = true; throw error; }
         await hooks.boundary?.('after_publication', row);
       }
       const outcome = await withCoordinatedWrite(tx, [row.source_id], () => prepared.apply(tx));
@@ -177,7 +179,8 @@ export async function recoverPublication(engine: BrainEngine, id: string, hostId
         return { ...current, state: 'recovering' as const, blocked_reason: 'unexpected_file_bytes' };
       }
       if (actual === record.afterHash && actual !== record.beforeHash) {
-        publishFile({ path: record.path, root: record.root, content: record.before === null ? null : Buffer.from(record.before, 'base64') });
+        await withFilesystemPublication([record.root], async () => publishFile({ path: record.path, root: record.root,
+          content: record.before === null ? null : Buffer.from(record.before, 'base64') }));
         if (record.mode !== null && existsSync(record.path)) chmodSync(record.path, record.mode);
       }
       // Withdrawal is authoritative DB state and is never rolled back here.

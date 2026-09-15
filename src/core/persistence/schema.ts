@@ -1,3 +1,4 @@
+import { MANAGED_WRITER_GUARD_SQL } from './writer-guard-schema.ts';
 /** Durable infrastructure: never reconstruct or discard these rows during page reindexing. */
 export const PERSISTENCE_SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS persistence_brain (
@@ -95,4 +96,5 @@ export const PERSISTENCE_SCHEMA_STATEMENTS = [
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE(request_id,kind)
   )`,
+  MANAGED_WRITER_GUARD_SQL,
 ] as const;

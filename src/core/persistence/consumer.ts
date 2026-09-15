@@ -4,6 +4,7 @@ import { claimNextWrite, getWriteRequestById, releaseUnpublishedClaim, renewWrit
 import { finishUnpublishedFailure, publishMutation, recoverPublication, type PreparedMutation } from './coordinator.ts';
 import { localHostId } from './identity.ts';
 import { isTerminal, type WriteRequest } from './model.ts';
+import { refreshManagedFilesystemRoots } from './filesystem-guard.ts';
 
 export type PrepareMutation = (engine: BrainEngine, row: WriteRequest, config: GBrainConfig) => Promise<PreparedMutation>;
 export class PersistenceConsumer {
@@ -30,6 +31,7 @@ export class PersistenceConsumer {
   }
   private async doTick(): Promise<void> {
     if (this.stopping) return;
+    await refreshManagedFilesystemRoots(this.engine);
     // Recover only our owner roots. Kernel exclusion, not elapsed heartbeat,
     // proves that a previous process can no longer be publishing this root.
     const recovery = await this.engine.executeRaw<WriteRequest>(`SELECT r.* FROM persistence_requests r

@@ -16,6 +16,7 @@ import { publishMutation, recoverPublication } from '../src/core/persistence/coo
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { preparePageMutation } from '../src/core/persistence/page-prepare.ts';
 import { assertSafeE2eDatabaseUrl } from './helpers/db-guard.ts';
+import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
 
 const engines: BrainEngine[] = [];
 const roots: string[] = [];
@@ -53,6 +54,20 @@ async function admission(engine: BrainEngine, slug: string, content = 'new', ext
 }
 
 describe('durable mutation journal', () => {
+  test('activation rejects legacy canonical writers but accepts guarded publication', async () => {
+    for (const engine of engines) {
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+      try {
+        await expect(engine.putPage('unguarded', input('No'), { sourceId })).rejects.toThrow('writer_coordinator_required');
+        await engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], async () => {
+          await tx.putPage('guarded', input('Yes'), { sourceId });
+          await tx.addTag('guarded', 'coherent', { sourceId });
+        }));
+        expect((await engine.readPageSnapshot('guarded', { sourceId }))!.tags).toEqual(['coherent']);
+        await expect(engine.addTag('guarded', 'uncoordinated', { sourceId })).rejects.toThrow('writer_coordinator_required');
+      } finally { await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1'); }
+    }
+  });
   test('concurrent duplicate admissions reserve one ID and conflict on altered intent', async () => {
     for (const engine of engines) {
       const a = await admission(engine, 'duplicate');
@@ -77,7 +92,7 @@ describe('durable mutation journal', () => {
       const second = (await claimNextWrite(engine, hostId))!;
       const conflict = await publishMutation(engine, second, { observedRevision: null, apply: async () => { throw new Error('must not execute'); } }, hostId);
       expect(conflict.state).toBe('conflict');
-      expect((await engine.readPageSnapshot(first.slug, { sourceId }))!.revision).toBe(committed.outcome!.revision);
+      expect((await engine.readPageSnapshot(first.slug, { sourceId }))!.revision).toBe(String(committed.outcome!.revision));
     }
   });
   test('stale no-op loses its revision precondition before no-op detection', async () => {

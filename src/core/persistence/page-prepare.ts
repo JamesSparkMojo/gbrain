@@ -34,7 +34,7 @@ async function fileTarget(engine: BrainEngine, row: WriteRequest, snapshot: Page
   if (before && snapshot && !snapshot.page.deleted_at) {
     const parsed = parseMarkdown(before.toString('utf8'), row.slug);
     const expected = canonical(snapshot.page, snapshot.tags);
-    const actual = canonical({ ...parsed, timeline: parsed.timeline ?? '' } as Page, parsed.tags);
+    const actual = canonical(parsed, parsed.tags);
     // Withdrawal overlays intentionally precede physical mirroring. The ledger
     // is applied by the import preparation and cannot be undone by this check.
     if (!snapshot.withdrawals.length && digest(actual) !== digest(expected)) {
@@ -103,8 +103,9 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
       apply: async () => ({ status: 'duplicate', slug: duplicate.page.slug, duplicate_revision: duplicate.revision }) };
   }
   const tags = versionTags ?? [...new Set([...(snapshot?.tags ?? []), ...ready.parsedPage.tags])].sort();
-  const rendered = serializePageToMarkdown(ready.parsedPage as Page, tags);
-  const logicalNoop = snapshot !== null && digest(canonical(snapshot.page, snapshot.tags)) === digest(canonical(ready.parsedPage as Page, tags));
+  const renderedPage: Page = { ...(snapshot?.page ?? { id: 0, slug: row.slug, source_id: row.source_id, created_at: new Date(), updated_at: new Date() }), ...ready.parsedPage };
+  const rendered = serializePageToMarkdown(renderedPage, tags);
+  const logicalNoop = snapshot !== null && digest(canonical(snapshot.page, snapshot.tags)) === digest(canonical(ready.parsedPage, tags));
   const noop = logicalNoop && (row.operation !== 'restore_page' || snapshot?.page.deleted_at == null);
   return { observedRevision, noop, file: await fileTarget(engine, row, snapshot, rendered), apply: async tx => {
     if (!noop) {

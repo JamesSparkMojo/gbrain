@@ -9,9 +9,16 @@ export async function withCoordinatedWrite<T>(engine: BrainEngine, sourceIds: st
   const [brain] = await engine.executeRaw<{ brain_id: string }>('SELECT brain_id FROM persistence_brain WHERE singleton=1');
   if (!brain) throw new OperationError('writer_not_initialized', 'Persistence identity is missing.');
   const context: PublicationContext = { brainId: brain.brain_id, sourceIds: new Set(sourceIds), active: true };
+  const [previous] = await engine.executeRaw<{ value: string | null }>("SELECT current_setting('gbrain.write_sources',true) AS value");
+  await engine.executeRaw("SELECT set_config('gbrain.write_sources',$1,true)", [JSON.stringify(sourceIds)]);
   return publication.run(context, async () => {
     try { return await fn(); }
-    finally { context.active = false; }
+    finally {
+      context.active = false;
+      // An aborted transaction cannot accept statements; its rollback clears
+      // SET LOCAL automatically. A success restores the enclosing capability.
+      await engine.executeRaw("SELECT set_config('gbrain.write_sources',$1,true)", [previous?.value ?? '']).catch(() => {});
+    }
   });
 }
 export async function assertCoordinatedWrite(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string): Promise<void> {

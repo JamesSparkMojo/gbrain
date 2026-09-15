@@ -66,6 +66,7 @@ import {
 import { writeSurfaceChangeAudit } from '../core/surface-audit.ts';
 import { getBrainHotMemoryMeta } from '../core/facts/meta-hook.ts';
 import { bindResolveIpcForServe } from '../mcp/resolve-ipc-binding.ts';
+import { createPersistenceIpcProvider } from '../core/persistence/provider.ts';
 import { resolveMcpStdioSourceScope } from '../mcp/server.ts';
 import { loadConfig } from '../core/config.ts';
 import { buildError, serializeError } from '../core/errors.ts';
@@ -3279,6 +3280,7 @@ ${bootstrapFromEnv
   const ipcBinding = await bindResolveIpcForServe(
     engine,
     (await resolveMcpStdioSourceScope(engine)).sourceId,
+    await createPersistenceIpcProvider(engine, config),
   );
   if (ipcBinding.socketPath) {
     console.error(`  Resolve IPC: ${ipcBinding.socketPath}`);

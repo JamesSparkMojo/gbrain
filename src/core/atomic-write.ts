@@ -30,6 +30,7 @@ import {
 } from 'fs';
 import { randomBytes } from 'crypto';
 import { dirname } from 'path';
+import { assertManagedFilesystemWrite } from './persistence/filesystem-guard.ts';
 
 export interface AtomicWriteOpts {
   /** Required by journaled publication: real directory durability errors propagate. */
@@ -44,6 +45,7 @@ export interface AtomicWriteOpts {
 }
 
 export function atomicWriteFileSync(filePath: string, content: string | Uint8Array, opts?: AtomicWriteOpts): void {
+  assertManagedFilesystemWrite(filePath);
   const tmpPath = `${filePath}.tmp.${process.pid}.${randomBytes(4).toString('hex')}`;
 
   // Preserve the target's mode across the rename (a fresh tmp file gets the

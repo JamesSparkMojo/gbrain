@@ -8,6 +8,7 @@ import { digest, sha256 } from './digest.ts';
 import { localHostId, persistenceHome, registerLocalWriter } from './identity.ts';
 import type { SqlEngine, WriteRequest } from './model.ts';
 import { acquireNativeLock, tryAcquireNativeLock, type NativeLockHandle } from './native-lock.ts';
+import { refreshManagedFilesystemRoots } from './filesystem-guard.ts';
 
 export interface WorktreeBinding {
   worktree_id: string;
@@ -63,7 +64,7 @@ export async function claimWorktree(engine: BrainEngine, sourceId: string, path:
     const local = await tx.executeRaw<{ worktree_id: string; local_path: string; coordination_path: string; owner_host_id: string | null }>(
       `SELECT h.*,w.owner_host_id FROM persistence_host_bindings h JOIN persistence_worktrees w ON w.id=h.worktree_id WHERE h.host_id=$1::uuid`, [hostId]);
     const overlap = local.find(b => containsPath(b.local_path, root) || containsPath(root, b.local_path));
-    let id = candidateId;
+    let id: string = candidateId;
     if (overlap) {
       if (overlap.owner_host_id !== hostId || !containsPath(overlap.local_path, root)) throw new OperationError('topology_change_required', 'Adding this source would replace or overlap another owner root.', 'Drain affected worktrees and explicitly rebind their topology.');
       id = overlap.worktree_id; root = overlap.local_path;
@@ -107,6 +108,7 @@ export async function activateManagedPersistence(engine: BrainEngine, opts: { pg
     }
   }
   await engine.executeRaw('UPDATE persistence_brain SET enabled=true,activated_at=COALESCE(activated_at,now()) WHERE singleton=1');
+  await refreshManagedFilesystemRoots(engine);
 }
 
 /** Deterministic content manifest includes deletions by exact path-set equality. */

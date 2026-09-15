@@ -91,6 +91,8 @@ export interface Page {
   timeline: string;
   frontmatter: Record<string, unknown>;
   content_hash?: string;
+  /** Recorded source-relative canonical file identity, when imported from disk. */
+  source_path?: string | null;
   /** Opaque canonical state; independent of indexing and telemetry updates. */
   knowledge_revision?: string;
   /** Revision whose text/search chunks have been atomically installed. */
