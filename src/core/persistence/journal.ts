@@ -195,9 +195,10 @@ export async function clearResolvedRecovery(engine: BrainEngine, id: string): Pr
     await tx.executeRaw('UPDATE persistence_requests SET recovery=NULL,recovery_bytes=0 WHERE id=$1::uuid', [id]);
   });
 }
-export async function markRecovering(engine: SqlEngine, row: WriteRequest, reason: string): Promise<void> {
-  await engine.executeRaw(`UPDATE persistence_requests SET state='recovering',blocked_reason=$3,updated_at=now()
-    WHERE id=$1::uuid AND execution_token=$2::uuid AND state IN ('running','recovering')`, [row.id, row.execution_token, reason]);
+export async function markRecovering(engine: SqlEngine, row: WriteRequest, reason: string, failure?: {code:string;message:string}): Promise<void> {
+  await engine.executeRaw(`UPDATE persistence_requests SET state='recovering',blocked_reason=$3,updated_at=now(),
+    error_code=COALESCE(error_code,$4),error_message=COALESCE(error_message,$5)
+    WHERE id=$1::uuid AND execution_token=$2::uuid AND state IN ('running','recovering')`, [row.id, row.execution_token, reason, failure?.code ?? null, failure?.message ?? null]);
 }
 export async function compactWriteReceipts(engine: BrainEngine, retentionDays = 30): Promise<number> {
   if (!Number.isFinite(retentionDays) || retentionDays < 0) throw new TypeError('Invalid receipt retention.');

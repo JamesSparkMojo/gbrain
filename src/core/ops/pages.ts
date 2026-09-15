@@ -1,4 +1,4 @@
-import { submitPageMutation } from '../persistence/page-mutations.ts';
+import { pageMutationSource, submitPageMutation } from '../persistence/page-mutations.ts';
 import { PAGE_MUTATION_PARAMS, CAPTURE_EVENT_PARAMS } from '../persistence/params.ts';
 /**
  * Page CRUD operation cluster — pure move from operations.ts (v0.46.x
@@ -33,33 +33,6 @@ import {
 } from './context.ts';
 
 // --- Page CRUD ---
-
-/**
- * #4329 (S1-tightened): write-authority gate for a per-call source_id on the
- * destructive page ops. Trusted local callers (ctx.remote === false) own the
- * brain and may target any source (slug fences still apply). EVERY other
- * caller — authenticated HTTP MCP, unauthenticated transports (stdio MCP,
- * subagent dispatch), unset trust — may target ONLY its write authority:
- * `ctx.auth.sourceId` when auth exists (falling back to `ctx.sourceId` for
- * legacy tokens that predate the v0.34.1 source grant), else `ctx.sourceId`.
- *
- * `ctx.auth.allowedSources` is the READ-federation grant (see contract.ts:
- * "array of source ids this OAuth client may READ from") and plays NO role
- * in writes — mirroring put_page, which writes only to ctx.sourceId
- * (`localFederatedSourceIds` is likewise consumed exclusively by
- * federatedSearchScope, a read path). Fail-closed permission_denied
- * otherwise, never a silent retarget.
- */
-function assertSourceInWriteGrant(ctx: OperationContext, sourceId: string): void {
-  if (ctx.remote === false) return;
-  const writeAuthority = ctx.auth?.sourceId ?? ctx.sourceId;
-  if (sourceId === writeAuthority) return;
-  throw new OperationError(
-    'permission_denied',
-    `source '${sourceId}' is outside your write authority`,
-    'Omit source_id (or pass your write source) to target your write source. Federated read grants do not confer delete/restore access.',
-  );
-}
 
 /**
  * #4352 remediation — filter fuzzy-resolution candidates so get_page's
@@ -312,6 +285,7 @@ const put_page: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
+    pageMutationSource(ctx, p, 'put_page');
     if (ctx.dryRun) {
       if (typeof p.slug === 'string') {
         validatePageSlug(p.slug);
@@ -378,6 +352,7 @@ const delete_page: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
+    pageMutationSource(ctx, p, 'delete_page');
     if (ctx.dryRun) {
       if (typeof p.slug === 'string') {
         validatePageSlug(p.slug);
@@ -402,6 +377,7 @@ const restore_page: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
+    pageMutationSource(ctx, p, 'restore_page');
     if (ctx.dryRun) {
       if (typeof p.slug === 'string') {
         validatePageSlug(p.slug);
@@ -604,6 +580,7 @@ const capture: Operation = {
   // hidden hint per the advisor pattern.
   cliHints: { name: 'capture', hidden: true },
   handler: async (ctx, p) => {
+    pageMutationSource(ctx, p, 'capture');
     if (ctx.dryRun) {
       if (typeof p.slug === 'string') {
         validatePageSlug(p.slug);

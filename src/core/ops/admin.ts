@@ -1,4 +1,4 @@
-import { submitPageMutation } from '../persistence/page-mutations.ts';
+import { pageMutationSource, submitPageMutation } from '../persistence/page-mutations.ts';
 import { PAGE_MUTATION_PARAMS } from '../persistence/params.ts';
 import { readPolicyOpts } from './context.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
@@ -184,6 +184,7 @@ const revert_version: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
+    pageMutationSource(ctx, p, 'revert_version');
     enforceClientSlugFence(ctx, p.slug as string, 'revert_version');
     if (ctx.dryRun) return { dry_run: true, action: 'revert_version', slug: p.slug, version_id: p.version_id };
     return submitPageMutation(ctx, { operation: 'revert_version', params: p });

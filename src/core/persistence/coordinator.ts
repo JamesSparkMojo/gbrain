@@ -85,7 +85,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
   let binding: WorktreeBinding | null = null;
   let recovery: RecoveryRecord | null = null;
   let published = false;
-  let filesystemFailed = false;
+  let transactionBodyCompleted = false;
   try {
     if (row.worktree_id) {
       binding = await getWorktreeBinding(engine, row.source_id, hostId);
@@ -148,8 +148,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
         await hooks.boundary?.('before_publication', row);
         // Mark before the call: a rename followed by an fsync error still needs recovery.
         published = true;
-        try { await withFilesystemPublication([prepared.file.root], async () => publishFile(prepared.file!)); }
-        catch (error) { filesystemFailed = true; throw error; }
+        await withFilesystemPublication([prepared.file.root], async () => publishFile(prepared.file!));
         await hooks.boundary?.('after_publication', row);
       }
       const outcome = await withCoordinatedWrite(tx, [row.source_id], () => prepared.apply(tx));
@@ -159,7 +158,9 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       outcome.write_through = prepared.file ? { written: !prepared.noop } : { written: false, skipped: row.authority.databaseOnlyReason ?? 'no_repo_configured' };
       await queuePublicationEffects(tx, row, final?.revision, outcome, prepared);
       await hooks.boundary?.('before_commit', row);
-      return completeWrite(tx, current, 'committed', outcome);
+      const committed = await completeWrite(tx, current, 'committed', outcome);
+      transactionBodyCompleted = true;
+      return committed;
     });
     await hooks.boundary?.('after_commit', done);
     await clearResolvedRecovery(engine, row.id);
@@ -168,11 +169,13 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
     if (recovery) {
       // Even a rejected prepare can retain a journal record; do not leave that
       // record unaccounted or let a sibling publication bypass its recovery.
-      try { await markRecovering(engine, row, published ? 'commit_outcome_uncertain' : 'publication_not_started'); }
+      const failure = !transactionBodyCompleted && !mayReprepare(row, requestError(error)) && !transientDatabaseFailure(error)
+        ? requestError(error) : undefined;
+      try { await markRecovering(engine, row, failure ? 'publication_failed' : published ? 'commit_outcome_uncertain' : 'publication_not_started', failure); }
       catch { /* database outage: durable recovery record remains discoverable */ }
       if (lock) {
         try { return await recoverPublication(engine, row.id, hostId, true,
-          (published && !filesystemFailed) || mayReprepare(row, requestError(error)) || transientDatabaseFailure(error) ? undefined : requestError(error)); }
+          failure); }
         catch { /* hold durable recovering state; next owner loop retries */ }
       }
       try { return await getWriteRequestById(engine, row.id) ?? { ...row, state: 'recovering', blocked_reason: 'database_unavailable' }; }
@@ -214,7 +217,8 @@ export async function recoverPublication(engine: BrainEngine, id: string, hostId
         if (record.mode !== null && existsSync(record.path)) chmodSync(record.path, record.mode);
       }
       // Withdrawal is authoritative DB state and is never rolled back here.
-      if (terminalError) return completeWrite(tx, current, conflictCode(terminalError.code) ? 'conflict' : 'failed', {}, terminalError);
+      const failure = terminalError ?? (current.error_code ? {code:current.error_code,message:current.error_message ?? 'Publication failed before database completion.'} : undefined);
+      if (failure) return completeWrite(tx, current, conflictCode(failure.code) ? 'conflict' : 'failed', {}, failure);
       for (const key of ['brain', `worktree:${current.worktree_id}`]) await tx.executeRaw('UPDATE persistence_counters SET recovery_bytes=recovery_bytes-$2 WHERE key=$1', [key, Number(current.recovery_bytes)]);
       const [queued] = await tx.executeRaw<WriteRequest>(`UPDATE persistence_requests SET state='queued',execution_token=NULL,
         claim_expires_at=NULL,recovery=NULL,recovery_bytes=0,publication_started=false,blocked_reason=NULL,updated_at=now()

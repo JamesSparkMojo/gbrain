@@ -1,3 +1,5 @@
+import { isEmbedSkipped } from '../embed-skip.ts';
+import { isQuarantined } from '../quarantine.ts';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
@@ -117,7 +119,7 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
     const tags = versionTags ?? [...new Set([...snapshot.tags,...incoming.tags])].sort();
     if (digest(canonical(snapshot.page,snapshot.tags)) === digest(canonical(incoming,tags))) {
       return {observedRevision,noop:true,file:await prepareFileTarget(engine,row,snapshot,serializePageToMarkdown(snapshot.page,snapshot.tags)),
-        apply:async()=>({...remoteLinkHint(row),status:'skipped',slug:row.slug,source_id:row.source_id,noop:true,chunks:0,
+        apply:async()=>({...remoteLinkHint(row),status:'skipped',slug:row.slug,source_id:row.source_id,noop:true,chunks:0,chunk_skip_reason:'write_skipped',
           ...(row.operation==='capture'?{channel:'capture',content_hash:p.capture_hash}:{})})};
     }
   }
@@ -131,7 +133,12 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
     ingested_via: typeof p.ingested_via === 'string' ? p.ingested_via : null,
     prepare: async value => { prepared = value; return value.result; },
   });
-  if (!prepared) throw new OperationError('invalid_params', result.error ?? 'The content was rejected before publication.');
+  if (!prepared) {
+    const oversized = result.error?.startsWith('Content too large') === true;
+    throw new OperationError(oversized ? 'request_too_large' : 'invalid_params', oversized ? result.error!
+      : /yaml/i.test(result.error ?? '') ? 'Invalid YAML frontmatter. Quote scalar values or fix the frontmatter block.'
+      : 'The content was rejected before publication.');
+  }
   const ready = prepared;
   if (ready.observedRevision !== observedRevision) throw new OperationError('revision_conflict', 'The page changed during import preparation.');
   if (ready.slug !== row.slug) {
@@ -174,6 +181,8 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
     return { ...advisories, ...(autoLinks ? {auto_links:autoLinks} : {}),
       status: noop ? 'skipped' : row.operation === 'restore_page' ? 'restored' : row.operation === 'revert_version' ? 'reverted' : 'created_or_updated',
       slug: row.slug, source_id: row.source_id, chunks: ready.result.chunks, noop,
+      ...(ready.result.chunks === 0 ? {chunk_skip_reason: noop ? 'write_skipped'
+        : isEmbedSkipped(ready.parsedPage.frontmatter) || isQuarantined(ready.parsedPage.frontmatter) ? 'embed_skip' : 'empty_body'} : {}),
       ...(row.operation === 'capture' ? { channel: 'capture', content_hash: p.capture_hash } : {}) };
   } };
 }

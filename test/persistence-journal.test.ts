@@ -146,7 +146,7 @@ describe('durable mutation journal', () => {
       const row = (await claimNextWrite(engine, hostId))!;
       const uncertain = await publishMutation(engine, row, { observedRevision: page.knowledge_revision!, file: { path, root, content: 'After' },
         apply: async tx => { await tx.putPage('file', input('After'), { sourceId: fileSource }); return {}; } }, hostId,
-      { boundary: async name => { if (name === 'before_commit') throw new Error('simulated rollback'); } });
+      { boundary: async name => { if (name === 'before_commit') throw Object.assign(new Error('simulated serialization rollback'), {code:'40001'}); } });
       expect(uncertain.state).toBe('queued');
       expect(readFileSync(path, 'utf8')).toBe('Before');
       expect((await engine.getPage('file', { sourceId: fileSource }))!.knowledge_revision).toBe(page.knowledge_revision!);

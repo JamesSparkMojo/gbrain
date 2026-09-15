@@ -60,19 +60,4 @@ export async function cancelWriteRequest(engine: BrainEngine, principal: Princip
     return completeWrite(tx, current, 'cancelled', {}, { code: 'cancelled', message: 'Cancelled before publication.' });
   });
 }
-export async function writerDiagnostics(engine: BrainEngine) {
-  const [brain] = await engine.executeRaw<{ enabled: boolean; brain_id: string }>('SELECT enabled,brain_id FROM persistence_brain WHERE singleton=1');
-  const worktrees = await engine.executeRaw(`SELECT w.id,w.owner_host_id,w.owner_epoch,w.topology_generation,w.state,w.heartbeat_at,
-    COUNT(r.id) FILTER (WHERE r.state='queued')::integer AS queued,
-    COUNT(r.id) FILTER (WHERE r.state='running')::integer AS running,
-    COUNT(r.id) FILTER (WHERE r.state='recovering')::integer AS recovering,
-    MIN(r.created_at) FILTER (WHERE r.state IN ('queued','running','recovering')) AS oldest_request_at,
-    MAX(r.sequence) FILTER (WHERE r.state='committed') AS last_completed_sequence,
-    COALESCE(SUM(r.recovery_bytes),0)::text AS recovery_bytes
-    FROM persistence_worktrees w LEFT JOIN persistence_requests r ON r.worktree_id=w.id
-    GROUP BY w.id ORDER BY w.id`);
-  const counters = await engine.executeRaw('SELECT * FROM persistence_counters ORDER BY key');
-  const blockers = await engine.executeRaw(`SELECT request_id,worktree_id,state,blocked_reason,error_code,created_at
-    FROM persistence_requests WHERE state='recovering' OR blocked_reason IS NOT NULL ORDER BY sequence LIMIT 100`);
-  return { ...brain, worktrees, counters, blockers };
-}
+export { readWriterDiagnostics as writerDiagnostics } from './diagnostics.ts';

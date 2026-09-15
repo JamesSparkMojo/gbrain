@@ -110,3 +110,4 @@ src/core/persistence/maintenance.ts	0	filesystem_guard	Legacy managed writers re
 src/commands/files.ts	0	filesystem_guard	Attachment copying, redirection, restore and cleanup refuse paths in managed canonical trees before file effects.
 src/commands/schema.ts	0	filesystem_guard	Schema manifest scaffolding and forks check managed roots before creating files; separate config settings are control data.
 src/core/ingestion/sources/inbox-folder.ts	0	filesystem_guard	Inbox archive moves refuse managed canonical input paths before emitting the event or moving source bytes.
+src/core/persistence/links-preparation.ts	2	coordinator	Automatic graph projections publish inside canonical page transactions; delayed reconciliation locks all affected page keys and compares the originating revision.

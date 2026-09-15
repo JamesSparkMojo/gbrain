@@ -6,6 +6,7 @@ export async function runMemoryWrite<T>(run: () => Promise<T>): Promise<T> {
   try { return await run(); } catch (error) {
     if (!(error instanceof OperationError)) throw error;
     if (error.writeRequest) throw frozenVerbWriteError(error.writeRequest, error.writeError);
+    if (error.protocolVersion === 1 && ['invalid_params','provenance_required','not_found','scope_denied','unavailable','budget_unsatisfiable','internal'].includes(error.code)) throw error;
     const code = ['permission_denied','scope_denied','source_changed','writer_registration_required'].includes(error.code)
       ? 'scope_denied' : ['revision_required','revision_conflict','idempotency_conflict','invalid_params','page_identity_changed'].includes(error.code)
         ? 'invalid_params' : 'unavailable';

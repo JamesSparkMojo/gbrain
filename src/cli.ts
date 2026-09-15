@@ -838,10 +838,8 @@ async function main() {
     // (leaves facts/cache/eval-capture writes racing teardown). The finally's
     // drain bounds teardown; the hard-deadline timer armed at teardown entry
     // bounds a hung one.
-    if (e instanceof OperationError) {
-      console.error(`Error [${e.code}]: ${e.message}`);
-      if (e.suggestion) console.error(`  Fix: ${e.suggestion}`);
-    } else {
+    const { reportPersistenceCliError } = await import('./commands/persistence-delegate.ts');
+    if (!await reportPersistenceCliError(e, params.json === true || !!(e as OperationError)?.writeRequest)) {
       console.error(e instanceof Error ? e.message : String(e));
     }
     setCliExitVerdict(1);

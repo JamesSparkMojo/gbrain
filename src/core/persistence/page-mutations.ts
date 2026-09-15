@@ -3,7 +3,7 @@ import { realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { OperationContext } from '../ops/contract.ts';
 import { OperationError } from '../ops/contract.ts';
-import { enforceClientSlugFence, enforceSubagentSlugFence, normalizeSlugPrefix, validatePageSlug } from '../ops/context.ts';
+import { enforceClientSlugFence, enforceSubagentSlugFence, normalizeSlugPrefix, parseSourceIdParam, validatePageSlug } from '../ops/context.ts';
 import { defaultSlug, detectBinaryNullByte, explicitCaptureType, mergeCaptureFrontmatter, normalizeForHash } from '../capture-content.ts';
 import { computeContentHash } from '../ingestion/types.ts';
 import { assertPersistenceAccepting, waitForWrite, writeResponse } from './service.ts';
@@ -26,15 +26,21 @@ export async function requestPrincipalForContext(ctx: OperationContext): Promise
 export async function initializeLocalPersistence(ctx: OperationContext): Promise<void> {
   if (!ctx.auth && !currentVerifiedLocalWriter()) await registerLocalWriter(ctx.engine, ctx.remote === false ? 'cli' : 'stdio');
 }
+/** Validate explicit routing before any admission, including dry-run adapters. */
+export function pageMutationSource(ctx: OperationContext, params: Record<string, unknown>, operation: string): string {
+  const sourceId = parseSourceIdParam(params.source_id, operation) ?? ctx.sourceId ?? 'default';
+  if (sourceId === '__all__') throw new OperationError('invalid_params', 'A mutation must target exactly one source.');
+  if (ctx.remote !== false && sourceId !== (ctx.auth?.sourceId ?? ctx.sourceId ?? 'default')) {
+    throw new OperationError('permission_denied', 'This source is outside the current write grant.');
+  }
+  return sourceId;
+}
 export async function submitPageMutation(ctx: OperationContext,
   input: { operation: string; params: Record<string, unknown>; waitMs?: number }): Promise<Record<string, unknown>> {
   assertPersistenceAccepting(ctx.engine);
   const p: Record<string, unknown> = { ...input.params, ...parseMutationPrecondition(input.params) };
   const requestId = typeof p.request_id === 'string' ? p.request_id : randomUUID();
-  const sourceId = typeof p.source_id === 'string' ? p.source_id : ctx.sourceId ?? 'default';
-  if (ctx.remote !== false && sourceId !== (ctx.auth?.sourceId ?? ctx.sourceId ?? 'default')) {
-    throw new OperationError('permission_denied', 'This source is outside the current write grant.');
-  }
+  const sourceId = pageMutationSource(ctx, p, input.operation);
   await initializeLocalPersistence(ctx);
   const principal = await requestPrincipalForContext(ctx);
   const prior = await getWriteRequest(ctx.engine, principal, requestId);
