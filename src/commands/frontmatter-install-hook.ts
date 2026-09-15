@@ -176,7 +176,17 @@ export async function runFrontmatterInstallHook(args: string[]): Promise<void> {
         continue;
       }
       if (uninstall) {
-        if (uninstallHook(src.local_path)) {
+        let removed: boolean;
+        try {
+          removed = uninstallHook(src.local_path);
+        } catch (err) {
+          // Same refusal class as install (symlinked .githooks/ or hook): this
+          // source is reported and skipped, the remaining sources still run.
+          console.log(`[${src.id}] skipped — ${err instanceof Error ? err.message : String(err)}`);
+          skipped++;
+          continue;
+        }
+        if (removed) {
           console.log(`[${src.id}] hook removed`);
           installed++;
         } else {
