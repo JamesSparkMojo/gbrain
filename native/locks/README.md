@@ -20,7 +20,7 @@ stop publication; it cannot be treated as successful relinquishment.
 
 Windows IPC adds two narrowly scoped operations in `windows-ipc.h`. Named
 pipes retain a nonblocking Global kernel mutex from before probing through
-the listener's actual close. Windows invariant Unicode uppercase plus CNG
+the listener's actual close. Windows NT Unicode upcasing (`RtlUpcaseUnicodeString`) plus CNG
 SHA-256 gives case and prefix aliases one identity independent of homes and
 logon sessions. The environment registry and a small shared kernel owner record
 prevent recursive acquisition through separate addon copies on the same thread;

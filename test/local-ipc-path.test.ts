@@ -265,13 +265,31 @@ describe.skipIf(process.platform !== 'win32')('Windows native IPC ownership', ()
     if (!existsSync(output)) throw new Error(await new Response(process.stderr).text());
     expect(readFileSync(output, 'utf8')).toBe('acquired');
   }
-  test('case, prefix and Unicode aliases share one claim in the same event loop', async () => {
+  test('case, prefix and Unicode aliases reach one actual listener and share its claim', async () => {
     const name = `gbrain-${randomUUID()}-σıé`, path = `\\\\.\\pipe\\${name}`;
-    const first = await claimLocalIpcBinding(path); expect(first).not.toBeNull();
-    try {
-      for (const alias of [`\\\\?\\PIPE\\${name.toUpperCase()}`, `//./pipe/${name.toUpperCase()}`, path]) expect(await claimLocalIpcBinding(alias)).toBeNull();
-    } finally { await first!.release(); await first!.release(); }
-    const next = await claimLocalIpcBinding(path); expect(next).not.toBeNull(); await next!.release();
+    const listener = await startPersistenceIpcServer(path, { brainId: BRAIN, dispatch: async () => ({}) });
+    expect(listener).not.toBeNull(); track(listener!.server);
+    // Prove the kernel-facing pipe alias before testing our hashed claim;
+    // JavaScript casing alone cannot establish Windows namespace identity.
+    const upperPath = `\\\\.\\pipe\\${name.toUpperCase()}`;
+    const probe = Bun.spawn(['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+      resolve(import.meta.dir, 'fixtures/windows-ipc-case-probe.ps1'), 'σıé', 'ΣIÉ'], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
+    children.push(probe); probe.stdin.end();
+    const [probeExit, probeOutput, probeError] = await Promise.all([probe.exited, new Response(probe.stdout).text(), new Response(probe.stderr).text()]);
+    if (probeExit !== 0) throw new Error(probeError);
+    const casing = JSON.parse(probeOutput);
+    expect(casing.ordinal_result).toBeGreaterThan(0);
+    let capability: Awaited<ReturnType<typeof requestPersistenceCapabilities>> | undefined;
+    try { capability = await requestPersistenceCapabilities(upperPath); }
+    finally { console.info('WINDOWS_IPC_CASE_PROBE', JSON.stringify({ ...casing, kernel_alias: capability?.brain_id === BRAIN })); }
+    expect(capability?.brain_id).toBe(BRAIN);
+    for (const alias of [`\\\\?\\PIPE\\${name.toUpperCase()}`, `//./pipe/${name.toUpperCase()}`, path]) {
+      const contender = await claimLocalIpcBinding(alias);
+      try { expect(contender).toBeNull(); } finally { await contender?.release(); }
+    }
+    const closed = once(listener!.server, 'close'); listener!.close(); await closed;
+    const next = await claimLocalIpcBinding(upperPath); expect(next).not.toBeNull();
+    await next!.release(); await next!.release();
   });
   test('two processes with distinct homes elect one actual pipe provider and survive owner death', async () => {
     const path = `\\\\.\\pipe\\gbrain-${randomUUID()}`, root = temporary(), barrier = join(root, 'start');
