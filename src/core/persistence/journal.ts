@@ -3,8 +3,9 @@ import type { BrainEngine } from '../engine.ts';
 import { OperationError } from '../ops/contract.ts';
 import { digest, jsonBytes, requireUuid } from './digest.ts';
 import { authorizeWrite } from './authority.ts';
+import { readJournalLimits } from './limits.ts';
 import {
-  DEFAULT_JOURNAL_LIMITS, isTerminal, principalKey, requestPrincipal,
+  isTerminal, principalKey, requestPrincipal,
   type JournalLimits, type Principal, type RecoveryRecord, type RequestState,
   type SqlEngine, type WriteAuthority, type WriteRequest,
 } from './model.ts';
@@ -62,12 +63,11 @@ export function assertReplayIntent(row: WriteRequest, expectedDigest: string): W
   return row;
 }
 export async function admitWrite(engine: BrainEngine, input: WriteAdmission, overrides?: Partial<JournalLimits>): Promise<WriteRequest> {
-  const limits = { ...DEFAULT_JOURNAL_LIMITS, ...overrides };
-  for (const [key, value] of Object.entries(limits)) if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(`Invalid journal limit: ${key}`);
+  const limits = await readJournalLimits(engine,overrides);
   const requestId = requireUuid(input.requestId ?? randomUUID());
   const fingerprint = intentDigest(input);
   const bytes = jsonBytes(input.intent) + jsonBytes(input.authority);
-  const terminalBytes = input.terminalReservation ?? Math.max(16_384, jsonBytes(input.callerIntent) + 4096);
+  const terminalBytes = input.terminalReservation ?? Math.max(16_384,jsonBytes(input.authority)+8192);
   if (!Number.isSafeInteger(terminalBytes) || terminalBytes < 1024) throw new TypeError('Invalid terminal receipt reservation.');
   return engine.transaction(async tx => {
     await tx.executeRaw("SELECT set_config('synchronous_commit','on',true)");
@@ -143,7 +143,7 @@ export async function releaseUnpublishedClaim(engine: SqlEngine, row: WriteReque
 /** Called while holding the root lock; the durable record precedes any rename. */
 export async function prepareRecovery(engine: BrainEngine, row: WriteRequest, recovery: RecoveryRecord, bytes: number,
   overrides?: Partial<JournalLimits>): Promise<void> {
-  const limits = { ...DEFAULT_JOURNAL_LIMITS, ...overrides };
+  const limits = await readJournalLimits(engine,overrides);
   if (!row.worktree_id) throw new TypeError('Filesystem recovery requires a worktree.');
   if (bytes > limits.worktreeRecoveryBytes || bytes > limits.brainRecoveryBytes) throw new OperationError('request_too_large', 'This request exceeds the configured recovery capacity.', 'Increase recovery capacity before submitting a new request.');
   await engine.transaction(async tx => {
@@ -170,7 +170,9 @@ export async function completeWrite(tx: SqlEngine, row: WriteRequest, state: 'co
   if (!current) throw new OperationError('not_found', 'Write request not found.');
   if (isTerminal(current)) return current;
   if (row.execution_token !== current.execution_token) throw new OperationError('write_claim_lost', 'Write claim changed before completion.');
-  if (jsonBytes(outcome) + Buffer.byteLength(error?.message ?? '') > Number(current.terminal_reservation)) throw capacityError('terminal result exceeds its reserved bounded encoding');
+  const [effects] = await tx.executeRaw<{bytes:string}>(`SELECT COALESCE(SUM(octet_length(data::text)+octet_length(kind)+1024),0)::text AS bytes
+    FROM persistence_effects WHERE request_id=$1::uuid`,[row.id]);
+  if (jsonBytes(outcome) + jsonBytes(current.authority) + 1024 + Buffer.byteLength(error?.message ?? '') + Number(effects.bytes) > Number(current.terminal_reservation)) throw capacityError('terminal result and effects exceed their reserved bounded encoding');
   const [done] = await tx.executeRaw<WriteRequest>(`UPDATE persistence_requests SET state=$2,outcome=$3::text::jsonb,
     error_code=$4,error_message=$5,completed_at=now(),updated_at=now(),claim_expires_at=NULL,blocked_reason=NULL
     WHERE id=$1::uuid RETURNING *`, [row.id, state, JSON.stringify(outcome), error?.code ?? null, error?.message ?? null]);
@@ -196,12 +198,27 @@ export async function markRecovering(engine: SqlEngine, row: WriteRequest, reaso
   await engine.executeRaw(`UPDATE persistence_requests SET state='recovering',blocked_reason=$3,updated_at=now()
     WHERE id=$1::uuid AND execution_token=$2::uuid AND state IN ('running','recovering')`, [row.id, row.execution_token, reason]);
 }
-export async function compactWriteReceipts(engine: SqlEngine, retentionDays = 30): Promise<number> {
+export async function compactWriteReceipts(engine: BrainEngine, retentionDays = 30): Promise<number> {
   if (!Number.isFinite(retentionDays) || retentionDays < 0) throw new TypeError('Invalid receipt retention.');
-  const rows = await engine.executeRaw(`UPDATE persistence_requests SET intent=NULL,compacted=true,error_message=NULL
+  const rows = await engine.executeRaw<WriteRequest>(`SELECT * FROM persistence_requests
     WHERE state IN ('committed','conflict','failed','cancelled') AND recovery IS NULL AND NOT compacted
-    AND completed_at < now()-($1::double precision*interval '1 day') RETURNING id`, [retentionDays]);
-  return rows.length;
+    AND completed_at < now()-($1::double precision*interval '1 day') ORDER BY sequence LIMIT 100`, [retentionDays]);
+  let count=0;
+  for(const row of rows) count+=await engine.transaction(async tx=>{
+    const keys=['brain',principalKey(requestPrincipal(row))];
+    await lockCounters(tx,keys);
+    const [current]=await tx.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE id=$1::uuid FOR UPDATE',[row.id]);
+    if(!current || current.compacted || current.recovery || !isTerminal(current)) return 0;
+    const unfinished=await tx.executeRaw("SELECT 1 FROM persistence_effects WHERE request_id=$1::uuid AND state<>'committed' LIMIT 1",[row.id]);
+    if(unfinished.length) return 0;
+    const [effects]=await tx.executeRaw<{bytes:string}>(`SELECT COALESCE(SUM(octet_length(data::text)+octet_length(kind)+1024),0)::text AS bytes
+      FROM persistence_effects WHERE request_id=$1::uuid`,[row.id]);
+    const retained=Math.min(Number(current.terminal_reservation),jsonBytes(current.authority)+jsonBytes(current.outcome??{})+Number(effects.bytes)+1024);
+    await tx.executeRaw('UPDATE persistence_requests SET intent=NULL,compacted=true,error_message=NULL,terminal_reservation=$2 WHERE id=$1::uuid',[row.id,retained]);
+    for(const key of keys) await tx.executeRaw('UPDATE persistence_counters SET terminal_bytes=terminal_bytes-$2 WHERE key=$1',[key,Number(current.terminal_reservation)-retained]);
+    return 1;
+  });
+  return count;
 }
 export function receiptFor(row: WriteRequest) {
   return {

@@ -4,7 +4,6 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { PostgresEngine } from '../src/core/postgres-engine.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
 import { OperationError } from '../src/core/ops/contract.ts';
@@ -17,9 +16,11 @@ import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { preparePageMutation } from '../src/core/persistence/page-prepare.ts';
 import { assertSafeE2eDatabaseUrl } from './helpers/db-guard.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
+import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 
 const engines: BrainEngine[] = [];
 const roots: string[] = [];
+let closePostgres:(()=>Promise<void>)|undefined;
 const sourceId = 'persistence-journal-test';
 const hostId = randomUUID();
 const input = (body: string) => ({ type: 'note', title: 'Example', compiled_truth: body, timeline: '', frontmatter: {} });
@@ -32,8 +33,8 @@ beforeAll(async () => {
   await local.connect({}); await local.initSchema(); engines.push(local);
   if (pg) {
     assertSafeE2eDatabaseUrl(pg);
-    const remote = new PostgresEngine();
-    await remote.connect({ database_url: pg, poolSize: 4 }); await remote.initSchema(); engines.push(remote);
+    const isolated=await isolatedPersistencePostgres(pg);
+    closePostgres=isolated.close;engines.push(isolated.engine);
   }
   for (const engine of engines) {
     await engine.executeRaw('DELETE FROM sources WHERE id=$1', [sourceId]);
@@ -44,6 +45,7 @@ beforeAll(async () => {
 afterAll(async () => {
   for (const engine of engines) { await engine.executeRaw('DELETE FROM sources WHERE id=$1', [sourceId]); await engine.disconnect(); }
   for (const root of roots) rmSync(root, { recursive: true, force: true });
+  await closePostgres?.();
 });
 async function admission(engine: BrainEngine, slug: string, content = 'new', extra: Partial<WriteAdmission> = {}): Promise<WriteAdmission> {
   const [source] = await engine.executeRaw<{ incarnation: string }>('SELECT incarnation FROM sources WHERE id=$1', [sourceId]);
@@ -167,6 +169,24 @@ describe('durable mutation journal', () => {
       expect(await compactWriteReceipts(engine)).toBeGreaterThan(0);
       const replay = await admitWrite(engine, a);
       expect(replay.compacted).toBe(true); expect(replay.state).toBe('cancelled'); expect(replay.intent).toBeNull();
+    }
+  });
+  test('database-configured quotas govern all admissions and compaction releases only diagnostic space', async () => {
+    for (const engine of engines) {
+      const a = await admission(engine, 'configured-quota');
+      await engine.setConfig('persistence.limits.principal_outstanding', '0');
+      try { await expect(admitWrite(engine, a)).rejects.toMatchObject({ code: 'queue_capacity' }); }
+      finally { await engine.executeRaw("DELETE FROM config WHERE key='persistence.limits.principal_outstanding'"); }
+      const accepted = await admitWrite(engine, a);
+      await cancelWriteRequest(engine, a.principal, a.requestId!);
+      await engine.executeRaw("UPDATE persistence_requests SET completed_at=now()-interval '31 days' WHERE id=$1::uuid", [accepted.id]);
+      const before = Number(accepted.terminal_reservation);
+      await compactWriteReceipts(engine);
+      const compact = (await getWriteRequest(engine, a.principal, a.requestId!))!;
+      expect(Number(compact.terminal_reservation)).toBeLessThan(before);
+      expect(Number(compact.terminal_reservation)).toBeGreaterThan(1024);
+      expect(compact.authority).toEqual(accepted.authority);
+      expect((await admitWrite(engine, a)).id).toBe(accepted.id);
     }
   });
 });
