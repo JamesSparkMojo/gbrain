@@ -1,6 +1,6 @@
 import type { WriteRequest } from './model.ts';
 
-export type EffectKind = 'git' | 'embedding' | 'withdrawal-mirror';
+export type EffectKind = 'git' | 'embedding' | 'withdrawal-mirror' | 'facts-backstop';
 export interface EffectRecovery {
   version: 1;
   kind: 'withdrawal-mirror';
@@ -24,7 +24,7 @@ export interface PersistenceEffect {
   source_id: string;
   source_incarnation: string;
   worktree_id: string | null;
-  data: { slug?: string; page_id?: number; relative_path?: string; expected_hash?: string | null; after_slug?: string; source_id?: string; source_scan?: boolean };
+  data: { slug?: string; page_id?: number; relative_path?: string; expected_hash?: string | null; after_slug?: string; source_id?: string; source_scan?: boolean; visibility?: 'private' | 'world' };
   state: 'queued' | 'running' | 'committed' | 'failed';
   execution_token: string | null;
   claim_expires_at: string | Date | null;

@@ -6,6 +6,8 @@ import type { PreparedMutation } from './coordinator.ts';
 import { sha256 } from './digest.ts';
 import type { EffectKind, PersistenceEffect, EffectRequest } from './effect-model.ts';
 import type { SqlEngine } from './model.ts';
+import { isFactsExtractionEnabled } from '../facts/extract.ts';
+import { resolveDefaultVisibility } from '../facts/visibility.ts';
 
 export async function queuePublicationEffects(tx: BrainEngine, row: EffectRequest, revision: string | undefined,
   outcome: Record<string, unknown>, prepared?: PreparedMutation): Promise<void> {
@@ -27,6 +29,13 @@ export async function queuePublicationEffects(tx: BrainEngine, row: EffectReques
   if (snapshot && !snapshot.page.deleted_at) {
     await queue('embedding');
     outcome.embedding_state = 'queued';
+    if ((outcome.facts_backstop as { queued?: boolean } | undefined)?.queued) {
+      // Recheck activation/kill switch at publication, before promising work.
+      const [brain] = await tx.executeRaw<{ enabled: boolean }>('SELECT enabled FROM persistence_brain WHERE singleton=1');
+      if (brain?.enabled) outcome.facts_backstop = { skipped: 'writer_coordinator_required' };
+      else if (!(await isFactsExtractionEnabled(tx))) outcome.facts_backstop = { skipped: 'extraction_disabled' };
+      else await queue('facts-backstop', { visibility: await resolveDefaultVisibility(tx) });
+    }
   }
 }
 
@@ -76,10 +85,11 @@ export async function failEffect(engine: SqlEngine, effect: PersistenceEffect, r
 export async function publicEffectsForRequest(engine: SqlEngine, requestId: string): Promise<Array<{ kind: EffectKind; state: string; reason?: string; push?: string }>> {
   const rows = await engine.executeRaw<{ kind: EffectKind; state: string; error_code: string | null; recovering: boolean; outcome: Record<string, unknown> | null }>(
     'SELECT kind,state,error_code,outcome,recovery IS NOT NULL AS recovering FROM persistence_effects WHERE request_id=$1::uuid ORDER BY kind', [requestId]);
-  return rows.filter(row => ['git', 'embedding', 'withdrawal-mirror'].includes(row.kind)).map(row => {
+  return rows.filter(row => ['git', 'embedding', 'withdrawal-mirror', 'facts-backstop'].includes(row.kind)).map(row => {
     const reason = row.error_code ?? row.outcome?.reason;
     const push = row.outcome?.push;
-    return { kind: row.kind, state: row.recovering ? 'recovering' : row.outcome?.git === 'skipped' ? 'skipped' : row.state,
+    return { kind: row.kind, state: row.recovering ? 'recovering' : row.outcome?.git === 'skipped' || row.outcome?.facts === 'skipped' ? 'skipped'
+      : row.outcome?.facts === 'queued' ? 'dispatched' : row.state,
       ...(typeof reason === 'string' && /^[a-z_]{1,80}$/.test(reason) ? { reason } : {}),
       ...(row.kind === 'git' && (push === 'committed' || push === 'skipped') ? { push } : {}),
     };

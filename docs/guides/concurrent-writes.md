@@ -96,6 +96,17 @@ files. An unconfigured remote is reported as a skipped push. Embeddings wait
 for an enabled, configured provider and install only if the page revision and
 its text projection still match.
 
+Before managed activation, eligible `put_page` and `capture` writes also
+record durable facts-extraction intent. `facts_backstop.queued` means that
+intent committed with the page; the `facts-backstop` effect becomes
+`dispatched` when its durable worker job is accepted. Extraction availability
+is checked by that worker. The handoff is idempotent and rechecks the source,
+page revision and current writer grant. Confined writers, unchanged pages,
+disabled extraction and dream-generated content do not enqueue work.
+After activation the legacy extractor reports `writer_coordinator_required`
+and skips; it cannot bypass canonical publication. Activation also causes
+previously queued extraction jobs to skip. Canonical receipts remain unchanged.
+
 ## Receipt access and explicit grant migration
 
 `get_write_request`, `list_write_requests`, and `cancel_write_request` require
