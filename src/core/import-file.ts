@@ -1,3 +1,5 @@
+import { assertUnmanagedCanonicalWriter } from './persistence/maintenance.ts';
+import { assertImportBase, sameCanonicalImport } from './page-state/import-guard.ts';
 import { readSourceFileSync } from './minions/source-filesystem.ts';
 import { readFileSync, statSync, lstatSync } from 'fs';
 import { basename, extname } from 'path';
@@ -402,6 +404,8 @@ export async function importFromContent(
     return { slug, status: 'error', chunks: 0, error: frontmatterError };
   }
 
+  if (!opts.prepare) await assertUnmanagedCanonicalWriter(engine, 'direct content import');
+
   // Canonicalize only free-prose fields before protected-fence parsing, hidden
   // row merging, hashing and indexing. Frontmatter identities stay untouched.
   parsed.title = sanitizeText(parsed.title);
@@ -652,7 +656,8 @@ export async function importFromContent(
   // engine.putPage defaults to 'default' when sourceId is unset, so the read
   // mirrors that default instead of matching the slug in ANY source (the
   // unscoped-check/scoped-write bug class).
-  const existing = await engine.getPage(slug, { sourceId: sourceId ?? 'default' });
+  const existingSnapshot = opts.prepare ? await engine.readPageSnapshot(slug, { sourceId: sourceId ?? 'default', includeDeleted: true }) : null;
+  const existing = opts.prepare ? existingSnapshot?.page ?? null : await engine.getPage(slug, { sourceId: sourceId ?? 'default' });
 
   // #2044 / #4548: remote get_page/fetch intentionally strip non-'world'
   // facts rows before an untrusted caller ever sees them. A documented
@@ -733,12 +738,13 @@ export async function importFromContent(
 
   // An unchanged canonical file may still need a verified projection after withdrawal/migration.
   if (!opts.prepare && existing && existing.text_projection_revision !== existing.knowledge_revision) opts = { ...opts, forceRechunk: true };
-  if (existing?.content_hash === hash && !opts.forceRechunk) {
+  if (existing?.content_hash === hash && !opts.forceRechunk && (!opts.prepare || sameCanonicalImport(existingSnapshot, parsedPage))) {
     if (opts.prepare) {
       const result: ImportResult = { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}) };
       return opts.prepare({ slug, parsedPage, observedRevision: (existing as typeof existing & { knowledge_revision?: string }).knowledge_revision ?? null,
         noop: true, result, apply: async () => {} });
     }
+    await engine.transaction(tx => assertImportBase(tx, slug, sourceId ?? 'default', existing));
     return { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}) };
   }
 
@@ -756,13 +762,10 @@ export async function importFromContent(
       frontmatter: parsed.frontmatter,
     });
     if (existing.content_hash === legacyHash) {
-      await engine.refreshPageBody(
-        slug,
-        sourceId ?? 'default',
-        parsed.compiled_truth,
-        parsed.timeline || '',
-        hash,
-      );
+      await engine.transaction(async tx => {
+        await assertImportBase(tx, slug, sourceId ?? 'default', existing);
+        await tx.refreshPageBody(slug, sourceId ?? 'default', parsed.compiled_truth, parsed.timeline || '', hash);
+      });
       return { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}) };
     }
   }
@@ -970,6 +973,7 @@ export async function importFromContent(
   // for single-source callers.
   const txOpts = { sourceId: sourceId ?? 'default' };
   const applyPrepared = async (tx: BrainEngine) => {
+    await assertImportBase(tx, slug, txOpts.sourceId, existing);
     if (existing) await tx.createVersion(slug, txOpts);
 
     // v0.29.1 — compute effective_date from frontmatter precedence chain.
@@ -1437,6 +1441,7 @@ export async function importCodeFile(
   content: string,
   opts: { noEmbed?: boolean; force?: boolean; sourceId?: string } = {},
 ): Promise<ImportResult> {
+  await assertUnmanagedCanonicalWriter(engine, 'direct file import');
   const slug = slugifyCodePath(relativePath);
   const lang = detectCodeLanguage(relativePath) || 'unknown';
   const title = `${relativePath} (${lang})`;
@@ -1479,7 +1484,8 @@ export async function importCodeFile(
   // mirrors that default instead of matching the slug in ANY source (the
   // unscoped-check/scoped-write bug class).
   const existing = await engine.getPage(slug, { sourceId: sourceId ?? 'default' });
-  if (!opts.force && existing?.content_hash === hash) {
+  if (!opts.force && existing?.content_hash === hash && existing.text_projection_revision === existing.knowledge_revision) {
+    await engine.transaction(tx => assertImportBase(tx, slug, sourceId ?? 'default', existing));
     return { slug, status: 'skipped', chunks: 0 };
   }
 
@@ -1549,6 +1555,7 @@ export async function importCodeFile(
   // brains write to the correct (source_id, slug) row instead of duplicating
   // under the schema DEFAULT.
   await engine.transaction(async (tx) => {
+    await assertImportBase(tx, slug, sourceId ?? 'default', existing);
     if (existing) await tx.createVersion(slug, txOpts);
 
     await tx.putPage(slug, {
@@ -1720,6 +1727,8 @@ const NEEDS_DECODE = new Set(['.heic', '.heif', '.avif']);
 export interface ImportTransactionSpec {
   slug: string;
   hadExisting: boolean;
+  /** Page observed before image/OCR/provider preparation; null means create-only. */
+  basePage?: import('./types.ts').Page | null;
   /** Source containing the page, chunks, file row, and type-specific writes. */
   sourceId?: string;
   page: PageInput;
@@ -1746,6 +1755,8 @@ export async function withImportTransaction(
   const sourceId = spec.sourceId ?? 'default';
   const txOpts = spec.sourceId ? { sourceId: spec.sourceId } : undefined;
   await engine.transaction(async (tx) => {
+    if (spec.basePage !== undefined) await assertImportBase(tx, spec.slug, sourceId, spec.basePage);
+    else await tx.lockPageKeys([{ sourceId, slug: spec.slug }]);
     if (spec.hadExisting) await tx.createVersion(spec.slug, txOpts);
     await tx.putPage(spec.slug, spec.page,
       spec.allowEmptyOverwrite === true ? { ...txOpts, allowEmptyOverwrite: true } : txOpts);
@@ -2072,6 +2083,7 @@ export async function importImageFile(
   relativePath: string,
   opts: ImportImageOptions = {},
 ): Promise<ImportResult> {
+  await assertUnmanagedCanonicalWriter(engine, 'direct file import');
   // Defense-in-depth: reject symlinks before reading bytes.
   const lstat = lstatSync(filePath);
   if (lstat.isSymbolicLink()) {
@@ -2116,7 +2128,10 @@ export async function importImageFile(
     // An unchanged legacy image still needs its full OCR/visual index rebuilt.
     const sealed = await engine.executeRaw(`SELECT id FROM pages p WHERE p.source_id = $1 AND p.slug = $2 AND ${safeChunksFilter('p')}`,
       [sourceOpts.sourceId, imageSlug]);
-    if (sealed.length) return { slug: imageSlug, status: 'skipped', chunks: 0 };
+    if (sealed.length && existing.text_projection_revision === existing.knowledge_revision) {
+      await engine.transaction(tx => assertImportBase(tx, imageSlug, sourceOpts.sourceId, existing));
+      return { slug: imageSlug, status: 'skipped', chunks: 0 };
+    }
   }
 
   // Decode HEIC/AVIF; pass-through for universal codecs.
@@ -2197,6 +2212,7 @@ export async function importImageFile(
   await withImportTransaction(engine, {
     slug: imageSlug,
     hadExisting: !!existing,
+    basePage: existing,
     sourceId: opts.sourceId,
     page: {
       type: 'image',

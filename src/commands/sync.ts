@@ -1,3 +1,5 @@
+import { assertUnmanagedCanonicalWriter } from '../core/persistence/maintenance.ts';
+import { assertManagedFilesystemWrite } from '../core/persistence/filesystem-guard.ts';
 import { readSourceFileSync, hasSourceFilesystemLock, withSourceFilesystemLock, currentSourceFilesystemSignal, assertSourceFilesystemActive } from '../core/minions/source-filesystem.ts';
 import { currentJobSignal } from '../core/minions/submission-authority.ts';
 import { existsSync, readFileSync, writeFileSync, statSync, lstatSync, realpathSync } from 'fs';
@@ -606,6 +608,7 @@ See also:
 export { SyncLockBusyError, runBreakLock } from '../core/sync-lock.ts';
 
 export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<SyncResult> {
+  await assertUnmanagedCanonicalWriter(engine, 'legacy sync');
   assertSourceFilesystemActive(true);
   const jobSignal = currentJobSignal();
   if (jobSignal?.aborted) throw jobSignal.reason ?? new Error('Sync job cancelled');
@@ -5660,6 +5663,8 @@ export function manageGitignore(
   if (process.env.GBRAIN_NO_GITIGNORE === '1') {
     return;
   }
+
+  assertManagedFilesystemWrite(repoPath);
 
   // Submodule + worktree detection (closes #889 misclassification).
   // Both submodules and worktrees use `.git` as a FILE (not a directory), so

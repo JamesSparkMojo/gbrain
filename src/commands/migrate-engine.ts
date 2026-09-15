@@ -1,3 +1,4 @@
+import { assertUnmanagedCanonicalWriter } from '../core/persistence/maintenance.ts';
 /**
  * Engine migration: transfer brain data between PGLite and Postgres.
  *
@@ -794,6 +795,7 @@ export async function quiesceAutopilot(engine?: BrainEngine): Promise<(() => voi
 }
 
 export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]): Promise<void> {
+  await assertUnmanagedCanonicalWriter(sourceEngine, 'engine migration');
   const opts = parseArgs(args);
   const config = loadConfig();
   if (!config) {

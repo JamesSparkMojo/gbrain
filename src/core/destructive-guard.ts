@@ -1,3 +1,4 @@
+import { assertUnmanagedCanonicalWriter } from './persistence/maintenance.ts';
 /**
  * Destructive operation guard — v0.26.5
  *
@@ -328,6 +329,7 @@ export async function softDeleteSource(
   engine: BrainEngine,
   sourceId: string,
 ): Promise<SoftDeletedSource | null> {
+  await assertUnmanagedCanonicalWriter(engine, 'sources archive');
   // Atomic: only flip rows that are currently active. Returns the metadata
   // we need without a follow-up SELECT. RETURNING projects the columns the
   // caller cares about; pageCount is a separate count.
@@ -373,6 +375,7 @@ export async function restoreSource(
   sourceId: string,
   refederate: boolean = true,
 ): Promise<boolean> {
+  await assertUnmanagedCanonicalWriter(engine, 'sources restore');
   const federatedPatch = refederate ? '{"federated": true}' : '{"federated": false}';
   const rows = await engine.executeRaw<{ id: string }>(
     `UPDATE sources
@@ -454,6 +457,7 @@ export interface PurgeExpiredResult {
 export async function purgeExpiredSources(
   engine: BrainEngine,
 ): Promise<PurgeExpiredResult> {
+  await assertUnmanagedCanonicalWriter(engine, 'sources purge');
   const candidates = await engine.executeRaw<{ id: string; config: unknown; local_path: string | null }>(
     `SELECT id, config, local_path FROM sources
      WHERE archived = true

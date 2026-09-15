@@ -1,3 +1,4 @@
+import { assertManagedFilesystemWrite } from '../core/persistence/filesystem-guard.ts';
 import { readFileSync, readdirSync, statSync, lstatSync, existsSync, writeFileSync, unlinkSync, mkdirSync, copyFileSync } from 'fs';
 import { join, relative, extname, basename, dirname, resolve } from 'path';
 import { createHash } from 'crypto';
@@ -295,6 +296,7 @@ async function uploadRaw(engine: BrainEngine, args: string[]) {
     // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- identity comparison only (skip self-copy when source already IS the dest); no fs path is derived from this expression
     if (resolve(dest) !== resolve(filePath)) {
       mkdirSync(destDir, { recursive: true });
+      assertManagedFilesystemWrite(dest);
       copyFileSync(filePath, dest);
     }
     const hash = fileHash(filePath);
@@ -359,6 +361,7 @@ async function uploadRaw(engine: BrainEngine, args: string[]) {
     });
     // Write pointer next to the original file
     pointerPath = filePath + '.redirect.yaml';
+    assertManagedFilesystemWrite(pointerPath);
     writeFileSync(pointerPath, pointer);
     console.error(`Pointer written: ${pointerPath}`);
   }
@@ -642,6 +645,7 @@ async function mirrorFiles(args: string[]) {
     prefix: basename(dir) + '/',
     file_count: uploaded,
   });
+  assertManagedFilesystemWrite(dir);
   writeFileSync(join(dir, '.supabase'), marker);
 
   console.log(`Mirrored ${uploaded} files. Marker written to ${dir}/.supabase`);
@@ -653,6 +657,7 @@ async function unmirrorFiles(args: string[]) {
 
   const markerPath = join(dir, '.supabase');
   if (existsSync(markerPath)) {
+    assertManagedFilesystemWrite(markerPath);
     unlinkSync(markerPath);
     console.log(`Removed mirror marker from ${dir}. Files remain in storage.`);
   } else {
@@ -720,6 +725,7 @@ async function redirectFiles(args: string[]) {
       mime: mimeType || 'application/octet-stream',
       uploaded: new Date().toISOString(),
     });
+    assertManagedFilesystemWrite(filePath);
     writeFileSync(filePath + '.redirect.yaml', pointer);
     unlinkSync(filePath);
     redirected++;
@@ -770,6 +776,7 @@ async function restoreFiles(args: string[]) {
     try {
       const storagePath = info.storage_path || info.path; // v0.9 or legacy format
       const data = await storage.download(storagePath);
+      assertManagedFilesystemWrite(originalPath);
       writeFileSync(originalPath, data);
       unlinkSync(redirectPath);
       restored++;
@@ -809,7 +816,7 @@ async function cleanFiles(args: string[]) {
       }
       if (stat.isSymbolicLink()) continue;
       if (stat.isDirectory()) findAndClean(full);
-      else if (entry.endsWith('.redirect.yaml') || entry.endsWith('.redirect')) { unlinkSync(full); cleaned++; }
+      else if (entry.endsWith('.redirect.yaml') || entry.endsWith('.redirect')) { assertManagedFilesystemWrite(full); unlinkSync(full); cleaned++; }
     }
   }
   findAndClean(dir);

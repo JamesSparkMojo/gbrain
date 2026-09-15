@@ -1,3 +1,4 @@
+import { assertUnmanagedCanonicalWriter } from './persistence/maintenance.ts';
 /**
  * gbrain sources-ops — pure async functions for source-management operations
  * (v0.28). Extracted from src/commands/sources.ts so the CLI handlers and the
@@ -435,6 +436,7 @@ export async function addSource(
   engine: BrainEngine,
   opts: AddSourceOpts,
 ): Promise<SourceRow> {
+  await assertUnmanagedCanonicalWriter(engine, 'sources add');
   validateSourceId(opts.id);
 
   // gbrain#2955: normalize a Git Bash / MSYS drive path (`/c/Users/x`,
@@ -943,6 +945,8 @@ export async function removeSource(
     };
   }
 
+  await assertUnmanagedCanonicalWriter(engine, 'sources remove');
+
   // Confirmation gate (caller should usually have already shown the impact
   // preview from destructive-guard.ts).
   if (pageCount > 0 && !opts.confirmDestructive && !opts.yes) {
@@ -1062,6 +1066,7 @@ export async function recloneIfMissing(
   engine: BrainEngine,
   id: string,
 ): Promise<boolean> {
+  await assertUnmanagedCanonicalWriter(engine, 'sources reclone');
   const src = await fetchSourceRow(engine, id);
   if (!src) {
     throw new SourceOpError('not_found', `Source "${id}" not found.`);

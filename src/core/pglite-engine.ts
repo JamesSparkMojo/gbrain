@@ -1,3 +1,4 @@
+import { registerManagedFilesystemEngine } from './persistence/filesystem-guard.ts';
 import { trackPgliteDatabase, PgliteClosingError } from './pglite-lifecycle.ts';
 import { mutatePageTag } from './page-state/tags.ts';
 import type { PageKey, PageSnapshot, PageSnapshotOptions, PageWriteOptions } from './page-state/types.ts';
@@ -751,7 +752,17 @@ export class PGLiteEngine implements BrainEngine {
       }
       return this._connectPromise ?? undefined;
     }
-    const opening = this._connectInternal(config);
+    const opening = this._connectInternal(config).then(async () => {
+      try { await registerManagedFilesystemEngine(this, config.database_path); }
+      catch (error) {
+        try { await this._closeInternal(); }
+        catch (closeError) {
+          this._closePoison = new PgliteClosingError(`PGLite registry failure cleanup did not close; lock retained: ${String(closeError)}`);
+          throw this._closePoison;
+        }
+        throw error;
+      }
+    });
     this._connectPromise = opening;
     try { await opening; }
     catch (error) {
@@ -1029,6 +1040,7 @@ export class PGLiteEngine implements BrainEngine {
     if (applied > 0) {
       process.stderr.write(`  ${applied} migration(s) applied\n`);
     }
+    await registerManagedFilesystemEngine(this, this._savedConfig?.database_path);
   }
 
   /**
