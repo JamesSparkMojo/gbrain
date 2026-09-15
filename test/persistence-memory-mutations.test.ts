@@ -68,7 +68,7 @@ describe('journaled memory publication, both engines', () => {
       }));
       const replay = await operationsByName.remember!.handler(context(engine), params);
       expect(replay).toEqual(first);
-      await expect(operationsByName.remember!.handler(context(engine), { ...params, ttl: 'P30D' })).rejects.toMatchObject({ code: 'idempotency_conflict' });
+      await expect(operationsByName.remember!.handler(context(engine), { ...params, ttl: 'P30D' })).rejects.toMatchObject({ code: 'invalid_params', writeError: 'idempotency_conflict', protocolVersion: 1 });
     }
   });
 

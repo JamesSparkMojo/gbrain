@@ -17,6 +17,8 @@ import type { PreparedMutation } from './coordinator.ts';
 import type { WriteRequest } from './model.ts';
 import { sealPageTextProjection } from '../page-state/projections.ts';
 import { overlayCanonicalBodies } from '../page-state/snapshot.ts';
+import { prepareCanonicalProjections } from './canonical-projections.ts';
+import { preserveProtectedTakes } from './protected-takes.ts';
 
 function canonical(page: Pick<Page, 'type' | 'title' | 'compiled_truth' | 'timeline' | 'frontmatter'>, tags: string[]) {
   return { type: page.type, title: page.title, compiled_truth: page.compiled_truth, timeline: page.timeline ?? '',
@@ -86,6 +88,13 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
     }
     content = serializePageToMarkdown(page, tags);
   }
+  if (row.authority.remote && row.operation !== 'remember' && !row.operation.startsWith('takes_') && typeof content==='string') {
+    const parsed=parseMarkdown(content,row.slug);
+    const compiled_truth=preserveProtectedTakes(parsed.compiled_truth,snapshot?.page.compiled_truth??'');
+    const timeline=preserveProtectedTakes(parsed.timeline??'',snapshot?.page.timeline??'');
+    if (compiled_truth!==parsed.compiled_truth || timeline!==(parsed.timeline??'')) content=serializePageToMarkdown({
+      ...(snapshot?.page??{id:0,source_id:row.source_id,created_at:new Date(),updated_at:new Date()}),...parsed,compiled_truth,timeline},parsed.tags);
+  }
   // Detect an exact canonical no-op before ingestion can invoke any provider.
   // Revision/identity checks above still apply to stale identical replacements.
   if (snapshot && snapshot.page.deleted_at == null && typeof content === 'string') {
@@ -114,7 +123,11 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
     await authorizeWrite(engine, row.authority, row.operation, ready.slug);
     const duplicate = await engine.readPageSnapshot(ready.slug, { ...source, excludePrivate: row.authority.remote });
     if (!duplicate) throw new OperationError('permission_denied', 'The duplicate is not readable by this writer.');
-    return { observedRevision, noop: true, validate: tx => authorizeWrite(tx, row.authority, row.operation, ready.slug, true),
+    return { observedRevision, noop: true, additionalPageKeys:[{sourceId:row.source_id,slug:ready.slug}],validate: async tx => {
+      await authorizeWrite(tx,row.authority,row.operation,ready.slug,true);
+      const current=await tx.readPageSnapshot(ready.slug,{...source,excludePrivate:row.authority.remote});
+      if (!current || current.page.id!==duplicate.page.id || current.revision!==duplicate.revision) throw new OperationError('revision_conflict','The read-only duplicate changed during preparation.');
+    },
       apply: async () => ({ status: 'duplicate', slug: duplicate.page.slug, duplicate_revision: duplicate.revision }) };
   }
   const tags = versionTags ?? [...new Set([...(snapshot?.tags ?? []), ...ready.parsedPage.tags])].sort();
@@ -122,6 +135,8 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
   const rendered = serializePageToMarkdown(renderedPage, tags);
   const logicalNoop = snapshot !== null && digest(canonical(snapshot.page, snapshot.tags)) === digest(canonical(ready.parsedPage, tags));
   const noop = logicalNoop && (row.operation !== 'restore_page' || snapshot?.page.deleted_at == null);
+  const project = row.operation === 'remember' || row.operation.startsWith('takes_') ? undefined
+    : prepareCanonicalProjections(ready.parsedPage,row.slug,row.source_id);
   return { observedRevision, noop, file: await prepareFileTarget(engine, row, snapshot, rendered), apply: async tx => {
     if (!noop) {
       await ready.apply(tx);
@@ -130,6 +145,7 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
         for (const tag of snapshot!.tags) if (!versionTags.includes(tag)) await tx.removeTag(row.slug, tag, source);
         for (const tag of versionTags) await tx.addTag(row.slug, tag, source);
       }
+      await project?.(tx);
       // Index installation and terminal receipt share this transaction.
       await sealPageTextProjection(tx, row.slug, row.source_id);
     }

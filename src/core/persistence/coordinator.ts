@@ -18,6 +18,7 @@ import { tryAcquirePublicationCapacity } from './pool-capacity.ts';
 
 export interface PreparedMutation {
   observedRevision: string | null;
+  additionalPageKeys?: readonly {sourceId:string;slug:string}[];
   file?: { path: string; root: string; content: string | Uint8Array | null; expectedBeforeHash?: string | null };
   noop?: boolean;
   /** Must perform only transaction-composable database work. */
@@ -54,10 +55,14 @@ function requestError(error: unknown): { code: string; message: string } {
   return { code: 'storage_error', message: `Publication failed${code ? ` (${code})` : ''}. Inspect owner diagnostics.` };
 }
 function conflictCode(code: string): boolean { return ['revision_required','revision_conflict','source_changed','page_identity_changed'].includes(code); }
+function transientDatabaseFailure(error: unknown): boolean {
+  return ['40001','40P01','55P03','57014','53300','57P01','57P02','57P03','08000','08003','08006','08001','08004',
+    'ECONNRESET','ECONNREFUSED','ETIMEDOUT','CONNECTION_CLOSED','CONNECTION_ENDED'].includes(String((error as {code?:string})?.code));
+}
 export async function finishUnpublishedFailure(engine: BrainEngine, row: WriteRequest, error: unknown): Promise<WriteRequest> {
   const failure = requestError(error);
-  if (mayReprepare(row, failure)) {
-    await releaseUnpublishedClaim(engine, row, 'revision_changed_repreparing');
+  if (mayReprepare(row, failure) || transientDatabaseFailure(error)) {
+    await releaseUnpublishedClaim(engine, row, transientDatabaseFailure(error) ? 'database_contention' : 'revision_changed_repreparing');
     return (await getWriteRequestById(engine, row.id))!;
   }
   return engine.transaction(tx => completeWrite(tx, row, conflictCode(failure.code) ? 'conflict' : 'failed', {}, failure));
@@ -121,7 +126,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       await lockCounters(tx, ['brain', principalKey(requestPrincipal(row)), ...(row.worktree_id ? [`worktree:${row.worktree_id}`] : [])]);
       const [current] = await tx.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE id=$1::uuid FOR UPDATE', [row.id]);
       if (!current || current.execution_token !== row.execution_token || current.state !== 'running') throw new OperationError('write_claim_lost', 'Execution claim changed before publication.');
-      await tx.lockPageKeys([{ sourceId: row.source_id, slug: row.slug }]);
+      await tx.lockPageKeys([{ sourceId: row.source_id, slug: row.slug },...(prepared.additionalPageKeys??[])]);
       const snapshot = await tx.readPageSnapshot(row.slug, { sourceId: row.source_id, includeDeleted: true });
       if ((snapshot?.page.id ?? null) !== row.page_id) throw new OperationError('page_identity_changed', 'The accepted page was deleted or recreated.');
       if ((snapshot?.revision ?? null) !== prepared.observedRevision) throw new OperationError('revision_conflict', 'The page changed during preparation.', 'Read its current revision and submit the updated intent with a new request_id.');
@@ -155,7 +160,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       catch { /* database outage: durable recovery record remains discoverable */ }
       if (lock) {
         try { return await recoverPublication(engine, row.id, hostId, true,
-          (published && !filesystemFailed) || mayReprepare(row, requestError(error)) ? undefined : requestError(error)); }
+          (published && !filesystemFailed) || mayReprepare(row, requestError(error)) || transientDatabaseFailure(error) ? undefined : requestError(error)); }
         catch { /* hold durable recovering state; next owner loop retries */ }
       }
       try { return await getWriteRequestById(engine, row.id) ?? { ...row, state: 'recovering', blocked_reason: 'database_unavailable' }; }

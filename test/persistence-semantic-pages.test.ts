@@ -8,13 +8,14 @@ import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
 
-const engine = new PGLiteEngine();
+let engine: PGLiteEngine;
 const root = mkdtempSync(join(tmpdir(), 'gbrain-semantic-pages-'));
 const sourceId = 'semantic-pages-test';
-const ctx: OperationContext = { engine, config: { engine: 'pglite' }, sourceId, remote: false, dryRun: false,
-  logger: { info() {}, warn() {}, error() {} } };
+let ctx: OperationContext;
 const submit = (operation: string, params: Record<string, unknown>) => submitPageMutation(ctx, { operation, params: { request_id: randomUUID(), ...params } });
 beforeAll(async () => {
+  engine=new PGLiteEngine();
+  ctx={engine,config:{engine:'pglite'},sourceId,remote:false,dryRun:false,logger:{info(){},warn(){},error(){}}};
   await engine.connect({}); await engine.initSchema();
   await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', [sourceId,root]);
   await submit('put_page', { slug: 'page', content: '---\ntype: note\ntitle: Example\n---\nStable prose\n' });

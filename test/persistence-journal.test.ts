@@ -132,7 +132,7 @@ describe('durable mutation journal', () => {
   test('file failure restores original bytes, leaves old database revision, and retains one outcome', async () => {
     for (const engine of engines) {
       const root = mkdtempSync(join(tmpdir(), 'gbrain-journal-root-')); roots.push(root);
-      const fileSource = `${sourceId}-${engines.indexOf(engine)}`;
+      const fileSource = `${sourceId}-${randomUUID().slice(0,8)}`;
       await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2) ON CONFLICT(id) DO UPDATE SET local_path=$2', [fileSource, root]);
       const binding = await claimWorktree(engine, fileSource, root, hostId);
       const page = await engine.putPage('file', input('Before'), { sourceId: fileSource });
