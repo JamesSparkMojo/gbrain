@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { chmodSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
+import { accessSync, chmodSync, constants, lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { tryAcquireNativeLock } from '../persistence/native-lock.ts';
 
@@ -85,3 +85,14 @@ export async function claimLocalIpcBinding(legacyPath: string): Promise<{ socket
 }
 
 export function isWindowsIpcPipe(path: string): boolean { return pipe(path); }
+
+
+/** Existing Unix socket permissions remain authoritative if a runtime loses the connect errno. */
+export function unixSocketProbeState(path: string): 'socket' | 'missing' | 'other' | 'unknown' {
+  try {
+    if (!lstatSync(path).isSocket()) return 'other';
+  } catch (error) { return missing(error) ? 'missing' : 'unknown'; }
+  try { accessSync(path, constants.W_OK); }
+  catch { return 'unknown'; }
+  return 'socket';
+}

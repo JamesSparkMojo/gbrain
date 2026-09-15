@@ -59,7 +59,7 @@ import {
 } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { configDir } from '../config.ts';
-import { claimLocalIpcBinding, isWindowsIpcPipe, localIpcSocketPath, prepareLocalIpcPath } from './ipc-path.ts';
+import { claimLocalIpcBinding, isWindowsIpcPipe, localIpcSocketPath, prepareLocalIpcPath, unixSocketProbeState } from './ipc-path.ts';
 import type { EntityCandidate } from './entity-salience.ts';
 import type { WindowTurn } from './entity-salience.ts';
 import type { PointerBlock } from './retrieval-reflex.ts';
@@ -1028,6 +1028,8 @@ export async function socketHasLiveListener(socketPath: string): Promise<boolean
  */
 type SocketOwner = 'live' | 'dead' | 'unknown';
 function probeSocketOwner(socketPath: string): Promise<SocketOwner> {
+  const unix = process.platform !== 'win32';
+  if (unix && unixSocketProbeState(socketPath) === 'unknown') return Promise.resolve('unknown');
   return new Promise((resolve) => {
     let settled = false;
     const probe = new net.Socket();
@@ -1041,8 +1043,14 @@ function probeSocketOwner(socketPath: string): Promise<SocketOwner> {
     // for an absent path synchronously inside connect(), which would be an
     // unhandled 'error' if attached afterwards.
     probe.once('connect', () => finish('live'));
-    const failed = (error: unknown) => finish(
-      ['ENOENT', 'ECONNREFUSED', 'ENOTSOCK'].includes((error as NodeJS.ErrnoException).code ?? '') ? 'dead' : 'unknown');
+    const failed = (error: unknown) => {
+      const code = (error as NodeJS.ErrnoException).code ?? '';
+      const entry = unix ? unixSocketProbeState(socketPath) : undefined;
+      // Bun can report ENOENT for an existing socket denied by permissions.
+      // Recheck after connect as permissions may have changed during the probe.
+      if (entry === 'unknown') { finish('unknown'); return; }
+      finish(['ENOENT', 'ECONNREFUSED', 'ENOTSOCK'].includes(code) ? 'dead' : 'unknown');
+    };
     probe.once('error', failed);
     probe.once('timeout', () => finish('unknown'));
     probe.setTimeout(CLIENT_TIMEOUT_MS);
