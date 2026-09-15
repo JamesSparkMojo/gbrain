@@ -66,5 +66,12 @@ the exact production wrapper, proves two compiled processes exclude each
 other, kills the holder and proves immediate handoff. Release CI additionally
 passes `--binary bin/<artifact>` to require that the actual CLI executable
 embeds the exact current-platform addon. That assertion verifies packaging;
-the focused executable verifies compiled lock execution. Full CLI lifecycle
-behavior is covered by the persistence integration tests.
+the focused executable verifies compiled lock execution.
+
+`bun scripts/native/cli-persistence-smoke.ts --binary bin/<artifact>` copies
+the actual release executable outside the source checkout and exercises keyless
+disk-PGLite initialization, native ownership activation, canonical publication,
+revision conflicts with typed receipts, exact replay, resident stdio/CLI IPC,
+and shutdown/reopen. Release CI runs it for both published Linux x64 and macOS
+arm64 artifacts. Child homes and credentials are isolated; the script never
+loads repository TypeScript or adjacent native files to satisfy the executable.

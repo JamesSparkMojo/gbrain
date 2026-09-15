@@ -1,3 +1,4 @@
+import { installFixtureChunks } from './helpers/page-projection.ts';
 /**
  * Chunkless-page safety net for `embed --stale`.
  *
@@ -77,7 +78,7 @@ describe('countChunklessPagesWithContent / listChunklessPagesWithContent', () =>
 
   test('excludes pages that already have chunk rows', async () => {
     await engine.putPage('normal/page', { type: 'note', title: 'Normal', compiled_truth: 'hello world' });
-    await engine.upsertChunks('normal/page', [
+    await installFixtureChunks(engine, 'normal/page', [
       { chunk_index: 0, chunk_text: 'hello world', chunk_source: 'compiled_truth' },
     ]);
 
@@ -154,7 +155,7 @@ describe('embed --stale chunkless-page safety net (end-to-end)', () => {
 
   test('pre-existing NULL-embedding chunks on other pages still get embedded (no regression)', async () => {
     await engine.putPage('normal/pre-chunked', { type: 'note', title: 'Pre-chunked', compiled_truth: 'hello world' });
-    await engine.upsertChunks('normal/pre-chunked', [
+    await installFixtureChunks(engine, 'normal/pre-chunked', [
       { chunk_index: 0, chunk_text: 'hello world', chunk_source: 'compiled_truth' },
     ]);
     await engine.putPage('stub/heal-me-2', {
@@ -208,7 +209,7 @@ describe('embed --stale chunkless-page safety net (end-to-end)', () => {
 
   test('healthy brain (no chunkless pages) pays no extra cost and behaves exactly as before', async () => {
     await engine.putPage('normal/only-page', { type: 'note', title: 'Only', compiled_truth: 'hello' });
-    await engine.upsertChunks('normal/only-page', [
+    await installFixtureChunks(engine, 'normal/only-page', [
       { chunk_index: 0, chunk_text: 'hello', chunk_source: 'compiled_truth' },
     ]);
 
@@ -243,7 +244,7 @@ describe('embed --stale chunkless-page safety net (end-to-end)', () => {
               injected = true;
               // Simulate the concurrent writer: chunks the page with DIFFERENT
               // content than what the sweep just read.
-              await engine.upsertChunks('stub/raced', [
+              await installFixtureChunks(engine, 'stub/raced', [
                 { chunk_index: 0, chunk_text: 'concurrently-written chunk', chunk_source: 'compiled_truth' },
               ]);
             }
@@ -277,16 +278,16 @@ describe('embed --stale chunkless-page safety net (end-to-end)', () => {
       compiled_truth: 'This page will fail to heal.',
     });
     await engine.putPage('normal/unrelated', { type: 'note', title: 'Unrelated', compiled_truth: 'fine' });
-    await engine.upsertChunks('normal/unrelated', [
+    await installFixtureChunks(engine, 'normal/unrelated', [
       { chunk_index: 0, chunk_text: 'fine', chunk_source: 'compiled_truth' },
     ]);
 
     const brokenEngine = new Proxy(engine, {
       get(target, prop, receiver) {
-        if (prop === 'getPage') {
+        if (prop === 'readPageSnapshot') {
           return async (slug: string, opts?: unknown) => {
-            if (slug === 'stub/broken') throw new Error('simulated getPage failure');
-            return (engine.getPage as (s: string, o?: unknown) => unknown)(slug, opts);
+            if (slug === 'stub/broken') throw new Error('simulated page snapshot failure');
+            return (engine.readPageSnapshot as (s: string, o?: unknown) => unknown)(slug, opts);
           };
         }
         const value = Reflect.get(target, prop, receiver);
