@@ -95,7 +95,11 @@ public `put_page` writes; the gate compares the median loaded p99 to the
 median idle p99 on the same runner. Each run requires actual committed
 writes, zero failed reads/writes and at least 90% coverage of the read
 window by the union of in-flight public mutation intervals. An idle gap
-cannot be hidden by a late writer completion. Corpus seeding uses the same
+cannot be hidden by a late writer completion. Actual writes must commit
+during the read window. Both phases yield one event-loop turn between
+queries (outside individual query timing), so PGLite's immediate promise
+chain cannot starve resident-consumer timers and fabricate overlap using
+only queued requests. Corpus seeding uses the same
 public mutation path. This is keyless keyword search through `hybridSearch`,
 without a provider or remote embedding latency.
 

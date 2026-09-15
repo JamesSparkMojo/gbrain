@@ -95,7 +95,12 @@ export async function runReadLatencyWorkload(options: ReadWorkloadOptions = {}) 
       const timings: number[] = [];
       for (let i = 0; i < count; i++) { if (backgroundFailure) throw backgroundFailure;
         const started = performance.now(); await hybridSearch(engine, queries[i % queries.length], { limit: 10 });
-        if (backgroundFailure) throw backgroundFailure; timings.push(performance.now() - started); }
+        if (backgroundFailure) throw backgroundFailure; timings.push(performance.now() - started);
+        // PGLite can resolve the whole read loop through microtasks. Give the
+        // resident consumer/renewal timers a turn between queries in BOTH
+        // phases; a queued request alone is not concurrent writer evidence.
+        await Bun.sleep(0);
+      }
       return { ...distribution(timings), queries_run: timings.length };
     }
     result.phase_a = await readPhase(); recording = true;
@@ -122,9 +127,11 @@ export async function runReadLatencyWorkload(options: ReadWorkloadOptions = {}) 
     if (backgroundFailure) throw backgroundFailure;
     await metricsWork; await sample();
     result.phase_b.writes_completed = completed; result.phase_b.writes_failed = failed;
+    result.phase_b.writes_committed_during_reads = intervals.filter(([, end]) => end <= queryEnd).length;
     result.phase_b.writer_end_ms = Math.max(0, ...intervals.map(([, end]) => end - queryStart));
     result.overlap_pct = overlapPercent(queryStart, queryEnd, intervals);
     result.overlap_basis = 'union of actual public mutation intervals from invocation through terminal receipt';
+    result.query_scheduling = 'one event-loop yield between queries in both phases, excluded from individual query latency';
     result.admission = distribution(admissionMs); result.commit = distribution(completionMs);
     assert.equal(admissionMs.length, completed, 'every completed write needs an observed durable admission');
     result.metrics = samples; result.throughput_writes_per_second = completed * 1000 / (performance.now() - queryStart);
@@ -133,7 +140,8 @@ export async function runReadLatencyWorkload(options: ReadWorkloadOptions = {}) 
     result.peak_rss_bytes = Math.max(...samples.map(sample => sample.rss_bytes));
     for (const p of ['p50', 'p95', 'p99']) result[`delta_${p}_pct`] = 100 * (result.phase_b[`${p}_ms`] / result.phase_a[`${p}_ms`] - 1);
     result.brain_page_count = Number((await engine.executeRaw<{ n: number }>('SELECT count(*)::integer AS n FROM pages'))[0].n);
-    assert(completed > 0, 'read-load sample needs actual committed writes'); assert(result.overlap_pct >= 90, `insufficient sustained overlap: ${result.overlap_pct}%`);
+    assert(result.phase_b.writes_committed_during_reads > 0, 'actual writes must commit while reads are still running');
+    assert(result.overlap_pct >= 90, `insufficient sustained overlap: ${result.overlap_pct}%`);
     result.ok = true;
   } catch (error) { result.error = String(error); }
   finally {
