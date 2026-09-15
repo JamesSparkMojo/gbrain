@@ -1916,3 +1916,24 @@ CREATE OR REPLACE FUNCTION gbrain_queue_page_projection() RETURNS trigger LANGUA
 DROP TRIGGER IF EXISTS pages_projection_queue ON pages;
 CREATE TRIGGER pages_projection_queue AFTER INSERT OR UPDATE OR DELETE ON pages
     FOR EACH ROW EXECUTE FUNCTION gbrain_queue_page_projection();
+
+
+CREATE TABLE IF NOT EXISTS persistence_topology_changes (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  principal_id uuid NOT NULL,
+  request_id uuid NOT NULL,
+  digest text NOT NULL,
+  operation text NOT NULL,
+  source_id text NOT NULL,
+  source_incarnation uuid,
+  worktree_ids uuid[] NOT NULL DEFAULT '{}',
+  state text NOT NULL CHECK(state IN ('recovering','committed','failed')),
+  recovery jsonb,
+  recovery_bytes bigint NOT NULL DEFAULT 0 CHECK(recovery_bytes>=0),
+  terminal_bytes bigint NOT NULL DEFAULT 2048 CHECK(terminal_bytes>=0),
+  outcome jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(principal_id,request_id)
+);
+CREATE INDEX IF NOT EXISTS persistence_topology_recovering ON persistence_topology_changes(created_at) WHERE state='recovering';

@@ -39,6 +39,12 @@ export async function getWorktreeBinding(engine: SqlEngine, sourceId: string, ho
   return row ?? null;
 }
 export async function claimWorktree(engine: BrainEngine, sourceId: string, path: string, hostId = localHostId()): Promise<WorktreeBinding> {
+  if(await managedPersistenceEnabled(engine)) {
+    if(hostId!==localHostId()) throw new OperationError('permission_denied','A source can be claimed only by the local registered host.');
+    const { runManagedSourceLifecycle }=await import('./source-lifecycle.ts');
+    await runManagedSourceLifecycle(engine,{operation:'claim',sourceId,path});
+    return (await getWorktreeBinding(engine,sourceId,hostId))!;
+  }
   const sourceRoot = realpathSync(resolve(path));
   if (!statSync(sourceRoot).isDirectory()) throw new OperationError('storage_error', 'Configured canonical source root is not a directory.');
   let root = sourceRoot;
@@ -107,7 +113,7 @@ export function worktreeManifest(root: string): { digest: string; files: Record<
   const files: Record<string, string> = {};
   const visit = (dir: string) => {
     for (const name of readdirSync(dir).sort()) {
-      if (name === '.git') continue;
+      if (name === '.git' || name === '.gbrain-managed') continue;
       const path = join(dir, name), info = lstatSync(path);
       if (info.isSymbolicLink()) throw new OperationError('writer_manifest_unsafe', 'Canonical worktree transfer requires a symlink-free manifest.');
       if (info.isDirectory()) visit(path);

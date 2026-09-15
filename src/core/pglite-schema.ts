@@ -1,4 +1,5 @@
 import { PERSISTENCE_SCHEMA_STATEMENTS } from './persistence/schema.ts';
+import { PERSISTENCE_TOPOLOGY_SCHEMA_SQL } from './persistence/topology-schema.ts';
 import { PAGE_PROJECTION_SCHEMA_SQL } from './page-state/projection-schema.ts';
 import { LEASE_TOKEN_SCHEMA_SQL } from './lease-schema.ts';
 import { PAGE_STATE_SCHEMA_SQL } from './page-state/schema.ts';
@@ -1261,6 +1262,7 @@ CREATE INDEX IF NOT EXISTS page_aliases_slug_idx
 ${PAGE_STATE_SCHEMA_SQL}
 ${PERSISTENCE_SCHEMA_STATEMENTS.join(';\n')};
 ${PAGE_PROJECTION_SCHEMA_SQL}
+${PERSISTENCE_TOPOLOGY_SCHEMA_SQL}
 
 `;
 

@@ -1,4 +1,5 @@
 import { assertUnmanagedCanonicalWriter } from './persistence/maintenance.ts';
+import { managedPersistenceEnabled } from './persistence/ownership.ts';
 /**
  * gbrain sources-ops — pure async functions for source-management operations
  * (v0.28). Extracted from src/commands/sources.ts so the CLI handlers and the
@@ -142,6 +143,8 @@ export interface SourceStatus {
 export interface AddSourceOpts {
   id: string;
   name?: string;
+  requestId?: string;
+  expectedIncarnation?: string;
   localPath?: string | null;
   remoteUrl?: string;
   federated?: boolean | null;
@@ -206,6 +209,8 @@ export interface RemoveSourceOpts {
   yes?: boolean;
   dryRun?: boolean;
   keepStorage?: boolean;
+  requestId?: string;
+  expectedIncarnation?: string;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -436,6 +441,7 @@ export async function addSource(
   engine: BrainEngine,
   opts: AddSourceOpts,
 ): Promise<SourceRow> {
+  if(await managedPersistenceEnabled(engine))return (await import('./persistence/managed-sources.ts')).addManagedSource(engine,opts);
   await assertUnmanagedCanonicalWriter(engine, 'sources add');
   validateSourceId(opts.id);
 
@@ -945,6 +951,14 @@ export async function removeSource(
     };
   }
 
+  if(await managedPersistenceEnabled(engine)){
+    const {runManagedSourceLifecycle}=await import('./persistence/source-lifecycle.ts');
+    const result=await runManagedSourceLifecycle(engine,{operation:'remove',sourceId:opts.id,confirmDestructive:opts.confirmDestructive||opts.yes,
+      requestId:opts.requestId,expectedIncarnation:opts.expectedIncarnation});
+    (await import('./persistence/managed-sources.ts')).assertTopologyCommitted(result);
+    return {id:opts.id,pages_deleted:pageCount,clone_removed:false,clone_path:src.local_path,dryRun:false};
+  }
+
   await assertUnmanagedCanonicalWriter(engine, 'sources remove');
 
   // Confirmation gate (caller should usually have already shown the impact
@@ -1066,6 +1080,17 @@ export async function recloneIfMissing(
   engine: BrainEngine,
   id: string,
 ): Promise<boolean> {
+  if(await managedPersistenceEnabled(engine)){
+    const src=await fetchSourceRow(engine,id);
+    if(!src)throw new SourceOpError('not_found',`Source "${id}" not found.`);
+    const remoteUrl=getRemoteUrl(src.config);
+    if(!remoteUrl||!src.local_path)return false;
+    const binding=await (await import('./persistence/ownership.ts')).getWorktreeBinding(engine,id);
+    if(binding?.local_path&&existsSync(binding.local_path)&&validateRepoState(binding.local_path,remoteUrl)==='healthy')return false;
+    const {runManagedSourceLifecycle}=await import('./persistence/source-lifecycle.ts');
+    const result=await runManagedSourceLifecycle(engine,{operation:'reclone',sourceId:id});
+    (await import('./persistence/managed-sources.ts')).assertTopologyCommitted(result);return true;
+  }
   await assertUnmanagedCanonicalWriter(engine, 'sources reclone');
   const src = await fetchSourceRow(engine, id);
   if (!src) {

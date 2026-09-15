@@ -87,6 +87,10 @@ export async function admitWrite(engine: BrainEngine, input: WriteAdmission, ove
     }
     await authorizeWrite(tx, input.authority, input.operation, input.slug, true);
     const counters = await lockCounters(tx, ['brain', principalKey(input.principal)]);
+    if(input.principal.kind==='local_cli') {
+      const topology=await tx.executeRaw('SELECT id FROM persistence_topology_changes WHERE principal_id=$1::uuid AND request_id=$2::uuid',[input.principal.id,requestId]);
+      if(topology.length) throw new OperationError('idempotency_conflict','This request_id belongs to a source lifecycle operation.');
+    }
     const prior = await getWriteRequest(tx, input.principal, requestId);
     if (prior) return assertReplayIntent(prior, fingerprint);
     for (const row of counters) {
