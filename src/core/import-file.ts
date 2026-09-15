@@ -889,8 +889,12 @@ export async function importFromContent(
   //   and defers per-chunk synopsis to the Minion-driven sweep).
   // - Stored chunk_text stays canonical; only the embedding input is wrapped.
   // - Code chunks (chunk_source='fenced_code') bypass wrapping per D20-T4.
+  // Coordinated imports publish text now and embed through the durable outbox.
+  // Capture their wrapping convention before publication, even though no
+  // provider runs here. Plain legacy --no-embed imports retain their behavior.
+  const prepareEmbeddingContext = !opts.noEmbed || opts.prepare !== undefined;
   let effectiveCRMode: 'none' | 'title' | 'per_chunk_synopsis' = 'none';
-  if (!opts.noEmbed) {
+  if (prepareEmbeddingContext) {
     const searchInput = await loadSearchModeConfig(engine);
     const knobs = resolveSearchMode(searchInput);
     // #3885: load the REAL source row so a stored `gbrain sources
@@ -952,10 +956,10 @@ export async function importFromContent(
   }
 
   // v0.40.3.0: corpus_generation hash for D27 P1-5 cache invalidation.
-  // Only set when we actually applied a wrapper; 'none' tier writes NULL
-  // so the column reflects "no CR shape applied" rather than a stale hash.
+  // Record the selected wrapper generation for inline or deferred embedding;
+  // 'none' writes NULL. The separate embedding signature certifies vectors.
   const corpusGeneration =
-    effectiveCRMode === 'none' || opts.noEmbed
+    effectiveCRMode === 'none' || !prepareEmbeddingContext
       ? null
       : computeCorpusGeneration({
           crMode: effectiveCRMode,
@@ -1020,9 +1024,10 @@ export async function importFromContent(
     // v0.40.3.0: stamp the contextual retrieval state columns alongside
     // the page write. updatePageContextualRetrievalState is a narrow
     // UPDATE that runs after putPage's INSERT/UPDATE so the row exists.
-    // For opts.noEmbed callers, we skip stamping — the next embed pass
-    // (gbrain embed --stale or contextual reindex Minion) will set it.
-    if (!opts.noEmbed) {
+    // Prepared imports bind this convention to the new canonical revision;
+    // their deferred embedder reproduces it and installs only under CAS.
+    // This stamp certifies no vector: embedding_signature stays deferred.
+    if (prepareEmbeddingContext) {
       await tx.updatePageContextualRetrievalState(
         slug,
         sourceId ?? 'default',
