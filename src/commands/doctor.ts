@@ -1595,7 +1595,7 @@ export async function buildChecks(
   // PATH or the entry is broken. Skips silently when gbrain isn't on PATH
   // at all (e.g. running via `bun src/cli.ts`).
   try {
-    const { execSync } = await import('node:child_process');
+    const { execSync } = await import('../core/spawn.ts');
     let candidates: string[] = [];
     try {
       candidates = execSync('which -a gbrain', {

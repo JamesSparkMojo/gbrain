@@ -6,7 +6,7 @@ installSigchldHandler();
 import { installSignalHandlers as installCleanupSignalHandlers } from './core/process-cleanup.ts';
 
 import { readFileSync, existsSync, unlinkSync, fstatSync } from 'fs';
-import { spawn } from 'child_process';
+import { spawn } from './core/spawn.ts';
 import {
   readUpdateCache,
   isCacheFresh,
@@ -2522,7 +2522,7 @@ async function handleCliOnly(command: string, args: string[]) {
 
   if (command === 'smoke-test') {
     // Run smoke tests — no DB connection needed, the script handles its own checks
-    const { execSync } = await import('child_process');
+    const { execSync } = await import('./core/spawn.ts');
     const { resolve, dirname } = await import('path');
     const { fileURLToPath } = await import('url');
     const scriptDir = dirname(fileURLToPath(import.meta.url));

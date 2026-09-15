@@ -32,7 +32,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../../core/spawn.ts';
 
 import type {
   Migration, OrchestratorOpts, OrchestratorResult, OrchestratorPhaseResult,
