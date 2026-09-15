@@ -145,7 +145,7 @@ matched. **create_safety** (enum): `exists` (a page for this already exists)
 signal). The derivation of both is implementation-defined and may improve;
 the values are frozen.
 
-### remember(fact, provenance, ttl?, entity?, kind?, visibility?) — write
+### remember(fact, provenance, ttl?, entity?, kind?, visibility?, request_id?) — write
 
 Save ONE fact with mandatory attribution.
 
@@ -271,7 +271,7 @@ purpose, no dedicated status); a `max_tokens`-cut envelope parses as
 `output_truncated` (warning `LLM_OUTPUT_TRUNCATED`) so a too-small output
 budget is distinguishable from malformed model output.
 
-### forget(id, reason?) — write
+### forget(id, reason?, request_id?) — write
 
 Expire a fact by its opaque string id (from `remember` or
 `recall.facts[].fact_id` — never a page slug). Idempotent: re-forgetting an
@@ -304,6 +304,15 @@ executed again. Corrected input requires a new ID. Clients that lose a response
 without retaining its request ID cannot assume that retrying content is an
 exactly-once write. A receipt never contains queued content, recovery paths or
 execution credentials.
+
+The starter/full helpers `get_write_request`, `list_write_requests`, and
+`cancel_write_request` require write scope and explicit current operation
+permission. Existing operation snapshots are not widened by an upgrade.
+Helpers expose only the caller's currently authorized receipts; a foreign,
+missing, or no-longer-accessible UUID has the same `not_found` response. Their
+absence from a verb-only or agent-only grant does not prevent same-verb replay.
+See [concurrent writes](../guides/concurrent-writes.md) for exact read guarantees,
+bounded retention, ownership transfer, and the explicit regrant procedure.
 
 For `forget`, a committed source- and visibility-scoped withdrawal is the
 durable memory outcome. Its filesystem mirror may remain pending; stale
