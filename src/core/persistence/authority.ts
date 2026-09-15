@@ -92,10 +92,39 @@ export async function authorizeStoredRequest(engine: SqlEngine, row: WriteReques
   if (!source || source.archived || source.incarnation !== row.source_incarnation) throw new OperationError('source_changed', 'The accepted source is no longer active.');
   await authorizeWrite(engine, row.authority, row.operation, row.slug, lock);
   await authorizePageVisibility(engine, row.authority, row.slug);
+  if (row.authority.remote && ['takes_add', 'takes_update', 'takes_resolve', 'takes_supersede'].includes(row.operation)) {
+    await authorizeStoredTakeHolders(engine, row);
+  }
   if (row.outcome?.status === 'duplicate' && typeof row.outcome.slug === 'string' && row.outcome.slug !== row.slug) {
     await authorizeWrite(engine, row.authority, row.operation, row.outcome.slug, lock);
     await authorizePageVisibility(engine, row.authority, row.outcome.slug);
   }
+}
+
+/** Receipt/replay access uses the same holder intersection as publication. */
+async function authorizeStoredTakeHolders(engine: SqlEngine, row: WriteRequest): Promise<void> {
+  const retained = row.authority.takeHoldersUsed;
+  if (retained !== undefined) {
+    if (!strings(retained) || retained.length === 0) deny('The take receipt has invalid retained holder authority.');
+    for (const holder of retained) await authorizeTakeHolder(engine, row.authority, holder);
+    return;
+  }
+  // Queued requests have no publication metadata yet. Legacy terminal rows may
+  // also lack it; use retained outcome or current canonical target rows, and
+  // refuse a committed receipt whose affected holder can no longer be proven.
+  const holders = new Set<string>();
+  for (const holder of [row.intent?.holder, row.outcome?.holder]) {
+    if (typeof holder === 'string') holders.add(holder);
+  }
+  const numbers = [row.intent?.row_num, row.outcome?.row_num, row.outcome?.old_row, row.outcome?.new_row]
+    .filter((value): value is number => Number.isSafeInteger(value) && Number(value) > 0);
+  if (row.page_id !== null && numbers.length) {
+    const targets = await engine.executeRaw<{ holder: string }>(
+      'SELECT DISTINCT holder FROM takes WHERE page_id=$1 AND row_num=ANY($2::integer[])', [row.page_id, numbers]);
+    for (const target of targets) holders.add(target.holder);
+  }
+  if (row.state === 'committed' && holders.size === 0) deny('The legacy take receipt has no verifiable holder authority.');
+  for (const holder of holders) await authorizeTakeHolder(engine, row.authority, holder);
 }
 export async function ownRequestAccessible(ctx: OperationContext, row: WriteRequest): Promise<boolean> {
   try {

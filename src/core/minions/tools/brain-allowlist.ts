@@ -212,7 +212,7 @@ export interface BuildBrainToolsOpts {
    */
   sourceId?: string;
   /** Current remote owner grant; never populated from caller tool arguments. */
-  delegatedAuth?: Pick<AuthInfo, 'clientId' | 'scopes' | 'sourceId' | 'allowedSources'>;
+  delegatedAuth?: Pick<AuthInfo, 'clientId' | 'scopes' | 'sourceId' | 'allowedSources' | 'allowedOperations'>;
 }
 
 interface OpContextDeps {
@@ -243,7 +243,8 @@ function buildOpContext(deps: OpContextDeps): OperationContext {
     sourceId: deps.sourceId ?? 'default',
     // Preserve explicit per-call source checks without importing direct-write
     // fences or requiring direct read/write scopes for agent-only grants.
-    ...(deps.delegatedAuth ? { auth: { token: '', ...deps.delegatedAuth } } : {}),
+    ...(deps.delegatedAuth ? { auth: { token: '', ...deps.delegatedAuth,
+      principal: { kind: 'oauth_client' as const, id: deps.delegatedAuth.clientId } } } : {}),
     jobId: deps.jobId,
     subagentId: deps.subagentId,
     viaSubagent: true,           // FAIL-CLOSED: put_page etc. enforce namespace

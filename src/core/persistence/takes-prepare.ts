@@ -106,6 +106,9 @@ async function prepare(engine: BrainEngine, row: WriteRequest, config: GBrainCon
   return {...prepared,validate:async tx=>{
     await prepared.validate?.(tx);
     for (const holder of requiredHolders) await authorizeTakeHolder(tx,row.authority,holder);
+    await tx.executeRaw(`UPDATE persistence_requests
+      SET authority=jsonb_set(authority,'{takeHoldersUsed}',$2::text::jsonb)
+      WHERE id=$1::uuid`, [row.id, JSON.stringify([...requiredHolders].sort())]);
   },apply:async tx=>{
     const outcome=await prepared.apply(tx);
     if (!prepared.noop) {

@@ -19,6 +19,8 @@ export interface WriteAuthority {
   delegatedPrefixes?: string[] | null;
   delegated?: boolean;
   takesHolders?: string[] | null;
+  /** Actual holders touched by a published take mutation; retained after intent compaction. */
+  takeHoldersUsed?: string[];
 }
 export interface RecoveryRecord {
   version: 1;
