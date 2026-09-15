@@ -127,6 +127,27 @@ describe('parseAuthCreateArgs', () => {
     expect(parseAuthCreateArgs(['workspace', '--source=workspace']).name).toBe('workspace');
     expect(parseAuthCreateArgs(['mybot', '--source=']).error).toContain('source flag requires a non-empty value');
   });
+
+  test('--scopes=<v> / --takes-holders=<v> (equals form) are parsed, not silently dropped', () => {
+    // Same class as the --source= gap: the CLI flag validator admits the
+    // inline form, and an unmatched --scopes= left scopes undefined, so
+    // insertLegacyToken wrote scopes = NULL and minted a full-access token.
+    expect(parseAuthCreateArgs(['bot', '--scopes=read'])).toEqual({ name: 'bot', takesHolders: undefined, scopes: ['read'] });
+    expect(parseAuthCreateArgs(['bot', '--takes-holders=world,charlie-example'])).toEqual({
+      name: 'bot',
+      takesHolders: ['world', 'charlie-example'],
+    });
+    expect(parseAuthCreateArgs(['bot', '--scopes=']).error).toMatch(/scopes flag requires a value/);
+    expect(parseAuthCreateArgs(['bot', '--scopes=--x']).error).toMatch(/scopes flag requires a value/);
+    expect(parseAuthCreateArgs(['bot', '--takes-holders=']).error).toMatch(/takes-holders flag requires a value/);
+    // Inline forms never occupy a value slot, so the positional survives.
+    expect(parseAuthCreateArgs(['workspace', '--source=workspace', '--scopes=read,write'])).toEqual({
+      name: 'workspace',
+      takesHolders: undefined,
+      source: 'workspace',
+      scopes: ['read', 'write'],
+    });
+  });
 });
 
 describe('renderTokenScopes', () => {

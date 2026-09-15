@@ -1088,48 +1088,52 @@ async function clientsCmd(args: string[]) {
  * allowed scope set happens in create() so the error path exits cleanly.
  */
 export function parseAuthCreateArgs(rest: string[]): { name: string; takesHolders?: string[]; scopes?: string[]; source?: string; error?: string } {
-  const takesIdx = rest.indexOf('--takes-holders');
-  const takesValue = takesIdx >= 0 ? rest[takesIdx + 1] : undefined;
-  // Fail closed on a missing/flag-like value: `--scopes` as the last arg
-  // silently minting a grandfathered FULL-ACCESS token is the exact
-  // fail-open-by-silent-precedence class the harness parser rejects [X14].
-  if (takesIdx >= 0 && (takesValue === undefined || takesValue.startsWith('--'))) {
+  // Every flag accepts the bare (`--flag <v>`) and inline (`--flag=<v>`)
+  // forms — the CLI flag validator admits both for `auth`, and a parser that
+  // matched only the bare token silently dropped the inline value and minted
+  // a grandfathered FULL-ACCESS token (the fail-open-by-silent-precedence
+  // class the harness parser rejects [X14]). Fail closed on a missing, empty
+  // or flag-like value in either form.
+  const findFlag = (flag: string) => {
+    const idx = rest.findIndex(a => a === flag || a.startsWith(`${flag}=`));
+    const inline = idx >= 0 && rest[idx] !== flag;
+    const value = idx < 0 ? undefined : inline ? rest[idx].slice(flag.length + 1) : rest[idx + 1];
+    return { idx, inline, value };
+  };
+  const badValue = (v: string | undefined) => v === undefined || v === '' || v.startsWith('--');
+
+  const takes = findFlag('--takes-holders');
+  if (takes.idx >= 0 && badValue(takes.value)) {
     return { name: '', error: 'the takes-holders flag requires a value (e.g. world,garry)' };
   }
-  const takesHolders = takesValue !== undefined
-    ? takesValue.split(',').map(s => s.trim()).filter(Boolean)
+  const takesHolders = takes.value !== undefined
+    ? takes.value.split(',').map(s => s.trim()).filter(Boolean)
     : undefined;
-  const scopesIdx = rest.indexOf('--scopes');
-  const scopesValue = scopesIdx >= 0 ? rest[scopesIdx + 1] : undefined;
-  if (scopesIdx >= 0 && (scopesValue === undefined || scopesValue.startsWith('--'))) {
+  const scopesFlag = findFlag('--scopes');
+  if (scopesFlag.idx >= 0 && badValue(scopesFlag.value)) {
     return { name: '', error: 'the scopes flag requires a value (e.g. read,write) — omitting it would mint a full-access token' };
   }
-  const scopes = scopesValue !== undefined
-    ? scopesValue.split(/[\s,]+/).map(s => s.trim()).filter(Boolean)
+  const scopes = scopesFlag.value !== undefined
+    ? scopesFlag.value.split(/[\s,]+/).map(s => s.trim()).filter(Boolean)
     : undefined;
-  // --source (#4780): accepts the bare (`--source <id>`) and inline
-  // (`--source=<id>`) forms — the CLI flag validator admits both for `auth`,
-  // and a parser that missed the inline form would mint a default-floor
-  // token without a word. Fail closed on a missing, flag-like or empty value.
-  const sourceIdx = rest.findIndex(a => a === '--source' || a.startsWith('--source='));
-  const sourceInline = sourceIdx >= 0 && rest[sourceIdx] !== '--source';
-  const sourceValue = sourceIdx < 0
-    ? undefined
-    : sourceInline ? rest[sourceIdx].slice('--source='.length) : rest[sourceIdx + 1];
-  if (sourceIdx >= 0 && (sourceValue === undefined || sourceValue.startsWith('--'))) {
+  // --source (#4780): an empty/whitespace value gets its own message.
+  const sourceFlag = findFlag('--source');
+  if (sourceFlag.idx >= 0 && (sourceFlag.value === undefined || sourceFlag.value.startsWith('--'))) {
     return { name: '', error: 'the source flag requires a value (e.g. workspace)' };
   }
-  const source = sourceValue?.trim();
+  const source = sourceFlag.value?.trim();
   if (source !== undefined && source.length === 0) {
     return { name: '', error: 'the source flag requires a non-empty value (e.g. workspace)' };
   }
   // Exclude flag VALUES by position, not by string equality: a token named
   // after its source (`auth create workspace --source workspace`) is the
-  // natural shape, and a value-equality filter swallowed the name.
+  // natural shape, and a value-equality filter swallowed the name. Only the
+  // BARE forms occupy a value slot; an inline `--scopes=read` token is itself
+  // `--`-prefixed and already skipped.
   const valueIdx = new Set<number>();
-  if (takesIdx >= 0) valueIdx.add(takesIdx + 1);
-  if (scopesIdx >= 0) valueIdx.add(scopesIdx + 1);
-  if (sourceIdx >= 0 && !sourceInline) valueIdx.add(sourceIdx + 1);
+  for (const f of [takes, scopesFlag, sourceFlag]) {
+    if (f.idx >= 0 && !f.inline) valueIdx.add(f.idx + 1);
+  }
   const positional = rest.find((a, i) => !a.startsWith('--') && !valueIdx.has(i));
   return {
     name: positional || '',
