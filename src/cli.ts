@@ -2062,6 +2062,11 @@ function refuseThinClient(command: string, mcpUrl: string): never {
 }
 
 async function handleCliOnly(command: string, args: string[]) {
+  if (command === 'capture' || command === 'forget' || command === 'call' || command === 'sources' && args[0] === 'writer' || command === 'takes' && ['add', 'update', 'supersede', 'resolve'].includes(args[0]) && !hasHelpFlag(args)) {
+    const { runDeferredPersistenceCommand } = await import('./commands/persistence-delegate.ts');
+    await runDeferredPersistenceCommand(command, args, connectEngine);
+    return;
+  }
   // Thin-client guard: refuse DB-bound commands cleanly with a pinpoint
   // hint instead of letting them fail later inside connectEngine or
   // mid-handler. v0.31.1 routes through `refuseThinClient` so every
@@ -2889,11 +2894,7 @@ async function handleCliOnly(command: string, args: string[]) {
     }
   }
 
-  if (command === 'capture' || command === 'forget' || command === 'call' || command === 'sources' && args[0] === 'writer') {
-    const { runDeferredPersistenceCommand } = await import('./commands/persistence-delegate.ts');
-    await runDeferredPersistenceCommand(command, args, connectEngine);
-    return;
-  }
+
 
   // Serve-delegated sync preflight (PGLite host brains only): a live `gbrain
   // serve` owns the single-writer lock, so connectEngine below would throw

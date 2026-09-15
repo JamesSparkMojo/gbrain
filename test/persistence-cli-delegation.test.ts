@@ -9,6 +9,8 @@ import { withEnv } from './helpers/with-env.ts';
 import { __testing as capture } from '../src/commands/capture.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { acquireLock, releaseLock } from '../src/core/pglite-lock.ts';
+import { OperationError } from '../src/core/ops/contract.ts';
+import { parseTakesMutation } from '../src/commands/takes-mutation.ts';
 
 const BRAIN = '10000000-0000-4000-8000-000000000001';
 const ID = '20000000-0000-4000-8000-000000000001';
@@ -35,6 +37,11 @@ async function withOwner(run: (dir: string, calls: PersistenceIpcRequest[], conn
     brainId: BRAIN,
     dispatch: async request => {
       calls.push(request);
+      if (request.params.slug === 'test/pending') {
+        const error = new OperationError('write_pending', 'Accepted; waiting for owner.');
+        error.writeRequest = { request_id: request.params.request_id as string, state: 'queued', retry_after_ms: 100 };
+        throw error;
+      }
       return request.operation === 'forget' ? { id: request.params.id, expired: true, protocol_version: 1 }
         : { slug: request.params.slug ?? 'inbox/from-owner', status: 'created', revision: ID,
           write_request: { request_id: request.params.request_id, state: 'committed', retry_after_ms: null } };
@@ -133,5 +140,56 @@ describe('CLI-only persistence delegation before engine connection', () => {
       expect(calls.map(call => call.operation)).toEqual(['capture', 'forget', 'put_page']);
       expect(calls.every(call => call.params.request_id === ID)).toBe(true);
     });
+  });
+
+  test('actual CLI take mutations preserve source, resolver, local directory, and replay IDs before opening PGLite', async () => {
+    await withOwner(async (dir, calls) => {
+      const invocations = [
+        ['add', 'test/page', '--claim', 'Example claim', '--kind', 'fact', '--who', 'me', '--source', 'meeting notes', '--source-id', 'explicit-source'],
+        ['update', 'test/page', '--row', '1', '--weight', '0.8', '--dir', dir],
+        ['supersede', 'test/page', '--row', '1', '--claim', 'Corrected', '--source', 'correction notes', '--since', '2026-09'],
+        ['resolve', 'test/page', '--row', '2', '--outcome', 'false', '--source', 'resolution evidence', '--by', 'people/owner-example'],
+      ];
+      for (const args of invocations) {
+        const child = Bun.spawn([process.execPath, join(import.meta.dir, '../src/cli.ts'), 'takes', ...args, `--request-id=${ID}`, '--json'], {
+          cwd: dir, env: { ...process.env, GBRAIN_NO_BANNER: '1', GBRAIN_BACKUP_CHECK: '0' }, stdout: 'pipe', stderr: 'pipe',
+        });
+        const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+        expect({ code, stderr }).toMatchObject({ code: 0 });
+        expect(JSON.parse(stdout).write_request.request_id).toBe(ID);
+      }
+      expect(calls.map(call => call.operation)).toEqual(['takes_add', 'takes_update', 'takes_supersede', 'takes_resolve']);
+      expect(calls[0].params).toMatchObject({ holder: 'me', source: 'meeting notes' });
+      expect(calls[0].routing.source).toBe('explicit-source');
+      expect(calls[1].params.local_dir).toBe(dir);
+      expect(calls[2].params).toMatchObject({ source: 'correction notes', since: '2026-09' });
+      expect(calls[3].params).toMatchObject({ quality: 'incorrect', evidence: 'resolution evidence', resolved_by: 'people/owner-example' });
+      expect(calls[3].params).not.toHaveProperty('source');
+    });
+  });
+
+  test('pending CLI take returns its receipt and same-ID retry guidance without reporting a completed mutation', async () => {
+    await withOwner(async (dir, calls) => {
+      const child = Bun.spawn([process.execPath, join(import.meta.dir, '../src/cli.ts'), 'takes', 'update', 'test/pending',
+        '--row', '1', '--weight', '0.8', '--request-id', ID, '--json'], {
+        cwd: dir, env: { ...process.env, GBRAIN_NO_BANNER: '1', GBRAIN_BACKUP_CHECK: '0' }, stdout: 'pipe', stderr: 'pipe',
+      });
+      const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+      expect(code).toBe(1);
+      expect(JSON.parse(stdout).write_request).toMatchObject({ request_id: ID, state: 'queued' });
+      expect(stderr).toContain(`--request-id ${ID}`);
+      expect(stdout + stderr).not.toContain('Updated take');
+      expect(calls).toHaveLength(1);
+    });
+  });
+
+  test('take parser validates whole numeric values and preserves explicit revision/replay intent', () => {
+    expect(parseTakesMutation(['update', 'test/page', '--row=2', '--weight', '0.3', `--request-id=${ID}`, '--expected-revision', BRAIN])).toMatchObject({
+      params: { row_num: 2, weight: 0.3, request_id: ID, expected_revision: BRAIN },
+    });
+    expect(() => parseTakesMutation(['update', 'test/page', '--row', '2junk'])).toThrow('positive integer');
+    expect(() => parseTakesMutation(['resolve', 'test/page', '--row', '1', '--quality', 'correct', '--outcome', 'false'])).toThrow('mutually exclusive');
+    expect(() => parseTakesMutation(['resolve', 'test/page', '--row', '1', '--quality', 'correct', '--source', 'a', '--evidence', 'b'])).toThrow('different evidence');
+    expect(() => parseTakesMutation(['update', 'test/page', '--row', '1', '--force', '--expected-revision', BRAIN])).toThrow('mutually exclusive');
   });
 });
