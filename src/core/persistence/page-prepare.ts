@@ -33,6 +33,10 @@ export async function prepareFileTarget(engine: BrainEngine, row: WriteRequest, 
   const path = resolveSourceLocalFilePath(root, snapshot?.page.source_path, row.slug) ?? join(root, `${row.slug}.md`);
   if (!isWriteTargetContained(path, root)) throw new OperationError('source_changed', 'The canonical file target is outside its registered source.');
   const before = existsSync(path) ? readFileSync(path) : null;
+  if (!before && snapshot && !snapshot.page.deleted_at) {
+    throw new OperationError('source_changed', 'The canonical file was removed outside coordinated publication.',
+      'Import the local deletion or recover the canonical file before editing this page.');
+  }
   // A normal edit may replace only the bytes represented by its read snapshot.
   // Unknown local edits require explicit import/recovery, even for force writes.
   if (before && snapshot && !snapshot.page.deleted_at) {

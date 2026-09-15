@@ -1,7 +1,7 @@
 import type { BrainEngine } from '../engine.ts';
 import type { ParsedPage } from '../import-file.ts';
-import { parseFactsFence } from '../facts-fence.ts';
-import { parseTakesFence } from '../takes-fence.ts';
+import { FACTS_FENCE_BEGIN, FACTS_FENCE_END, parseFactsFence } from '../facts-fence.ts';
+import { TAKES_FENCE_BEGIN, TAKES_FENCE_END, parseTakesFence } from '../takes-fence.ts';
 import { extractFactsFromFenceText } from '../facts/extract-from-fence.ts';
 import { takesPreparation } from '../takes-write.ts';
 import { parseTimelineEntries } from '../link-extraction.ts';
@@ -11,11 +11,18 @@ import { OperationError } from '../ops/contract.ts';
 
 /** Compile synchronous, provider-free projections before entering publication. */
 export function prepareCanonicalProjections(page: ParsedPage, slug: string, sourceId: string): (tx: BrainEngine) => Promise<void> {
-  const body=`${page.compiled_truth}\n${page.timeline ?? ''}`;
-  const facts=parseFactsFence(body);
-  const takes=parseTakesFence(body);
-  if (facts.warnings.length || takes.warnings.length) throw new OperationError('invalid_params','A canonical facts or takes fence cannot be parsed losslessly.');
-  const factRows=extractFactsFromFenceText(facts.facts,slug,sourceId);
+  const fields=[page.compiled_truth,page.timeline ?? ''];
+  for(const field of fields) for(const marker of [FACTS_FENCE_BEGIN,FACTS_FENCE_END,TAKES_FENCE_BEGIN,TAKES_FENCE_END]) {
+    if(field.split(marker).length>2) throw new OperationError('invalid_params','Each canonical body section must contain at most one facts fence and one takes fence.');
+  }
+  const factSets=fields.map(parseFactsFence),takeSets=fields.map(parseTakesFence);
+  if ([...factSets,...takeSets].some(set=>set.warnings.length)) throw new OperationError('invalid_params','A canonical facts or takes fence cannot be parsed losslessly.');
+  const facts=factSets.flatMap(set=>set.facts),takes=takeSets.flatMap(set=>set.takes);
+  for(const rows of [facts,takes]) if(new Set(rows.map(row=>row.rowNum)).size!==rows.length) {
+    throw new OperationError('invalid_params','Canonical row numbers must be unique across the entire page.');
+  }
+  const body=fields.join('\n');
+  const factRows=extractFactsFromFenceText(facts,slug,sourceId);
   const safe=sanitizeRemoteBody(body);
   const timeline=new Map(extractTimelineFromContent(safe,slug).map(t=>[JSON.stringify([t.date,t.source,t.summary]),t]));
   for (const t of parseTimelineEntries(safe)) timeline.set(JSON.stringify([t.date,t.source??'markdown',t.summary]),{...t,source:t.source??'markdown',slug});
@@ -40,12 +47,12 @@ export function prepareCanonicalProjections(page: ParsedPage, slug: string, sour
         fact.claim_metric??null,fact.claim_value??null,fact.claim_unit??null,fact.claim_period??null]);
     }
     const pageId=snapshot.page.id;
-    await tx.executeRaw('DELETE FROM takes WHERE page_id=$1 AND NOT(row_num=ANY($2::integer[]))',[pageId,takes.takes.map(t=>t.rowNum)]);
-    if (takes.takes.length) await tx.addTakesBatch(takes.takes.map(t=>takesPreparation.toBatchInput(pageId,t,
+    await tx.executeRaw('DELETE FROM takes WHERE page_id=$1 AND NOT(row_num=ANY($2::integer[]))',[pageId,takes.map(t=>t.rowNum)]);
+    if (takes.length) await tx.addTakesBatch(takes.map(t=>takesPreparation.toBatchInput(pageId,t,
       t.active?null:Number(t.source?.match(/superseded by #(\d+)/)?.[1])||null)));
     // Full canonical versions include resolution fields; a revert restores those
     // fields from Markdown too, without the ordinary immutable-resolution API.
-    for (const take of takes.takes) await tx.executeRaw(`UPDATE takes SET resolved_at=$3::timestamptz,
+    for (const take of takes) await tx.executeRaw(`UPDATE takes SET resolved_at=$3::timestamptz,
       resolved_quality=$4,resolved_outcome=$5,resolved_source=$6,resolved_value=$7,resolved_unit=$8,resolved_by=$9
       WHERE page_id=$1 AND row_num=$2`,[pageId,take.rowNum,take.resolvedAt??null,take.resolvedQuality??null,
         take.resolvedQuality==='correct'?true:take.resolvedQuality==='incorrect'?false:null,

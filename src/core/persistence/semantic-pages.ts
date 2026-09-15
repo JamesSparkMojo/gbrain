@@ -44,7 +44,7 @@ export async function prepareSemanticPageMutation(engine: BrainEngine, row: Writ
   });
   return { ...prepared, apply: async tx => {
     const outcome = await prepared.apply(tx);
-    const inserted = await tx.addTimelineEntry(row.slug, { ...rendered.canonical, detail: entry.detail }, { sourceId: row.source_id });
+    const inserted = await tx.addTimelineEntry(row.slug, { ...rendered.canonical, detail: rendered.detail }, { sourceId: row.source_id });
     return { ...outcome, status: exact && !inserted ? 'skipped' : 'ok', ...(exact && !inserted ? { reason: 'duplicate' } : {}), entry: rendered.canonical };
   } };
 }

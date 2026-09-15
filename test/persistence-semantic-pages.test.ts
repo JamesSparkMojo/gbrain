@@ -7,6 +7,9 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
+import { renderFactsTable } from '../src/core/facts-fence.ts';
+import { renderTakesFence } from '../src/core/takes-fence.ts';
+import { serializePageToMarkdown } from '../src/core/markdown.ts';
 
 let engine: PGLiteEngine;
 const root = mkdtempSync(join(tmpdir(), 'gbrain-semantic-pages-'));
@@ -69,4 +72,41 @@ test('concurrent takes append, supersession and resolution publish one canonical
   expect(rows.find(row=>row.row_num===Number(superseded.old_row))!.active).toBe(false);
   expect(rows.find(row=>row.row_num===Number(superseded.new_row))!.resolved_quality).toBe('correct');
   expect((await engine.getChunks('page',{sourceId})).map(chunk=>chunk.chunk_text).join('\n')).not.toContain('Example belief');
+});
+
+test('canonical replacement and revert restore facts, takes and timeline from complete versions', async () => {
+  const fact = (rowNum:number,claim:string) => renderFactsTable([{rowNum,claim,kind:'fact',confidence:1,
+    visibility:'world',notability:'medium',active:true}]);
+  const take = (rowNum:number,claim:string) => renderTakesFence([{rowNum,claim,kind:'take',holder:'world',weight:0.7,active:true}]);
+  const content=`---\ntitle: Projection example\ntype: note\n---\nFirst body\n${fact(1,'First fact')}\n${take(1,'First take')}\n\n<!-- timeline -->\n\n## Timeline\n- **2026-09-15** | manual — First event\n${fact(2,'Second fact')}\n${take(2,'Second take')}`;
+  await submit('put_page',{slug:'projections',content});
+  const before=(await engine.readPageSnapshot('projections',{sourceId}))!;
+  expect(await engine.executeRaw('SELECT id FROM facts WHERE source_id=$1 AND source_markdown_slug=$2 AND expired_at IS NULL',[sourceId,'projections'])).toHaveLength(2);
+  expect(await engine.executeRaw('SELECT id FROM takes WHERE page_id=$1',[before.page.id])).toHaveLength(2);
+  await submit('put_page',{slug:'projections',content:'---\ntitle: Replacement\ntype: note\n---\nReplacement body',expected_revision:before.revision});
+  expect(await engine.executeRaw('SELECT id FROM facts WHERE source_id=$1 AND source_markdown_slug=$2 AND expired_at IS NULL',[sourceId,'projections'])).toHaveLength(0);
+  expect(await engine.executeRaw('SELECT id FROM takes WHERE page_id=$1',[before.page.id])).toHaveLength(0);
+  expect(await engine.getTimeline('projections',{sourceId})).toHaveLength(0);
+  const [version]=await engine.executeRaw<{id:number}>('SELECT id FROM page_versions WHERE page_id=$1 AND knowledge_revision=$2::uuid',[before.page.id,before.revision]);
+  const current=(await engine.readPageSnapshot('projections',{sourceId}))!;
+  await submit('revert_version',{slug:'projections',version_id:version.id,expected_revision:current.revision});
+  const restored=(await engine.readPageSnapshot('projections',{sourceId}))!;
+  expect(serializePageToMarkdown(restored.page,restored.tags)).toBe(serializePageToMarkdown(before.page,before.tags));
+  expect(await engine.executeRaw('SELECT id FROM facts WHERE source_id=$1 AND source_markdown_slug=$2 AND expired_at IS NULL',[sourceId,'projections'])).toHaveLength(2);
+  expect(await engine.executeRaw('SELECT id FROM takes WHERE page_id=$1',[before.page.id])).toHaveLength(2);
+  expect(await engine.getTimeline('projections',{sourceId})).toHaveLength(1);
+  const invalid=content.replace('Second fact','Conflicting fact').replace('| 2 | Conflicting fact','| 1 | Conflicting fact');
+  await expect(submit('put_page',{slug:'projections',content:invalid,expected_revision:restored.revision})).rejects.toMatchObject({code:'invalid_params'});
+  expect((await engine.readPageSnapshot('projections',{sourceId}))!.revision).toBe(restored.revision);
+});
+
+test('timeline detail citations remain in canonical bytes and replay without phantom events', async () => {
+  const params={slug:'page',date:'2026-09-16',summary:'Cited milestone',detail:'First detail\nSee [Source: example, 2026-09-14] evidence',source:'manual'};
+  await submit('add_timeline_entry',params);
+  const before=(await engine.readPageSnapshot('page',{sourceId}))!;
+  expect(before.page.timeline).toContain('See [Source: example, 2026-09-14] evidence');
+  const rows=await engine.getTimeline('page',{sourceId});
+  expect(rows.filter(row=>row.summary==='Cited milestone')).toHaveLength(1);
+  expect(rows.some(row=>String(row.date).startsWith('2026-09-14'))).toBe(false);
+  expect((await submit('add_timeline_entry',params)).revision).toBe(before.revision);
 });
