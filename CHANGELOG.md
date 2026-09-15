@@ -4,7 +4,7 @@ All notable changes to GBrain will be documented in this file.
 
 ## [0.50.3.0] - 2026-09-15
 
-**Community fix wave 2 on 0.50.1.0: six contributor pull requests adopted or reworked with credit, four verified open issues fixed directly.** Fact rows that never got an embedding vector (written keyless, during a provider outage, or under a budget cap) can now be backfilled with `gbrain embed --stale --facts`, and a degenerate vector from an embedding provider is refused instead of being stored where no vector search can reach it. The backfill refuses a misspelled or valueless `--source` before it spends anything, runs one at a time, and only ever fills rows that are still empty; the plain `gbrain embed --stale` drain gets the same flag checks, so `--stale --source=wiki` now scopes to wiki instead of quietly draining every source. `gbrain auth create <name> --source <id>` mints a bearer token confined to one source, so a multi-source brain stops routing a hand-minted client's reads and writes to whichever source is named `default`, and an MCP client granted several sources can close an open loop by naming the source. The dream cycle's concept-synthesis spend cap is now a config key, and brain health counts entity pages by whatever types your schema pack declares. Keyword-search ties come back in a stable order, and a schema pack's own frontmatter link rules take effect on every extraction path. On Windows, gbrain's background children stop popping console windows.
+**Community fix wave 2, rebased onto 0.50.2.0: six contributor pull requests adopted or reworked with credit, four verified open issues fixed directly.** Fact rows that never got an embedding vector (written keyless, during a provider outage, or under a budget cap) can now be backfilled with `gbrain embed --stale --facts`, and a degenerate vector from an embedding provider is refused instead of being stored where no vector search can reach it. The backfill refuses a misspelled or valueless `--source` before it spends anything, runs one at a time, and only ever fills rows that are still empty; the plain `gbrain embed --stale` drain gets the same flag checks, so `--stale --source=wiki` now scopes to wiki instead of quietly draining every source. `gbrain auth create <name> --source <id>` mints a bearer token confined to one source, so a multi-source brain stops routing a hand-minted client's reads and writes to whichever source is named `default`, and an MCP client granted several sources can close an open loop by naming the source. The dream cycle's concept-synthesis spend cap is now a config key, and brain health counts entity pages by whatever types your schema pack declares. Keyword-search ties come back in a stable order, and a schema pack's own frontmatter link rules take effect on every extraction path. On Windows, gbrain's background children stop popping console windows.
 
 ## To take advantage of v0.50.3.0
 
@@ -69,6 +69,57 @@ All notable changes to GBrain will be documented in this file.
 With thanks to every contributor whose pull request this wave adopts:
 @gagecane, @hpamike, @Jey2311, @Masashi-Ono0611, @mdoens, @Mr-B-1, and to
 the reporters whose verified issues drove the direct fixes.
+## [0.50.2.0] - 2026-09-15
+
+**Saved pages stay saved, rejected writes stay rejected, and maintenance stops reporting unfinished work as complete.**
+
+Saving a page now checks that its working folder is available before changing the stored revision. If writing the file fails, the previous page, tags, chunks, and revision history survive. Search enrichment runs after the page is saved and its page-save locks are released; a caller that holds its own surrounding lock may still block other writes. A slow enrichment result cannot replace a newer revision.
+
+Background jobs that promise to write a page must actually save one. Finishing with prose, declining to write, or returning a rejected import no longer counts as success. Maintenance keeps unfinished or budget-deferred work due for another attempt, including when some children succeeded.
+
+Unresolved facts keep their content and provenance without inventing a page to attach them to. The old fence migration stops creating empty pages for those references. Interrupted embedding runs retain completed work instead of paying to replace the same vectors again.
+
+### What changes in practice
+
+| Situation | Result |
+|---|---|
+| The source worktree is busy | The write is rejected before publication and explicitly is not queued. |
+| A page saves but embedding fails | The saved content remains available; embedding reports a separate failure. |
+| A hosted client connects without requesting scopes | It bootstraps read-only; writing still needs an explicit authorized request. |
+| A thin client searches without a source filter | Reads follow the host grant instead of being pinned to the isolated write source. |
+| Bash parsing or Windows subdirectory sync previously skipped content | A source-scoped full sync revisits the affected files. |
+
+### Things to watch
+
+This is not a durable write queue or a crash-atomic transaction spanning files and the database. Historical unmatched facts and empty stubs are not deleted or reconstructed. Back up DB-only knowledge separately from Markdown. Restart old PGLite holders normally to record structured process identity; never delete a live lock to force access.
+
+## To take advantage of v0.50.2.0
+
+Run `gbrain upgrade`, then `gbrain doctor`. If upgrading from before v0.50.0.0, follow its [coordinated authorization cutover](skills/migrations/v0.50.0.0.md) first. This release adds no schema migration.
+
+For a Bash/code source affected by earlier parsing or Windows scoping failures, replace `code-example` with that source's ID and run:
+
+```bash
+gbrain sync --source code-example --full --no-embed
+gbrain doctor
+```
+
+An ordinary incremental sync does not prove historical recovery. Approve any paid embedding separately. Reinstall affected hosted launchers using the existing private handoff and original installation settings; do not widen grants. Agents should follow [the v0.50.2.0 upgrade steps](skills/migrations/v0.50.2.0.md).
+
+**Say to your agent:** "Upgrade GBrain to v0.50.2.0, follow its migration guide, and check my affected sources. Preserve my capture and access settings, and ask before any paid enrichment."
+
+### Itemized changes
+
+- `put_page` acquires the worktree lock before importing, verifies the indexed revision before canonical publication and after commit, and performs write-through inside the import transaction. Deferred page-scoped embedding checks page identity, revision, and chunk generation. Adapted the persistence-first principle from #5100. Contributed by @xaviroblessarries.
+- Required-write accounting rejects prose-only finishes and import-error envelopes, including historical completed ledger entries. Optional-write jobs, unchanged saves, and saved pages with failed enrichment retain their intended behavior. Global maintenance and synthesis cooldowns stay unstamped for incomplete or explicitly deferred work. The global-freshness guard adapts #5089. Contributed by @tarush1989.
+- Unresolved fact references remain unparented. Exact full-basename matches require a unique live page in the same source. The v0.32.2 fence migration requires an existing canonical page/file, checks only the source's Git subtree, and preserves occupied fence row numbers. Adapted #5096. Contributed by @anshmudgil.
+- Embedding invalidation preserves chunks only when their model, current text hash, and vector width match the target; fully current pages can be restamped without another embedding call. Adapted #5056. Contributed by @harjothkhara.
+- PGLite locks preserve structured argument boundaries and use the Windows-aware process probe. Unprovable live legacy identity fails closed; dead-holder recovery remains available. Adapted #5065 and #5073. Contributed by @Masashi-Ono0611.
+- Windows Git-relative scope checks normalize separators. Bash uses the checksum-verified official tree-sitter-bash v0.23.3 grammar with code chunker version 7 and source/compiled semantic checks. Adapted the grammar-refresh approach from #5109 without its unrelated provider changes. Contributed by @lqtdys.
+- Hosted launchers stop forcing `--brain host` and a write-source filter onto reads; `gbrain call` refuses locally on thin clients. Adapted #5107. Contributed by @javieraldape. The documented `schema_pack` config key is accepted, and signal-detection guidance now requires capture opt-in.
+- OAuth discovery omits the non-DCR `agent` scope and scope-less challenges hint `read`, without changing existing token authority or accepting explicit delegation requests. Adapted #5113 with a read-only rather than read-write bootstrap hint. Contributed by @Garabed96 via @zegerhoogeboom.
+- Embedded LongMemEval uses resolved providers and throws on failure instead of terminating its host process; standalone CLI exit behavior is unchanged.
+- Stale-extraction recommendations use source-scoped database extraction, including DB-only pages, instead of suggesting a repository sync and filesystem-wide extraction with an unrelated embedding dependency.
 
 ## [0.50.1.0] - 2026-09-14
 
