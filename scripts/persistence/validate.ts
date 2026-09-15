@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { availableParallelism, loadavg, tmpdir, totalmem } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import postgres from 'postgres';
 import { assertSafeE2eDatabaseUrl } from '../../test/helpers/db-guard.ts';
 import { distribution, type HarnessConfig } from './harness.ts';
 import { keylessBrainEnv } from '../../test/helpers/provider-env.ts';
+import { boundedDiagnostic, diagnosticError, retentionMetadata } from './failure-diagnostics.ts';
 
 export interface ValidationOptions {
   engine: 'pglite' | 'postgres'; schedules?: number; operations?: number; seed?: number;
@@ -49,7 +50,10 @@ export function spawnWorker(configPath: string, home: string, role: string, args
     }
   }
   async function done(): Promise<Event> { const result = await event('done'); assert.equal(await child.exited, 0, `${role} failed`); await reading; return result; }
-  return { child, event, done, async kill() { if (child.exitCode === null) child.kill('SIGKILL'); await child.exited; await reading; } };
+  return { child, event, done,
+    failureDiagnostics: () => events.filter(event => event.event === 'failure' && event.diagnostics).slice(0, 1)
+      .map(event => ({ role, pid: child.pid, ...event.diagnostics })),
+    async kill() { if (child.exitCode === null) child.kill('SIGKILL'); await child.exited; await reading; } };
 }
 
 /** Every PostgreSQL phase owns a new database; disk PGLite always runs in children. */
@@ -59,7 +63,9 @@ export async function runValidation(options: ValidationOptions) {
   assert(Number.isSafeInteger(options.seed ?? 5105) && (options.seed ?? 5105) >= 0 && (options.seed ?? 5105) <= 0xFFFFFFFF, 'Invalid unsigned 32-bit seed');
   const scratch = mkdtempSync(join(tmpdir(), 'gbrain-persistence-validation-')); const home = join(scratch, 'home'); mkdirSync(home);
   const children: ReturnType<typeof spawnWorker>[] = []; const databases: string[] = [];
+  const ownerUrls: string[] = [];
   let admin: ReturnType<typeof postgres> | undefined;
+  let originalFailure = false;
   const manifest: Record<string, any> = { version: 1, engine: options.engine, runtime: `bun-${Bun.version}`,
     platform: process.platform, architecture: process.arch, seed: options.seed ?? 5105,
     environment: { logical_cpus: availableParallelism(), memory_bytes: totalmem(), load_average_at_start: loadavg() },
@@ -74,7 +80,7 @@ export async function runValidation(options: ValidationOptions) {
     async function phase(name: string): Promise<{ config: HarnessConfig; path: string }> {
       const root = join(scratch, name); mkdirSync(root);
       manifest.phase_inputs[name] = Object.fromEntries(['scripts/persistence/harness.ts', 'scripts/persistence/schedules.ts',
-        'scripts/persistence/worker.ts', 'src/core/persistence/coordinator.ts', 'src/core/persistence/consumer.ts',
+        'scripts/persistence/worker.ts', 'scripts/persistence/failure-diagnostics.ts', 'src/core/persistence/coordinator.ts', 'src/core/persistence/consumer.ts',
         'src/core/persistence/journal.ts', 'src/core/persistence/activation.ts', 'src/core/persistence/filesystem-guard.ts',
         'src/core/persistence/identity.ts', 'src/core/persistence/ownership.ts', 'src/core/pglite-engine.ts', 'src/core/postgres-engine.ts'].map(file =>
         [file, createHash('sha256').update(readFileSync(resolve(import.meta.dir, '../..', file))).digest('hex')]));
@@ -105,6 +111,7 @@ export async function runValidation(options: ValidationOptions) {
       const { path } = await phase('soak'); await start(path, 'initialize').done(); const started = performance.now();
       const owners = Array.from({ length: options.engine === 'postgres' ? 2 : 1 }, () => start(path, 'owner'));
       const ready = await Promise.all(owners.map(owner => owner.event('ready')));
+      ownerUrls.push(...ready.map(owner => owner.url));
       const results = await Promise.all(Array.from({ length: 4 }, (_, i) => start(path, 'producer', String(i), ready[0].url).done()));
       const ownerResults = await Promise.all(ready.map(async owner => {
         const response = await fetch(new URL('stop', owner.url), { method: 'POST' }); assert(response.ok); return response.json();
@@ -126,13 +133,53 @@ export async function runValidation(options: ValidationOptions) {
     manifest.status = 'passed';
     manifest.full_gate = counts.schedules >= 1000 && counts.operations >= 10_000 && manifest.crash_cases.length === 6;
     return manifest;
-  } catch (error) { manifest.status = 'failed'; manifest.full_gate = false; manifest.failure = String(error); throw error; }
+  } catch (error) {
+    originalFailure = true; manifest.status = 'failed'; manifest.full_gate = false; manifest.failure = String(error);
+    // Cached producer state is already available; a stuck owner adds only a
+    // bounded timeout marker. URLs and credentials never enter this manifest.
+    manifest.failure_diagnostics = await boundedDiagnostic(async () => ({
+      workers: children.flatMap(child => child.failureDiagnostics()),
+      owners: await Promise.all(ownerUrls.map(url => boundedDiagnostic(async () => {
+        const response = await fetch(new URL('diagnostics', url), { signal: AbortSignal.timeout(1_500) });
+        assert(response.ok, 'Owner diagnostic endpoint failed'); return response.json();
+      }, 1_750))),
+    }));
+    throw error;
+  }
   finally {
-    await Promise.allSettled(children.map(child => child.kill()));
-    if (admin) { for (const database of databases) await admin.unsafe(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`); await admin.end(); }
+    const stopChildren = async () => {
+      const stopped = await Promise.allSettled(children.map(child => child.kill()));
+      const failed = stopped.find(result => result.status === 'rejected');
+      if (failed?.status === 'rejected') throw failed.reason;
+    };
+    const shutdown = originalFailure ? await boundedDiagnostic(stopChildren) : (await stopChildren(), { status: 'ok' as const });
+    if (admin && !originalFailure) for (const database of databases) await admin.unsafe(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`);
+    if (admin) {
+      if (originalFailure) manifest.admin_close_diagnostic = await boundedDiagnostic(() => admin!.end({ timeout: 1 }));
+      else await admin.end();
+    }
+    if (manifest.status === 'failed') {
+      const retainedPath = options.manifest ? `${resolve(options.manifest)}.retained.json` : join(scratch, 'retained.json');
+      try {
+        mkdirSync(dirname(retainedPath), { recursive: true });
+        writeFileSync(retainedPath, `${JSON.stringify({ ...retentionMetadata(scratch, databases),
+          worker_pids: children.map(child => child.child.pid), worker_shutdown: shutdown }, null, 2)}\n`, { mode: 0o600 });
+        manifest.failure_artifacts = { retained: true, metadata_file: basename(retainedPath) };
+        process.stderr.write(`[persistence] Failed fixtures retained. Private cleanup metadata: ${retainedPath}\n`);
+      } catch (error) {
+        manifest.failure_artifacts = { retained: true, metadata_error_code: diagnosticError(error) };
+        // The scratch directory survives even when the report volume is full.
+        process.stderr.write(`[persistence] Could not write cleanup metadata; synthetic scratch retained at ${scratch}\n`);
+      }
+    }
     manifest.finished_at = new Date().toISOString(); manifest.duration_ms = performance.now() - at;
-    if (options.manifest) { mkdirSync(dirname(resolve(options.manifest)), { recursive: true }); writeFileSync(options.manifest, `${JSON.stringify(manifest, null, 2)}\n`); }
-    rmSync(scratch, { recursive: true, force: true });
+    try {
+      if (options.manifest) { mkdirSync(dirname(resolve(options.manifest)), { recursive: true }); writeFileSync(options.manifest, `${JSON.stringify(manifest, null, 2)}\n`); }
+    } catch (error) {
+      if (!originalFailure) throw error;
+      process.stderr.write(`[persistence] Manifest write failed (${diagnosticError(error)}); original failure preserved.\n`);
+    }
+    if (!originalFailure) rmSync(scratch, { recursive: true, force: true });
   }
 }
 if (import.meta.main) {

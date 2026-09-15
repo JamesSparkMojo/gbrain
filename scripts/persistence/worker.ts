@@ -9,6 +9,7 @@ import { admission, assertCommittedSnapshot, assertConservation, distribution, f
   openEngine, prepared, type HarnessConfig } from './harness.ts';
 import { runSchedules } from './schedules.ts';
 import type { WriteRequest } from '../../src/core/persistence/model.ts';
+import { boundedDiagnostic, diagnosticError, ownerDatabaseDiagnostic, soakFailureDiagnostic, type ActiveSoakRequest } from './failure-diagnostics.ts';
 
 const [mode, configPath, argument, extra] = process.argv.slice(2);
 const config: HarnessConfig = JSON.parse(readFileSync(configPath, 'utf8'));
@@ -63,19 +64,19 @@ if (mode === 'initialize') {
   } finally { await engine.disconnect(); }
 } else if (mode === 'owner') {
   const engine = await openEngine(config); const sources = await fixtures(engine, config);
-  const errors: string[] = []; let peakRss = process.memoryUsage().rss;
+  const errors: string[] = []; const errorCodes: string[] = []; let peakRss = process.memoryUsage().rss;
   const readMs: number[] = []; let reading: Promise<void> | undefined;
   const readTimer = setInterval(() => {
     if (reading) return;
     reading = (async () => {
       const [row] = await engine.executeRaw<WriteRequest>("SELECT * FROM persistence_requests WHERE state='committed' ORDER BY sequence DESC LIMIT 1");
       if (row) { const at = performance.now(); await assertCommittedSnapshot(engine, row); readMs.push(performance.now() - at); }
-    })().catch(error => { errors.push(`concurrent canonical read: ${error}`); }).finally(() => { reading = undefined; });
+    })().catch(error => { errors.push(`concurrent canonical read: ${error}`); errorCodes.push(diagnosticError(error)); }).finally(() => { reading = undefined; });
   }, 1000);
   const sample = setInterval(() => { peakRss = Math.max(peakRss, process.memoryUsage().rss); }, 100);
   const consumer = new PersistenceConsumer(engine, { engine: config.kind }, async (_engine, row) => prepared(row, sources, null, true),
     { hostId: config.hostId, concurrency: config.kind === 'postgres' ? 2 : 1, pollMs: 250,
-      onError: error => { errors.push(String(error)); process.stderr.write(`[persistence owner] ${error}\n`); } });
+      onError: error => { errors.push(String(error)); errorCodes.push(diagnosticError(error)); process.stderr.write(`[persistence owner] ${error}\n`); } });
   const unregister = engine.registerBeforeDisconnect(() => consumer.stop());
   const server = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
     const url = new URL(request.url);
@@ -87,6 +88,11 @@ if (mode === 'initialize') {
     if (url.pathname === '/receipt') {
       const row = await getWriteRequest(engine, { kind: 'local_cli', id: config.principalIds[Number(url.searchParams.get('principal'))] }, url.searchParams.get('id')!);
       return Response.json(row);
+    }
+    if (url.pathname === '/diagnostics') {
+      return Response.json({ at: new Date().toISOString(), pid: process.pid, consumer: consumer.status(),
+        error_count: errors.length, recent_error_codes: errorCodes.slice(-8), canonical_read_in_flight: reading !== undefined,
+        peak_rss_bytes: peakRss, database: await boundedDiagnostic(() => ownerDatabaseDiagnostic(engine), 1_000) });
     }
     if (url.pathname === '/stop' && request.method === 'POST') {
       clearInterval(readTimer); await reading;
@@ -111,6 +117,7 @@ if (mode === 'initialize') {
     ? getWriteRequest(engine, { kind: 'local_cli', id: config.principalIds[principal] }, requestId)
     : fetch(new URL(`receipt?principal=${principal}&id=${requestId}`, ownerUrl)).then(r => r.json()) as Promise<WriteRequest | null>;
   let completed = 0;
+  const active = new Map<string, ActiveSoakRequest>();
   try {
     // Four independent producers each keep four logical writes in flight.
     const indexes = Array.from({ length: config.operations }, (_, i) => i).filter(i => i % config.principalIds.length === principal);
@@ -119,11 +126,13 @@ if (mode === 'initialize') {
       for (;;) {
         const offset = cursor++; if (offset >= indexes.length) return;
         const index = indexes[offset]; const requestId = randomUUID(); const at = performance.now();
+        const observation: ActiveSoakRequest = { requestId, index, startedAt: at, receipt: null }; active.set(requestId, observation);
         const row = await submit(index, requestId); admissionMs.push(performance.now() - at);
+        observation.receipt = row;
         if (index % 17 === 0) { assert.equal((await submit(index, requestId)).id, row.id); replays++; }
         const deadline = performance.now() + 120_000;
         for (;;) {
-          const current = await read(requestId); assert(current, 'accepted request disappeared');
+          const current = await read(requestId); observation.receipt = current; assert(current, 'accepted request disappeared');
           if (current.state === 'committed') { assert(current.outcome?.revision); break; }
           assert(['queued', 'running', 'recovering'].includes(current.state),
             `soak request ${current.request_id} terminated ${current.state}: ${current.error_code}: ${current.error_message}`);
@@ -131,10 +140,17 @@ if (mode === 'initialize') {
           await Bun.sleep(100);
         }
         completionMs.push(performance.now() - at); completed++;
+        active.delete(requestId);
         if (completed % 250 === 0) process.stderr.write(`[persistence] ${config.kind}: producer ${principal} verified ${completed} committed writes\n`);
       }
     }));
     emit({ event: 'done', result: { principal, completed, replays, admission_ms: admissionMs, completion_ms: completionMs } });
+  } catch (error) {
+    // Publish cached state before disconnect: a stuck connection must not hide
+    // the original failure while the driver collects bounded owner diagnostics.
+    try { emit({ event: 'failure', message: String(error), diagnostics: soakFailureDiagnostic(principal, completed, active.values()) }); }
+    catch { /* Preserve the original error even if its diagnostic cannot be emitted. */ }
+    throw error;
   } finally { await engine?.disconnect(); }
 } else if (mode === 'verify-soak') {
   const engine = await openEngine(config); const sources = await fixtures(engine, config);

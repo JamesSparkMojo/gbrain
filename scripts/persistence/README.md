@@ -11,7 +11,8 @@ DATABASE_URL=postgres://test-user:test-password@localhost:5432/gbrain_test \
 
 Postgres requires a test-shaped database URL and permission to create and drop
 databases. Every phase gets a fresh, randomly named `gbrain_persistence_test_*`
-database. The runner drops only those databases. PGLite uses temporary disk
+database. Successful runs drop only those databases. Failed runs retain their
+synthetic scratch directories and databases for inspection. PGLite uses temporary disk
 datastores, reopened in separate processes. Child homes and writer lock paths
 are temporary; no operator brain or provider credentials enter children.
 
@@ -60,6 +61,23 @@ multiple records. Performance numbers describe a synthetic body+timeline+tag
 workload with a durable file per write; they exclude provider calls, Git
 publication and remote network latency. Compare like-for-like runtime,
 storage and process counts before setting or changing latency budgets.
+
+On failure, the manifest includes the last cached state of each producer's
+at-most-four active requests and a bounded owner snapshot: queue states and
+ages, root ownership epochs, counters, consumer activity and error codes.
+It excludes content, filesystem paths, authority, credentials and error
+messages. Owner diagnostics have a two-second budget; an unavailable owner
+adds a timeout marker and never changes the original failure or the
+120-second receipt deadline.
+
+The runner writes `<manifest>.retained.json` with mode `0600`, listing the
+retained scratch root, worker PIDs and exact cleanup commands. After inspection,
+verify those workers have stopped, run the listed database commands using the
+original loopback test `DATABASE_URL` in the environment, then remove the
+listed scratch directory. The metadata contains generated database names,
+never a connection URL. Keep the retained directory private: its original
+`config.json` files contain the test connection URL. Do not upload it with
+the diagnostic manifest. Successful runs retain no fixtures.
 
 `persistence-validation.yml` runs the full gate on Linux x64 for both engines
 under Bun 1.3.11 and 1.3.13 and uploads every manifest. Native OS/architecture
