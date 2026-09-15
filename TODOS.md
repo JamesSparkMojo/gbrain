@@ -9275,6 +9275,13 @@ covers DEAD logs; go-forward capture beyond Claude Code is deliberately absent.
 
 ## v0.50.2.0 persistence and verification follow-ups
 
+- [ ] **P3 — historical migration banner accuracy.** The source-owned v0.32.2
+  feature pitch still promises full database reconstruction from Markdown and
+  refers to an unsupported `--write` flag. Align it with the corrected
+  `skills/migrations/v0.32.2.md` guide, preserving preview/retry behavior and
+  separate backups for DB-only knowledge. The guide is current; the historical
+  banner remains documentation debt.
+
 - [ ] **P2 — durable contention queue and caller revision preconditions (#5105).**
   The collector rejects a busy worktree before changing the page and reports
   that the write was not queued. Add a separately reviewed acceptance/replay

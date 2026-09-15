@@ -6,7 +6,7 @@ All notable changes to GBrain will be documented in this file.
 
 **Saved pages stay saved, rejected writes stay rejected, and maintenance stops reporting unfinished work as complete.**
 
-Saving a page now checks that its working folder is available before changing the stored revision. If writing the file fails, the previous page, tags, chunks, and revision history survive. Search enrichment happens after the page is saved and no longer holds up other writes to the same folder. A slow enrichment result cannot replace a newer revision.
+Saving a page now checks that its working folder is available before changing the stored revision. If writing the file fails, the previous page, tags, chunks, and revision history survive. Search enrichment runs after the page is saved and its page-save locks are released; a caller that holds its own surrounding lock may still block other writes. A slow enrichment result cannot replace a newer revision.
 
 Background jobs that promise to write a page must actually save one. Finishing with prose, declining to write, or returning a rejected import no longer counts as success. Maintenance keeps unfinished or budget-deferred work due for another attempt, including when some children succeeded.
 
@@ -38,6 +38,8 @@ gbrain doctor
 ```
 
 An ordinary incremental sync does not prove historical recovery. Approve any paid embedding separately. Reinstall affected hosted launchers using the existing private handoff and original installation settings; do not widen grants. Agents should follow [the v0.50.2.0 upgrade steps](skills/migrations/v0.50.2.0.md).
+
+**Say to your agent:** "Upgrade GBrain to v0.50.2.0, follow its migration guide, and check my affected sources. Preserve my capture and access settings, and ask before any paid enrichment."
 
 ### Itemized changes
 
