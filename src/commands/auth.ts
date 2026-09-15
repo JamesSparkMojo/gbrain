@@ -1123,8 +1123,14 @@ export function parseAuthCreateArgs(rest: string[]): { name: string; takesHolder
   if (source !== undefined && source.length === 0) {
     return { name: '', error: 'the source flag requires a non-empty value (e.g. workspace)' };
   }
-  const positional = rest.find(a =>
-    !a.startsWith('--') && a !== takesValue && a !== scopesValue && (sourceInline || a !== sourceValue));
+  // Exclude flag VALUES by position, not by string equality: a token named
+  // after its source (`auth create workspace --source workspace`) is the
+  // natural shape, and a value-equality filter swallowed the name.
+  const valueIdx = new Set<number>();
+  if (takesIdx >= 0) valueIdx.add(takesIdx + 1);
+  if (scopesIdx >= 0) valueIdx.add(scopesIdx + 1);
+  if (sourceIdx >= 0 && !sourceInline) valueIdx.add(sourceIdx + 1);
+  const positional = rest.find((a, i) => !a.startsWith('--') && !valueIdx.has(i));
   return {
     name: positional || '',
     takesHolders,

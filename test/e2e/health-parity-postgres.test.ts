@@ -173,6 +173,10 @@ describeBoth('getHealth parity — islanded liveness + entity-coverage floor (#4
         await engine.putPage(`yc/batch-${i}`, { type: 'yc', title: `Y${i}`, compiled_truth: 'co', frontmatter: {} });
       }
       await link(engine, 'hub', 'yc/batch-0');
+      // A second inbound edge puts yc/batch-0 strictly above the persons (all
+      // tied at one link), so its membership in the LIMIT 5 below is
+      // deterministic on both engines; most_connected has no tiebreaker.
+      await link(engine, 'people/p0', 'yc/batch-0');
     }
 
     const [pgliteH, postgresH] = await withEnv({ GBRAIN_SCHEMA_PACK: 'gbrain-base' }, async () =>

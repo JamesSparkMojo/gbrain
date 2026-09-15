@@ -23,7 +23,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { readdirSync, readFileSync } from 'fs';
-import { join, relative, resolve } from 'path';
+import { join, relative, resolve, sep } from 'path';
 
 const REPO_ROOT = resolve(import.meta.dir, '..');
 const SRC_DIR = join(REPO_ROOT, 'src');
@@ -42,7 +42,7 @@ function walk(dir: string, out: string[] = []): string[] {
 function offenders(re: RegExp): string[] {
   const hits: string[] = [];
   for (const file of walk(SRC_DIR)) {
-    const rel = relative(REPO_ROOT, file);
+    const rel = relative(REPO_ROOT, file).split(sep).join('/');
     if (rel === SEAM) continue;
     readFileSync(file, 'utf8').split('\n').forEach((line, i) => {
       if (/^\s*(\/\/|\*|\/\*)/.test(line)) return;

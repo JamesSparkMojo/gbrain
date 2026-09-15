@@ -185,6 +185,12 @@ describe('parseAuthClientsArgs (E4)', () => {
     expect(parseAuthClientsArgs(['--days', '3650']).days).toBe(3650);
   });
 
+  test('a token named after its source keeps its name (value equality must not swallow the positional)', () => {
+    expect(parseAuthCreateArgs(['workspace', '--source', 'workspace'])).toEqual({ name: 'workspace', source: 'workspace' });
+    expect(parseAuthCreateArgs(['--source', 'workspace', 'workspace'])).toEqual({ name: 'workspace', source: 'workspace' });
+    expect(parseAuthCreateArgs(['read', '--scopes', 'read'])).toEqual({ name: 'read', scopes: ['read'] });
+  });
+
   test('--days rejects out-of-bounds and non-integer values loudly', () => {
     expect(() => parseAuthClientsArgs(['--days', '0'])).toThrow(/--days/);
     expect(() => parseAuthClientsArgs(['--days', '3651'])).toThrow(/--days/);
