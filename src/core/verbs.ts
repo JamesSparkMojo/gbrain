@@ -24,7 +24,7 @@
  */
 
 import type { Operation } from './operations.ts';
-import { WRITE_RECEIPT_SCHEMA } from './persistence/params.ts';
+import { WRITE_RECEIPT_SCHEMA, WRITE_REQUEST_PARAM, PAGE_MUTATION_PARAMS } from './persistence/params.ts';
 import { WRITE_ERROR_CODES } from './persistence/types.ts';
 
 /** Frozen protocol version for the MEMORY_VERBS v1 verb set. Single source of truth. */
@@ -69,6 +69,7 @@ const remember: Operation = {
     'Response: branch on `status` (inserted|duplicate|superseded), never on `status_text` (human rendering only). ' +
     'On duplicate, `id` is the EXISTING fact\'s id. For bulk extraction from a raw transcript use extract_facts instead.',
   params: {
+    ...PAGE_MUTATION_PARAMS,
     fact: { type: 'string', required: true, description: 'The fact to remember, one claim per call.' },
     provenance: {
       type: 'string',
@@ -143,9 +144,8 @@ const remember: Operation = {
         'Use "world" (default — agents can recall it) or "private" (local CLI reads only).',
       );
     }
-    const validUntil = parseTtlParam(p.ttl); // throws verbError(invalid_params) on bad input
-
     if (ctx.dryRun) {
+      parseTtlParam(p.ttl); // Dry runs still validate without admitting intent.
       return {
         dry_run: true,
         action: 'remember',
@@ -154,38 +154,8 @@ const remember: Operation = {
       };
     }
 
-    const { writeSingleFact, isNullLikeEntity } = await import('./facts/write-single.ts');
-    // #4755: a null-like entity token ("null", "None", "N/A", …) means the
-    // same thing as omitting the param — LLM callers emit these for
-    // subjectless statements, and resolving them would file the fact under
-    // a non-existent entity_slug no lookup can reach.
-    const entityParam = typeof p.entity === 'string' ? p.entity.trim() : null;
-    const result = await writeSingleFact(ctx.engine, ctx.sourceId ?? 'default', {
-      fact,
-      provenance,
-      kind: kind as (typeof FACT_KINDS)[number],
-      entity: entityParam && !isNullLikeEntity(entityParam) ? entityParam : null,
-      visibility,
-      validUntil,
-    });
-
-    const statusText =
-      result.status === 'inserted'
-        ? `remembered as fact #${result.id}`
-        : result.status === 'duplicate'
-          ? `already knew this — kept fact #${result.id}`
-          : `updated — fact #${result.id} supersedes the previous version`;
-
-    return {
-      // Opaque STRING at the protocol level [T4]; gbrain serializes its ints.
-      id: String(result.id),
-      status: result.status,
-      status_text: statusText,
-      entity_slug: result.entity_slug ?? null,
-      valid_until: result.valid_until ? result.valid_until.toISOString() : null,
-      ...(result.degraded_dedup ? { degraded_dedup: true } : {}),
-      protocol_version: MEMORY_VERBS_VERSION,
-    };
+    const { submitRememberMutation } = await import('./persistence/memory-mutations.ts');
+    return submitRememberMutation(ctx, { ...p, fact, provenance, kind, visibility });
   },
   cliHints: { name: 'remember', positional: ['fact'] },
 };
@@ -376,6 +346,7 @@ const forget: Operation = {
     'Idempotent: forgetting an already-expired fact returns expired:false (success), unknown id returns a not_found error. ' +
     'The fact is expired (audit trail kept), not deleted.',
   params: {
+    request_id: WRITE_REQUEST_PARAM,
     id: { type: 'string', required: true, description: 'Opaque fact id from remember/recall (facts[].fact_id). Never a page slug.' },
     reason: { type: 'string', description: 'Optional reason, written to the fact\'s audit trail. Default: "forgotten".' },
   },
@@ -400,39 +371,8 @@ const forget: Operation = {
       return { dry_run: true, action: 'forget', id: rawId, protocol_version: MEMORY_VERBS_VERSION };
     }
 
-    const { forgetFactInFence } = await import('./facts/forget.ts');
-    // [ship P1.1] trust boundary: scope the forget to the caller's source, and
-    // for remote callers to world-visible facts only — a guessed global id
-    // can't expire facts outside the caller's source or reach private facts.
-    const result = await forgetFactInFence(ctx.engine, numericId, {
-      ...(reason ? { reason } : {}),
-      sourceId: ctx.sourceId ?? 'default',
-      worldOnly: ctx.remote !== false,
-    });
-
-    if (!result.ok && result.path === 'not_found') {
-      throw verbError(
-        'not_found',
-        `No fact with id "${rawId}".`,
-        'Ids come from remember/recall (facts[].fact_id). recall the entity first to find the right fact.',
-      );
-    }
-    if (!result.ok && result.path === 'already_expired') {
-      // Idempotent re-forget: success, nothing changed.
-      return {
-        id: rawId,
-        expired: false,
-        reason,
-        protocol_version: MEMORY_VERBS_VERSION,
-      };
-    }
-
-    return {
-      id: rawId,
-      expired: true,
-      reason,
-      protocol_version: MEMORY_VERBS_VERSION,
-    };
+    const { submitForgetMutation } = await import('./persistence/memory-mutations.ts');
+    return submitForgetMutation(ctx, 'forget', { ...p, id: rawId, ...(reason ? { reason } : {}) });
   },
   // NO cliHints: `gbrain forget` is a CLI_ONLY command (recall.ts runForget)
   // that dispatches BEFORE cliOps — a cliHint here would be silently

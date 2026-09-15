@@ -139,6 +139,9 @@ export async function forgetFactInFence(
   }
   const row = rows[0];
 
+  const { assertCoordinatedWrite } = await import('../persistence/context.ts');
+  await assertCoordinatedWrite(engine, row.source_id);
+
   // A stale source file or rebuilt index must not silently restore an exact
   // withdrawn claim. Intent commits independently of filesystem availability.
   await recordFactWithdrawal(engine, factId, row.source_id, opts.worldOnly === true);

@@ -6,6 +6,7 @@ import { materializePageSnapshot } from '../src/core/page-state/materialize.ts';
 import { assertPageRevision, PageRevisionConflictError } from '../src/core/page-state/types.ts';
 import { parseFactsFence } from '../src/core/facts-fence.ts';
 import { assertSafeE2eDatabaseUrl } from './helpers/db-guard.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 const sourceId = 'page-state-concurrency-test';
 const input = (body: string) => ({ type: 'note', title: 'Example', compiled_truth: body, timeline: 'Timeline', frontmatter: {} });
@@ -189,9 +190,7 @@ describe('canonical page state, both engines', () => {
   });
 
   test('scoped reads restore an enclosing transaction RLS binding', async () => {
-    const previous = process.env.GBRAIN_RLS_SCOPE_BINDING;
-    process.env.GBRAIN_RLS_SCOPE_BINDING = '1';
-    try {
+    await withEnv({ GBRAIN_RLS_SCOPE_BINDING: '1' }, async () => {
       for (const engine of engines.filter(e => e.kind === 'postgres')) {
         await engine.transaction(async tx => {
           await tx.executeRaw("SELECT set_config('app.scopes','original-scope',true)");
@@ -200,10 +199,7 @@ describe('canonical page state, both engines', () => {
           expect(binding[0].scopes).toBe('original-scope');
         });
       }
-    } finally {
-      if (previous === undefined) delete process.env.GBRAIN_RLS_SCOPE_BINDING;
-      else process.env.GBRAIN_RLS_SCOPE_BINDING = previous;
-    }
+    });
   });
 
   test('guard identity cannot survive deleting and recreating a source', async () => {
