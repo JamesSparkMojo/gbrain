@@ -289,6 +289,9 @@ describe('runEmbed --facts CLI branch', () => {
       [['--stale', '--facts', '--batch-size', 'abc'], 'abc'],
       [['--stale', '--facts', '--batch-size=-3'], '-3'],
       [['--stale', '--facts', '--batch-size'], ''],
+      // parseInt would have read these as 5 and 1.
+      [['--stale', '--facts', '--batch-size', '5abc'], '5abc'],
+      [['--stale', '--facts', '--batch-size', '1e3'], '1e3'],
     ];
     for (const [args, raw] of cases) {
       const run = await withCliCapture(() => runEmbed(engine, args));
@@ -312,6 +315,13 @@ describe('runEmbed --facts CLI branch', () => {
       expect(refused.result).toMatchObject({ lock_skipped: true, embedded: 0, failures: 0, total_chunks: 0, dryRun: false });
       expect(refused.stderr.join('\n')).toContain('another facts backfill is already running (all sources)');
       expect(refused.stdout).toEqual([]);
+      // --json under contention still prints one parseable object.
+      const refusedJson = await withCliCapture(() => runEmbed(engine, ['--stale', '--facts', '--json']));
+      expect(refusedJson.thrown).toBeUndefined();
+      expect(refusedJson.stdout.length).toBe(1);
+      expect(JSON.parse(refusedJson.stdout[0])).toEqual({
+        total_stale: 0, embedded: 0, would_embed: 0, failures: 0, failure_samples: [], dryRun: false, lock_skipped: true,
+      });
       expect(calls).toEqual([]);
       expect(await pendingCount()).toBe(2);
 
@@ -342,7 +352,7 @@ describe('runEmbed --facts CLI branch', () => {
 
   test('chunk-only flags are refused with the usage line, not silently ignored', async () => {
     await seedStaleFacts(1);
-    for (const extra of [['--pace'], ['--pace=gentle'], ['--pace-max-concurrency', '4'], ['--slugs', 'a'], ['--all'], ['--priority', 'recent'], ['--catch-up']]) {
+    for (const extra of [['--pace'], ['--pace=gentle'], ['--pace-max-concurrency', '4'], ['--slugs', 'a'], ['--all'], ['--priority', 'recent'], ['--catch-up'], ['--include-null-signature'], ['--no-embed']]) {
       const args = ['--stale', '--facts', '--dry-run', ...extra];
       const run = await withCliCapture(() => runEmbed(engine, args));
       expect(exitCode(run), args.join(' ')).toBe('__exit__1');
@@ -364,10 +374,13 @@ describe('runEmbed --facts CLI branch', () => {
     pinGateway({ OPENAI_API_KEY: 'sk-fake' });
     try {
       const run = await withEnv({ GBRAIN_EMBED_LOCK_HEARTBEAT_MS: '5' }, () =>
-        withCliCapture(() => runEmbed(engine, ['--stale', '--facts', '--batch-size', '1'])));
+        withCliCapture(() => runEmbed(engine, ['--stale', '--facts', '--batch-size', '1', '--json'])));
       expect(run.thrown).toBeUndefined();
       expect(run.result).toMatchObject({ lock_lost: true, failures: 0, total_chunks: 3 });
       expect(run.stderr.join('\n')).toContain('single-flight lock was stolen or released mid-run');
+      // The printed JSON carries the abort too.
+      expect(run.stdout.length).toBe(1);
+      expect(JSON.parse(run.stdout[0])).toMatchObject({ lock_lost: true, total_stale: 3, failures: 0 });
       // The drain stopped at the lost lock: one provider call, not three.
       expect(calls.length).toBe(1);
       expect(await pendingCount()).toBeGreaterThanOrEqual(2);

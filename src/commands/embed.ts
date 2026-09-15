@@ -384,10 +384,12 @@ export interface EmbedResult {
   chunkless_pages_healed: number;
   /**
    * Set when a single-flight run did NO work because another backfill holds
-   * the per-source embed lock. A hard-killed (SIGKILL/crash) run leaves its
-   * lock behind for up to EMBED_BACKFILL_LOCK_TTL_MIN — callers that promise
-   * "re-run to resume" (migrate embeddings) use this to say so instead of
-   * misreporting embed failures.
+   * the lock — the per-source chunk lock (`embedBackfillLockId(sourceId)`)
+   * or the global facts lock (`EMBED_FACTS_BACKFILL_LOCK_ID`). A hard-killed
+   * (SIGKILL/crash) run leaves its lock behind for up to
+   * EMBED_BACKFILL_LOCK_TTL_MIN — callers that promise "re-run to resume"
+   * (migrate embeddings) use this to say so instead of misreporting embed
+   * failures.
    */
   lock_skipped?: boolean;
   /**
@@ -891,8 +893,9 @@ function sourceFlag(args: string[]): string | undefined {
 function batchSizeFlag(args: string[]): number | undefined {
   const raw = flagValue(args, '--batch-size');
   if (raw === undefined) return undefined;
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isInteger(n) || n < 1) {
+  // Digits only: parseInt would accept `5abc` (5) and `1e3` (1).
+  const n = /^\d+$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(n) || n < 1) {
     serr(`Invalid --batch-size "${raw}". Expected a positive integer.`);
     process.exit(1);
   }
@@ -900,7 +903,7 @@ function batchSizeFlag(args: string[]): number | undefined {
 }
 
 /** Chunk-drain-only flags the facts branch refuses instead of silently ignoring. */
-const FACTS_REJECTED_FLAGS = ['--background', '--pace', '--pace-max-concurrency', '--slugs', '--all', '--priority', '--catch-up', '--include-null-signature'];
+const FACTS_REJECTED_FLAGS = ['--background', '--no-embed', '--pace', '--pace-max-concurrency', '--slugs', '--all', '--priority', '--catch-up', '--include-null-signature'];
 
 export async function runEmbed(engine: BrainEngine, args: string[]): Promise<EmbedResult | undefined> {
   // Keyless clean refusal — see isKeylessStaleRefusal. Checked BEFORE the
@@ -991,6 +994,10 @@ export async function runEmbed(engine: BrainEngine, args: string[]): Promise<Emb
       }
       if (lock === null) {
         serr(`  [embed] another facts backfill is already running (${scope}); skipping (single-flight).`);
+        // --json callers still get a parseable object (the EmbedFactsResult shape plus the flag).
+        if (args.includes('--json')) {
+          console.log(JSON.stringify({ total_stale: 0, embedded: 0, would_embed: 0, failures: 0, failure_samples: [], dryRun: false, lock_skipped: true }, null, 2));
+        }
         return { ...zero(), lock_skipped: true };
       }
       if (lock) heartbeat = startLockHeartbeat([lock], () => { lockLost = true; });
@@ -1015,7 +1022,7 @@ export async function runEmbed(engine: BrainEngine, args: string[]): Promise<Emb
           progressDone = done;
         },
       });
-      if (args.includes('--json')) console.log(JSON.stringify(r, null, 2));
+      if (args.includes('--json')) console.log(JSON.stringify({ ...r, ...(lockLost ? { lock_lost: true } : {}) }, null, 2));
       else if (dryRun) slog(`[dry-run] Would embed ${r.would_embed} active fact(s) (${scope})`);
       else {
         slog(`Embedded ${r.embedded} fact(s) (${scope}); ${r.total_stale - r.embedded} remain stale.`);
