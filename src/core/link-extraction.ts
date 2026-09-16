@@ -22,16 +22,21 @@ import { foldNonDecomposingLatin } from './latin-fold.ts';
 // #3190: pack-aware link typing. link-inference imports only manifest-v1
 // (zod) + redos-guard (node:vm) — no cycle back into this module.
 import type { SchemaPackManifest } from './schema-pack/manifest-v1.ts';
-import { inferLinkTypeFromPack, frontmatterLinkTypeFromPack } from './schema-pack/link-inference.ts';
+import {
+  inferLinkTypeFromPack,
+  frontmatterLinkTypeFromPack,
+  resolveIdentifierLinksFromPack,
+} from './schema-pack/link-inference.ts';
 import { PageRegexBudget } from './schema-pack/redos-guard.ts';
 
 /**
  * #3190: the slice of a schema-pack manifest link extraction consumes.
  * Callers thread the ACTIVE pack's manifest (loadActivePackForLocalEngine /
  * loadActivePackBestEffort → `.manifest`); null/undefined keeps the legacy
- * in-code inference exactly as before.
+ * in-code inference exactly as before. `identifier_links` added for the
+ * pack-declared identifier-link rules (see resolveIdentifierLinksFromPack).
  */
-export type LinkExtractionPack = Pick<SchemaPackManifest, 'link_types' | 'frontmatter_links'>;
+export type LinkExtractionPack = Pick<SchemaPackManifest, 'link_types' | 'frontmatter_links' | 'identifier_links'>;
 
 export { stripCodeBlocks } from './markdown-code.ts';
 export { parseInlineCitationTimelineEntries, type InlineCitationTimelineCandidate } from './timeline-citations.ts';
@@ -76,10 +81,11 @@ export { parseInlineCitationTimelineEntries, type InlineCitationTimelineCandidat
 // PRE-wave code after this date reads as fresh and won't re-extract until
 // the page is next edited; no fixed watermark can cover code that keeps
 // running past it.
-// 2026-09-16: bumped for two DB-path resolution fixes — a dir-prefixed link
-// needing the new ancestor-walk fallback, or bare-slug prose noise
-// (`pass/fail`) wrongly kept as a candidate pre-fix, must re-extract to
-// pick these up / drop them.
+// 2026-09-16: bumped for the identifier_links feature + two DB-path
+// resolution fixes — a page whose only references were bare identifiers
+// (DECISION-073), a dir-prefixed link needing the new ancestor-walk
+// fallback, or bare-slug prose noise (`pass/fail`) wrongly kept as a
+// candidate pre-fix must re-extract to pick these up / drop them.
 export const LINK_EXTRACTOR_VERSION_TS = '2026-09-16T00:00:00Z';
 
 // ─── Entity references ──────────────────────────────────────────
@@ -680,8 +686,9 @@ export async function extractPageLinks(
      * source). Optional and opt-in — batch DB callers (`extract links`,
      * `extract --stale`) already build this set once per run
      * (`allSlugs`) before looping pages, so passing it here is free; it
-     * powers the DB-path ancestor-walk fallback
-     * (`resolveWithAncestorFallback`) and — combined with
+     * powers three things when present: the DB-path ancestor-walk
+     * fallback (`resolveWithAncestorFallback`), pack `identifier_links`
+     * resolution (`resolveIdentifierLinksFromPack`), and — combined with
      * `knownTopLevelDirs` below — the bare-slug prose-noise gate. Callers
      * without a cheap full-slug picture (`put_page`'s single-page write,
      * the recency sweep) omit it and get the pre-existing permissive
@@ -937,6 +944,30 @@ export async function extractPageLinks(
       context,
       linkSource: 'markdown',
     });
+  }
+
+  // 2.5. Pack-declared identifier links (identifier_links[]). Corpora that
+  // cite by bare identifier (DECISION-073, ADR-0047, SPA-2442, a JIRA-style
+  // key) produce no candidates from passes 1/2 above — those all require
+  // slug-shaped text. Runs on the same code-stripped text as pass 2 (an
+  // identifier inside a fenced code sample is not a real reference) and
+  // shares pass 2's opt-in shape: a no-op unless the active pack declares
+  // rules AND the caller supplied opts.liveSlugs to resolve against. See
+  // resolveIdentifierLinksFromPack for the full resolution algorithm.
+  if (pack && pack.identifier_links.length > 0) {
+    const { candidates: idMatches } = resolveIdentifierLinksFromPack(
+      pack, strippedContent, opts.liveSlugs, packBudget,
+    );
+    for (const idm of idMatches) {
+      if (idm.targetSlug === slug) continue; // self-loop guard, matches passes 1/2
+      const context = excerpt(strippedContent, idm.index, 240);
+      candidates.push({
+        targetSlug: idm.targetSlug,
+        linkType: idm.linkType,
+        context,
+        linkSource: 'identifier',
+      });
+    }
   }
 
   // 3. Frontmatter-derived edges (v0.13). Includes the legacy `source:`
