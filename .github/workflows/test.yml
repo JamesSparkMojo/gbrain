@@ -38,6 +38,7 @@ jobs:
       # the committed .gitleaks.toml allowlist, and scans the same commit range.
       - name: Cache gitleaks tarball
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        if: false  # Measurement-only cold-cache run.
         with:
           path: /tmp/gitleaks-dl
           key: gitleaks-8.30.1-linux-x64
@@ -126,6 +127,7 @@ jobs:
       # admin/bun.lock is in the key because verify's check:admin-build
       # installs from it.
       - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        if: false  # Measurement-only cold-cache run.
         with:
           path: ~/.bun/install/cache
           key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock', 'admin/bun.lock') }}
@@ -134,6 +136,7 @@ jobs:
       # PGLite-booting eval checks — restore the cache so it's the ~40ms
       # freshness check, not a cold build ahead of all ~47 checks.
       - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        if: false  # Measurement-only cold-cache run.
         with:
           path: |
             test/fixtures/pglite-snapshot.tar
@@ -167,6 +170,7 @@ jobs:
         with:
           bun-version: 1.3.13
       - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        if: false  # Measurement-only cold-cache run.
         with:
           path: ~/.bun/install/cache
           key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -182,6 +186,7 @@ jobs:
       # jsonb-parity, selected-e2e, tier1, tier2, coverage-full-e2e) — edit
       # all together, or drift shows up only as silent rebuild cost.
       - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        if: false  # Measurement-only cold-cache run.
         id: snapshot-cache
         with:
           path: |
@@ -203,7 +208,7 @@ jobs:
           if-no-files-found: ignore
           overwrite: true
       - name: Save legacy snapshot (single writer)
-        if: success() && matrix.shard == 1
+        if: false  # Measurement-only cold-cache run.
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: |
@@ -239,11 +244,13 @@ jobs:
         with:
           bun-version: 1.3.13
       - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        if: false  # Measurement-only cold-cache run.
         with:
           path: ~/.bun/install/cache
           key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: bun-cache-${{ runner.os }}-
       - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        if: false  # Measurement-only cold-cache run.
         with:
           path: |
             test/fixtures/pglite-snapshot.tar
@@ -283,17 +290,20 @@ jobs:
         with:
           bun-version: 1.3.13
       - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        if: false  # Measurement-only cold-cache run.
         with:
           path: ~/.bun/install/cache
           key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: bun-cache-${{ runner.os }}-
       - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        if: false  # Measurement-only cold-cache run.
         with:
           path: |
             test/fixtures/pglite-snapshot.tar
             test/fixtures/pglite-snapshot.version
           key: pglite-snapshot-${{ runner.os }}-${{ hashFiles('src/core/migrate.ts', 'src/core/pglite-schema.ts', 'src/core/pglite-engine.ts', 'src/core/fts-language.ts', 'src/core/vector-index.ts', 'src/core/ai/defaults.ts', 'src/core/timeline-dedup-repair.ts', 'src/core/pages-upsert-arbiter.ts', 'src/core/link-extraction.ts', 'src/core/grants/*.ts', 'src/core/scope.ts', 'src/core/sql-query.ts', 'src/core/minions/tools/brain-allowlist.ts', 'src/core/facts/withdrawal-schema.ts', 'test/helpers/legacy-embedding-config.ts', 'scripts/build-pglite-snapshot.ts') }}
       - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        if: false  # Measurement-only cold-cache run.
         with:
           path: |
             test/fixtures/pglite-snapshot-default.tar
@@ -352,11 +362,13 @@ jobs:
         with:
           bun-version: 1.3.13
       - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        if: false  # Measurement-only cold-cache run.
         with:
           path: ~/.bun/install/cache
           key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: bun-cache-${{ runner.os }}-
       - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        if: false  # Measurement-only cold-cache run.
         with:
           path: |
             test/fixtures/pglite-snapshot-default.tar
@@ -388,11 +400,13 @@ jobs:
         with:
           bun-version: 1.3.13
       - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        if: false  # Measurement-only cold-cache run.
         with:
           path: ~/.bun/install/cache
           key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: bun-cache-${{ runner.os }}-
       - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        if: false  # Measurement-only cold-cache run.
         with:
           path: |
             test/fixtures/pglite-snapshot.tar
@@ -468,6 +482,7 @@ jobs:
         with:
           bun-version: 1.3.13
       - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        if: false  # Measurement-only cold-cache run.
         with:
           path: ~/.bun/install/cache
           key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -475,6 +490,7 @@ jobs:
       # Restore-only: test-shard.sh validates the snapshot's runtime hash and
       # rebuilds when stale (the serial-tests job is the designated saver).
       - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        if: false  # Measurement-only cold-cache run.
         with:
           path: |
             test/fixtures/pglite-snapshot.tar
@@ -528,6 +544,7 @@ jobs:
         with:
           bun-version: 1.3.13
       - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        if: false  # Measurement-only cold-cache run.
         with:
           path: ~/.bun/install/cache
           key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
