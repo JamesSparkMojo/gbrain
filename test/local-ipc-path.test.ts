@@ -265,24 +265,29 @@ describe.skipIf(process.platform !== 'win32')('Windows native IPC ownership', ()
     if (!existsSync(output)) throw new Error(await new Response(process.stderr).text());
     expect(readFileSync(output, 'utf8')).toBe('acquired');
   }
+  async function caseProbe(first: string, second: string) {
+    const probe = Bun.spawn(['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+      resolve(import.meta.dir, 'fixtures/windows-ipc-case-probe.ps1'), first, second], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
+    children.push(probe); probe.stdin.end();
+    const [probeExit, probeOutput, probeError] = await Promise.all([probe.exited, new Response(probe.stdout).text(), new Response(probe.stderr).text()]);
+    if (probeExit !== 0) throw new Error(probeError);
+    return JSON.parse(probeOutput);
+  }
   test('case, prefix and Unicode aliases reach one actual listener and share its claim', async () => {
-    const name = `gbrain-${randomUUID()}-σıé`, path = `\\\\.\\pipe\\${name}`;
+    const name = `gbrain-${randomUUID()}-σé`, path = `\\\\.\\pipe\\${name}`;
     const listener = await startPersistenceIpcServer(path, { brainId: BRAIN, dispatch: async () => ({}) });
     expect(listener).not.toBeNull(); track(listener!.server);
     // Prove the kernel-facing pipe alias before testing our hashed claim;
     // JavaScript casing alone cannot establish Windows namespace identity.
     const upperPath = `\\\\.\\pipe\\${name.toUpperCase()}`;
-    const probe = Bun.spawn(['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
-      resolve(import.meta.dir, 'fixtures/windows-ipc-case-probe.ps1'), 'σıé', 'ΣIÉ'], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
-    children.push(probe); probe.stdin.end();
-    const [probeExit, probeOutput, probeError] = await Promise.all([probe.exited, new Response(probe.stdout).text(), new Response(probe.stderr).text()]);
-    if (probeExit !== 0) throw new Error(probeError);
-    const casing = JSON.parse(probeOutput);
-    expect(casing.ordinal_result).toBeGreaterThan(0);
+    const casing = await caseProbe('σé', 'ΣÉ');
     let capability: Awaited<ReturnType<typeof requestPersistenceCapabilities>> | undefined;
     try { capability = await requestPersistenceCapabilities(upperPath); }
     finally { console.info('WINDOWS_IPC_CASE_PROBE', JSON.stringify({ ...casing, kernel_alias: capability?.brain_id === BRAIN })); }
     expect(capability?.brain_id).toBe(BRAIN);
+    expect(casing.ordinal_result).toBe(2);
+    expect(casing.first_nt_upper).toBe(casing.second_nt_upper);
+    expect(casing.first_locale_upper).toBe(casing.second_locale_upper);
     for (const alias of [`\\\\?\\PIPE\\${name.toUpperCase()}`, `//./pipe/${name.toUpperCase()}`, path]) {
       const contender = await claimLocalIpcBinding(alias);
       try { expect(contender).toBeNull(); } finally { await contender?.release(); }
@@ -290,6 +295,27 @@ describe.skipIf(process.platform !== 'win32')('Windows native IPC ownership', ()
     const closed = once(listener!.server, 'close'); listener!.close(); await closed;
     const next = await claimLocalIpcBinding(upperPath); expect(next).not.toBeNull();
     await next!.release(); await next!.release();
+  });
+  test('Windows-distinct dotless names retain separate actual providers and claims', async () => {
+    const name = `gbrain-${randomUUID()}-σıé`, firstPath = `\\\\.\\pipe\\${name}`, secondPath = `\\\\.\\pipe\\${name.toUpperCase()}`;
+    const secondBrain = '20000000-0000-4000-8000-000000000002';
+    const first = await startPersistenceIpcServer(firstPath, { brainId: BRAIN, dispatch: async () => ({}) });
+    expect(first).not.toBeNull(); track(first!.server);
+    const casing = await caseProbe('σıé', 'ΣIÉ');
+    await expect(requestPersistenceCapabilities(secondPath)).rejects.toMatchObject({ sent: false });
+    console.info('WINDOWS_IPC_CASE_PROBE', JSON.stringify({ ...casing, kernel_alias: false }));
+    expect(casing.ordinal_result).not.toBe(0);
+    expect(casing.ordinal_result).not.toBe(2);
+    expect(casing.first_nt_upper).not.toBe(casing.second_nt_upper);
+    expect(casing.first_locale_upper).not.toBe(casing.second_locale_upper);
+    const second = await startPersistenceIpcServer(secondPath, { brainId: secondBrain, dispatch: async () => ({}) });
+    expect(second).not.toBeNull(); track(second!.server);
+    expect((await requestPersistenceCapabilities(firstPath)).brain_id).toBe(BRAIN);
+    expect((await requestPersistenceCapabilities(secondPath)).brain_id).toBe(secondBrain);
+    for (const path of [firstPath, secondPath]) {
+      const contender = await claimLocalIpcBinding(path);
+      try { expect(contender).toBeNull(); } finally { await contender?.release(); }
+    }
   });
   test('two processes with distinct homes elect one actual pipe provider and survive owner death', async () => {
     const path = `\\\\.\\pipe\\gbrain-${randomUUID()}`, root = temporary(), barrier = join(root, 'start');

@@ -3,7 +3,6 @@
 #ifndef GBRAIN_WINDOWS_IPC_H
 #define GBRAIN_WINDOWS_IPC_H
 #include <bcrypt.h>
-#include <winternl.h>
 
 static char *ipc_argument(napi_env env, napi_callback_info info, lock_state **state, bool require_lock) {
   size_t expected = require_lock ? 2 : 1, argc = expected, length = 0;
@@ -58,30 +57,18 @@ static napi_value open_ipc_mutex(napi_env env, napi_callback_info info) {
   int converted = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name + 9, -1, wide, wide_count);
   free(name);
   if (!converted) { unsigned long error = GetLastError(); free(wide); return fail(env, "encode IPC name", error); }
-  /* Pipe names use the NT object namespace's upcase table, not a locale's
-   * linguistic casing. Resolve the documented user-mode Ntdll routine and
-   * keep both buffers caller-owned; a missing export must refuse the claim. */
-  size_t upper_bytes = (size_t)(wide_count - 1) * sizeof(wchar_t);
-  if (upper_bytes > UINT16_MAX) { free(wide); return fail(env, "normalize IPC name", ERROR_FILENAME_EXCED_RANGE); }
-  typedef NTSTATUS (NTAPI *upcase_unicode_string)(PUNICODE_STRING, PCUNICODE_STRING, BOOLEAN);
-  HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-  upcase_unicode_string upcase = ntdll ? (upcase_unicode_string)GetProcAddress(ntdll, "RtlUpcaseUnicodeString") : NULL;
-  if (!upcase) { free(wide); return fail(env, "load IPC name normalization", ERROR_PROC_NOT_FOUND); }
-  wchar_t *upper = malloc(upper_bytes);
-  if (!upper) { free(wide); return fail(env, "allocate", 0); }
-  UNICODE_STRING source = { .Length = (USHORT)upper_bytes, .MaximumLength = (USHORT)upper_bytes, .Buffer = wide };
-  UNICODE_STRING destination = { .Length = 0, .MaximumLength = (USHORT)upper_bytes, .Buffer = upper };
-  NTSTATUS normalized = upcase(&destination, &source, FALSE);
+  int upper_count = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_UPPERCASE, wide, wide_count - 1, NULL, 0, NULL, NULL, 0);
+  wchar_t *upper = upper_count > 0 ? malloc((size_t)upper_count * sizeof(wchar_t)) : NULL;
+  if (!upper) { unsigned long error = GetLastError(); free(wide); return fail(env, "normalize IPC name", error); }
+  int normalized = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_UPPERCASE, wide, wide_count - 1, upper, upper_count, NULL, NULL, 0);
   free(wide);
-  if (normalized < 0 || destination.Length != upper_bytes) {
-    free(upper); return fail(env, "normalize IPC name", normalized < 0 ? (unsigned long)normalized : ERROR_INVALID_DATA);
-  }
+  if (!normalized) { unsigned long error = GetLastError(); free(upper); return fail(env, "normalize IPC name", error); }
   unsigned char digest[32];
   BCRYPT_ALG_HANDLE algorithm = NULL;
   BCRYPT_HASH_HANDLE hash = NULL;
   NTSTATUS status = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0);
   if (status >= 0) status = BCryptCreateHash(algorithm, &hash, NULL, 0, NULL, 0, 0);
-  if (status >= 0) status = BCryptHashData(hash, (PUCHAR)upper, (ULONG)upper_bytes, 0);
+  if (status >= 0) status = BCryptHashData(hash, (PUCHAR)upper, (ULONG)((size_t)upper_count * sizeof(wchar_t)), 0);
   if (status >= 0) status = BCryptFinishHash(hash, digest, sizeof(digest), 0);
   if (hash) BCryptDestroyHash(hash);
   if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
